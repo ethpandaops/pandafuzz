@@ -1,0 +1,93 @@
+version: '3.8'
+
+# Alternative docker-compose without web UI build
+# Use this if the web UI build is failing
+
+services:
+  # Master server (API only)
+  master:
+    build:
+      context: .
+      dockerfile: Dockerfile.noweb
+      target: master
+    container_name: pandafuzz-master
+    restart: unless-stopped
+    ports:
+      - "8080:8080"  # API port
+      - "9090:9090"  # Metrics port
+    volumes:
+      - master-data:/app/data
+      - ./master.yaml:/app/master.yaml:ro
+    environment:
+      - PANDAFUZZ_LOG_LEVEL=info
+    networks:
+      - pandafuzz
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Web UI development server (optional)
+  web:
+    image: node:18-alpine
+    container_name: pandafuzz-web
+    working_dir: /app
+    command: sh -c "npm install --legacy-peer-deps && npm start"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./web:/app
+    environment:
+      - REACT_APP_API_URL=http://master:8080
+    networks:
+      - pandafuzz
+    depends_on:
+      - master
+    profiles:
+      - web
+
+  # Bot instances remain the same
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.noweb
+      target: bot
+    restart: unless-stopped
+    depends_on:
+      master:
+        condition: service_healthy
+    volumes:
+      - ./bot.yaml:/app/bot.yaml:ro
+      - bot-work:/app/work
+    environment:
+      - MASTER_URL=http://master:8080
+      - PANDAFUZZ_LOG_LEVEL=info
+      - AFL_SKIP_CPUFREQ=1
+      - AFL_NO_AFFINITY=1
+    networks:
+      - pandafuzz
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_PTRACE
+
+networks:
+  pandafuzz:
+    driver: bridge
+
+volumes:
+  master-data:
+    driver: local
+  bot-work:
+    driver: local

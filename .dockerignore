@@ -1,0 +1,58 @@
+# Git files
+.git
+.gitignore
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+pandafuzz-master
+pandafuzz-bot
+
+# Test files
+*_test.go
+tests/
+*.test
+
+# Development files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation
+docs/
+*.md
+LICENSE
+
+# Data and logs
+data/
+logs/
+work/
+*.db
+*.log
+
+# Docker files (avoid recursion)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Coverage files
+*.out
+coverage.*
+.coverage
+
+# Vendor (if not using vendor mode)
+# vendor/

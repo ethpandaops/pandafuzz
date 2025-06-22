@@ -1,0 +1,59 @@
+# Dockerfile without web UI build (API only)
+# Use this if web UI build is causing issues
+
+# Build stage for Go binaries
+FROM golang:1.22-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git make gcc musl-dev sqlite-dev
+
+# Set working directory
+WORKDIR /build
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build binaries
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o pandafuzz-master ./cmd/master
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o pandafuzz-bot ./cmd/bot
+
+# Runtime stage for master
+FROM alpine:3.19 AS master
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates sqlite-libs
+
+# Create non-root user
+RUN addgroup -g 1000 pandafuzz && \
+    adduser -D -u 1000 -G pandafuzz pandafuzz
+
+# Create necessary directories
+RUN mkdir -p /app/data /app/logs && \
+    chown -R pandafuzz:pandafuzz /app
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /build/pandafuzz-master /app/
+COPY --from=builder /build/master.yaml /app/
+
+# Note: Web UI not included - run separately or build manually
+
+# Switch to non-root user
+USER pandafuzz
+
+# Expose ports
+EXPOSE 8080 9090
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+
+# Run master
+CMD ["./pandafuzz-master", "-config", "master.yaml"]

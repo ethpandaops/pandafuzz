@@ -1,0 +1,133 @@
+# PandaFuzz Bot Configuration
+# This file configures fuzzing bot agents that execute fuzzing jobs
+
+# Bot identification
+id: ""                    # Bot ID (auto-generated if empty)
+name: "pandafuzz-bot"     # Human-readable bot name
+
+# Master server configuration
+master_url: "http://localhost:8080"  # URL of the master server
+
+# Bot capabilities
+capabilities:
+  - "afl++"               # AFL++ fuzzer support
+  - "libfuzzer"           # LibFuzzer support
+  # - "honggfuzz"         # Honggfuzz support (if available)
+  # - "custom"            # Custom fuzzer support
+
+# Working directory
+work_directory: "./work"  # Directory for fuzzing operations
+
+# Resource limits
+resources:
+  max_cpu: 80             # Maximum CPU usage percentage
+  max_memory: 2048        # Maximum memory in MB
+  max_disk_space: 10737418240  # Maximum disk space in bytes (10GB)
+  reserved_cpu: 10        # Reserved CPU for system (percentage)
+  reserved_memory: 512    # Reserved memory for system (MB)
+
+# Retry configuration
+retry:
+  max_retries: 5
+  initial_delay: "1s"
+  max_delay: "60s"
+  multiplier: 2.0
+  # Communication-specific retry policy
+  communication:
+    max_retries: 5
+    initial_delay: "1s"
+    max_delay: "60s"
+    multiplier: 2.0
+    jitter: true
+    retryable_errors:
+      - "connection refused"
+      - "timeout"
+      - "EOF"
+      - "temporary failure"
+  # Update recovery retry policy
+  update_recovery:
+    max_retries: 10
+    initial_delay: "5s"
+    max_delay: "5m"
+    multiplier: 1.5
+    jitter: true
+
+# Timeout configuration
+timeouts:
+  master_communication: "30s"  # Timeout for master API calls
+  heartbeat_interval: "30s"    # Interval for sending heartbeats
+  job_execution: "24h"         # Maximum job execution time
+  fuzzer_startup: "60s"        # Maximum time for fuzzer startup
+  result_upload: "5m"          # Timeout for uploading results
+
+# Fuzzer configurations
+fuzzers:
+  afl++:
+    binary_path: "afl-fuzz"    # Path to afl-fuzz binary
+    enable_cmplog: true        # Enable CmpLog mode
+    enable_autodictionary: true # Enable auto-dictionary
+    deterministic: false       # Run deterministic stage
+    power_schedule: "fast"     # Power schedule (explore, fast, coe, lin, quad)
+    
+  libfuzzer:
+    max_len: 4096             # Maximum input length
+    use_value_profile: true   # Enable value profiling
+    use_counters: true        # Use coverage counters
+    shrink: true              # Shrink inputs
+    reduce_inputs: true       # Reduce corpus
+    
+  # honggfuzz:
+  #   threads: 4              # Number of fuzzing threads
+  #   mutations_per_run: 6    # Mutations per run
+  #   enable_sanitizers: true # Enable sanitizers
+
+# Execution configuration
+execution:
+  parallel_jobs: 1            # Number of parallel fuzzing jobs
+  cpu_affinity: true          # Enable CPU affinity
+  isolation_mode: "process"   # Isolation mode (process, container, vm)
+  clean_workspace: true       # Clean workspace after job
+  preserve_crashes: true      # Preserve crash inputs locally
+  compress_artifacts: true    # Compress artifacts before upload
+
+# Monitoring configuration
+monitoring:
+  stats_interval: "10s"       # Statistics reporting interval
+  resource_check_interval: "30s" # Resource usage check interval
+  enable_profiling: false     # Enable CPU/memory profiling
+  profile_path: "./profiles"  # Path for profile data
+
+# Security configuration
+security:
+  sandbox_enabled: true       # Enable sandboxing
+  sandbox_type: "seccomp"     # Sandbox type (seccomp, apparmor, none)
+  drop_privileges: true       # Drop privileges after start
+  run_as_user: ""            # User to run fuzzers as
+  run_as_group: ""           # Group to run fuzzers as
+
+# Logging configuration
+logging:
+  level: "info"              # Log level (debug, info, warn, error)
+  format: "json"             # Log format (text, json)
+  output: "stdout"           # Log output (stdout, file)
+  # file_path: "./logs/bot.log"
+  max_size: 100              # Max log file size in MB
+  max_backups: 5             # Max number of log backups
+  max_age: 7                 # Max age of log files in days
+  
+# Feature flags
+features:
+  enable_coverage_reporting: true  # Send coverage reports to master
+  enable_crash_dedup: true        # Local crash deduplication
+  enable_auto_update: false       # Auto-update bot software
+  enable_metrics: true            # Collect performance metrics
+  enable_telemetry: false         # Send telemetry to master
+  enable_corpus_minimization: true # Minimize corpus before sync
+  enable_input_trimming: true     # Trim inputs to reduce size
+  
+# Development/debug options
+debug:
+  dry_run: false             # Run without executing fuzzers
+  save_all_inputs: false     # Save all generated inputs
+  verbose_fuzzer_output: false # Show fuzzer stdout/stderr
+  enable_trace_logging: false  # Enable trace-level logging

@@ -1,0 +1,165 @@
+version: '3.8'
+
+services:
+  # Master server with Web UI
+  master:
+    build:
+      context: .
+      target: master
+    container_name: pandafuzz-master
+    restart: unless-stopped
+    ports:
+      - "8088:8080"  # Web UI and API port (changed from 8080 to avoid conflicts)
+      - "9090:9090"  # Metrics port
+    volumes:
+      - master-data:/app/data
+      - ./master.yaml:/app/master.yaml:ro
+    environment:
+      - PANDAFUZZ_LOG_LEVEL=info
+    networks:
+      - pandafuzz
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Bot instances (scale as needed)
+  bot:
+    build:
+      context: .
+      target: bot
+    restart: unless-stopped
+    depends_on:
+      master:
+        condition: service_healthy
+    volumes:
+      - ./bot-docker.yaml:/app/bot.yaml:ro
+      - bot-work:/app/work
+    environment:
+      - PANDAFUZZ_LOG_LEVEL=info
+      - AFL_SKIP_CPUFREQ=1
+      - AFL_NO_AFFINITY=1
+    networks:
+      - pandafuzz
+    deploy:
+      replicas: 2  # Number of bot instances
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    security_opt:
+      - seccomp:unconfined  # Required for some fuzzers
+    cap_add:
+      - SYS_PTRACE  # Required for debugging crashes
+
+  # Development bot with more tools
+  bot-dev:
+    build:
+      context: .
+      target: development
+    container_name: pandafuzz-bot-dev
+    restart: unless-stopped
+    depends_on:
+      master:
+        condition: service_healthy
+    volumes:
+      - ./bot-docker.yaml:/app/bot.yaml:ro
+      - bot-dev-work:/app/work
+      - ./:/workspace  # Mount source code for development
+    environment:
+      - PANDAFUZZ_LOG_LEVEL=debug
+      - PANDAFUZZ_DEV=true
+    networks:
+      - pandafuzz
+    profiles:
+      - development
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_PTRACE
+      - SYS_ADMIN  # For advanced debugging
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: pandafuzz-prometheus
+    restart: unless-stopped
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - pandafuzz
+    profiles:
+      - monitoring
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pandafuzz-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - pandafuzz
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+  # PostgreSQL database (alternative to SQLite)
+  postgres:
+    image: postgres:16-alpine
+    container_name: pandafuzz-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=pandafuzz
+      - POSTGRES_USER=pandafuzz
+      - POSTGRES_PASSWORD=changeme
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - pandafuzz
+    profiles:
+      - postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pandafuzz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  pandafuzz:
+    driver: bridge
+
+volumes:
+  master-data:
+    driver: local
+  bot-work:
+    driver: local
+  bot-dev-work:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  postgres-data:
+    driver: local
