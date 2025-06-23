@@ -93,19 +93,27 @@ RUN apk add --no-cache \
     g++ \
     musl-dev \
     clang \
+    clang-dev \
     llvm \
+    llvm-dev \
     compiler-rt \
     python3 \
+    python3-dev \
     py3-pip \
     libstdc++ \
     # AFL++ dependencies
     automake \
     autoconf \
     libtool \
+    gmp-dev \
+    zlib-dev \
     # Additional tools
     wget \
     curl \
     file
+
+# Set LLVM_CONFIG for AFL++ build
+ENV LLVM_CONFIG=llvm-config
 
 # Install AFL++
 RUN git clone https://github.com/AFLplusplus/AFLplusplus.git /tmp/aflplusplus && \
@@ -158,7 +166,13 @@ RUN apk add --no-cache \
     valgrind \
     perf-tools \
     tcpdump \
-    netcat-openbsd
+    netcat-openbsd \
+    # Ensure all AFL++ dependencies are present
+    clang-dev \
+    llvm-dev \
+    python3-dev \
+    gmp-dev \
+    zlib-dev
 
 # Install Go for development
 COPY --from=builder /usr/local/go /usr/local/go
