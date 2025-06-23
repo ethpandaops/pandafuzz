@@ -35,13 +35,16 @@ func NewBotService(
 }
 
 // RegisterBot registers a new bot
-func (s *botService) RegisterBot(ctx context.Context, hostname string, name string, capabilities []string) (*common.Bot, error) {
+func (s *botService) RegisterBot(ctx context.Context, hostname string, name string, capabilities []string, apiEndpoint string) (*common.Bot, error) {
 	// Validate input
 	if hostname == "" {
 		return nil, errors.NewValidationError("register_bot", "Hostname is required")
 	}
 	if len(capabilities) == 0 {
 		return nil, errors.NewValidationError("register_bot", "Capabilities are required")
+	}
+	if apiEndpoint == "" {
+		return nil, errors.NewValidationError("register_bot", "API endpoint is required")
 	}
 
 	// Create new bot
@@ -66,6 +69,7 @@ func (s *botService) RegisterBot(ctx context.Context, hostname string, name stri
 		TimeoutAt:    timeout,
 		IsOnline:     true,
 		FailureCount: 0,
+		APIEndpoint:  apiEndpoint,
 	}
 
 	// Save bot with retry

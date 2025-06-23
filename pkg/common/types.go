@@ -18,6 +18,7 @@ type Bot struct {
 	TimeoutAt    time.Time `json:"timeout_at" db:"timeout_at"`
 	IsOnline     bool      `json:"is_online" db:"is_online"`
 	FailureCount int       `json:"failure_count" db:"failure_count"`
+	APIEndpoint  string    `json:"api_endpoint" db:"api_endpoint"` // Bot's API endpoint for polling
 }
 
 type BotStatus string

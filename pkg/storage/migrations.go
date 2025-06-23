@@ -23,6 +23,12 @@ func GetMigrations() []Migration {
 			Up:          normalizeSchemaUp,
 			Down:        normalizeSchemaDown,
 		},
+		{
+			ID:          "002_add_bot_api_endpoint",
+			Description: "Add api_endpoint column to bots table for polling",
+			Up:          addBotAPIEndpointUp,
+			Down:        addBotAPIEndpointDown,
+		},
 	}
 }
 
@@ -177,4 +183,45 @@ func MigrateExistingData(db *sql.DB) error {
 	// 3. Parsing corpus files from JSON and inserting into corpus_files
 
 	return tx.Commit()
+}
+
+// addBotAPIEndpointUp adds the api_endpoint column to bots table
+func addBotAPIEndpointUp(tx *sql.Tx) error {
+	// Check if column already exists
+	var count int
+	err := tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('bots') 
+		WHERE name = 'api_endpoint'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for api_endpoint column: %w", err)
+	}
+	
+	if count > 0 {
+		return nil // Column already exists
+	}
+	
+	// Add the api_endpoint column
+	if _, err := tx.Exec(`
+		ALTER TABLE bots ADD COLUMN api_endpoint TEXT DEFAULT ''
+	`); err != nil {
+		return fmt.Errorf("failed to add api_endpoint column: %w", err)
+	}
+	
+	// Create index for api_endpoint
+	if _, err := tx.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_bots_api_endpoint ON bots(api_endpoint)
+	`); err != nil {
+		return fmt.Errorf("failed to create api_endpoint index: %w", err)
+	}
+	
+	return nil
+}
+
+// addBotAPIEndpointDown removes the api_endpoint column from bots table
+func addBotAPIEndpointDown(tx *sql.Tx) error {
+	// SQLite doesn't support dropping columns directly
+	// We would need to recreate the table without the column
+	// For simplicity, we'll just leave the column as is
+	return nil
 }

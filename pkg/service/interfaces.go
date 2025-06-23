@@ -10,7 +10,7 @@ import (
 // BotService handles bot-related business logic
 type BotService interface {
 	// RegisterBot registers a new bot
-	RegisterBot(ctx context.Context, hostname string, name string, capabilities []string) (*common.Bot, error)
+	RegisterBot(ctx context.Context, hostname string, name string, capabilities []string, apiEndpoint string) (*common.Bot, error)
 	
 	// GetBot retrieves a bot by ID
 	GetBot(ctx context.Context, botID string) (*common.Bot, error)

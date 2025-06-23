@@ -19,6 +19,7 @@ type BotRegisterRequest struct {
 	Hostname     string   `json:"hostname" validate:"required"`
 	Name         string   `json:"name,omitempty"`
 	Capabilities []string `json:"capabilities" validate:"required"`
+	APIEndpoint  string   `json:"api_endpoint" validate:"required"` // Bot's API endpoint for polling
 }
 
 // BotRegisterResponse represents a bot registration response
@@ -63,7 +64,7 @@ func (s *Server) handleBotRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Use service layer
-	bot, err := s.services.Bot.RegisterBot(r.Context(), req.Hostname, req.Name, req.Capabilities)
+	bot, err := s.services.Bot.RegisterBot(r.Context(), req.Hostname, req.Name, req.Capabilities, req.APIEndpoint)
 	if err != nil {
 		s.responseWriter.WriteError(w, err)
 		return

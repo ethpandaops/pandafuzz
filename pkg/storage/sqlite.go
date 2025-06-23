@@ -88,6 +88,7 @@ func (s *SQLiteStorage) createTables() error {
 	-- Bots table
 	CREATE TABLE IF NOT EXISTS bots (
 		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
 		hostname TEXT NOT NULL,
 		status TEXT NOT NULL,
 		last_seen DATETIME NOT NULL,
@@ -97,6 +98,7 @@ func (s *SQLiteStorage) createTables() error {
 		timeout_at DATETIME NOT NULL,
 		is_online BOOLEAN DEFAULT FALSE,
 		failure_count INTEGER DEFAULT 0,
+		api_endpoint TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);

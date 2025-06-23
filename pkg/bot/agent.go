@@ -29,6 +29,17 @@ type Agent struct {
 	running         bool
 	stats           AgentStats
 	lastHeartbeat   time.Time
+	
+	// API server for master polling
+	apiServer         *APIServer
+	ID                string
+	jobStartTime      time.Time
+	startTime         time.Time
+	version           string
+	jobsCompleted     int64
+	jobsFailed        int64
+	totalCrashes      int64
+	currentJobCrashes int
 }
 
 // AgentStats tracks bot agent statistics
@@ -73,6 +84,9 @@ func NewAgent(config *common.BotConfig) (*Agent, error) {
 			StartTime:     time.Now(),
 			CurrentStatus: "initialized",
 		},
+		ID:        config.ID,
+		startTime: time.Now(),
+		version:   "1.0.0", // TODO: Get from build info
 	}, nil
 }
 
@@ -94,6 +108,14 @@ func (a *Agent) Start() error {
 	if err := a.registerWithMaster(); err != nil {
 		return common.NewSystemError("register_with_master", err)
 	}
+	
+	// Start API server for master polling
+	apiPort := 9000 + (int(a.config.ID[len(a.config.ID)-1]) % 1000) // Use last char of ID to determine port
+	a.apiServer = NewAPIServer(a, apiPort)
+	if err := a.apiServer.Start(); err != nil {
+		return common.NewSystemError("start_api_server", err)
+	}
+	a.logger.WithField("api_port", apiPort).Info("Started bot API server")
 	
 	// Start heartbeat
 	a.startHeartbeat()
@@ -188,7 +210,12 @@ func (a *Agent) processWorkCycle() {
 func (a *Agent) registerWithMaster() error {
 	a.logger.Info("Registering with master")
 	
-	response, err := a.client.RegisterBot(a.config.ID, a.config.Capabilities)
+	// Determine the API endpoint for this bot
+	apiPort := 9000 + (int(a.config.ID[len(a.config.ID)-1]) % 1000)
+	hostname, _ := os.Hostname()
+	apiEndpoint := fmt.Sprintf("http://%s:%d", hostname, apiPort)
+	
+	response, err := a.client.RegisterBot(a.config.ID, a.config.Capabilities, apiEndpoint)
 	if err != nil {
 		a.stats.ConnectionErrors++
 		return err
@@ -339,6 +366,8 @@ func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 // executeJob executes a fuzzing job
 func (a *Agent) executeJob(job *common.Job) {
 	startTime := time.Now()
+	a.jobStartTime = startTime
+	a.currentJobCrashes = 0
 	a.stats.CurrentStatus = "executing_job"
 	
 	a.logger.WithField("job_id", job.ID).Info("Starting job execution")
@@ -423,11 +452,33 @@ func (a *Agent) completeCurrentJob(success bool, message string) {
 		a.logger.WithField("job_id", job.ID).Warn("No log file found to push")
 	}
 	
-	// Notify master of job completion
-	err := a.client.CompleteJob(a.config.ID, success, message)
-	if err != nil {
-		a.logger.WithError(err).Error("Failed to notify master of job completion")
-		a.stats.ConnectionErrors++
+	// Update API server cache with job status
+	if a.apiServer != nil {
+		output := fmt.Sprintf("Job completed: %s", message)
+		logPath := filepath.Join(job.WorkDir, "job.log")
+		if _, err := os.Stat(logPath); err == nil {
+			// Try to read last few lines of log
+			// TODO: Implement tail functionality
+			output = fmt.Sprintf("%s\nLog: %s", output, logPath)
+		}
+		a.apiServer.MarkJobCompleted(job.ID, success, message, output)
+	}
+	
+	// Try to notify master of job completion, but don't block on failure
+	// The master will poll the bot's API to get the status
+	go func() {
+		err := a.client.CompleteJob(a.config.ID, success, message)
+		if err != nil {
+			a.logger.WithError(err).Warn("Failed to notify master of job completion (master will poll for status)")
+			a.stats.ConnectionErrors++
+		}
+	}()
+	
+	// Update stats
+	if success {
+		a.jobsCompleted++
+	} else {
+		a.jobsFailed++
 	}
 	
 	// Stop job execution
@@ -452,6 +503,8 @@ func (a *Agent) ReportCrash(crash *common.CrashResult) error {
 	}
 	
 	a.stats.CrashesReported++
+	a.currentJobCrashes++
+	a.totalCrashes++
 	return nil
 }
 

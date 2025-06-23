@@ -20,6 +20,7 @@ type Server struct {
 	state            *PersistentState
 	timeoutManager   *TimeoutManager
 	recoveryManager  *RecoveryManager
+	botPoller        *BotPoller
 	services         *service.Manager
 	httpServer       *http.Server
 	router           *mux.Router
@@ -129,6 +130,14 @@ func (s *Server) Start() error {
 		}
 	}
 	
+	// Start bot poller
+	if s.botPoller != nil {
+		s.logger.Info("Starting bot poller")
+		if err := s.botPoller.Start(); err != nil {
+			return common.NewSystemError("start_bot_poller", err)
+		}
+	}
+	
 	// Start server in background
 	go func() {
 		s.logger.WithFields(logrus.Fields{
@@ -168,6 +177,14 @@ func (s *Server) Stop() error {
 	// Create shutdown context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer cancel()
+	
+	// Stop bot poller
+	if s.botPoller != nil {
+		s.logger.Info("Stopping bot poller")
+		if err := s.botPoller.Stop(); err != nil {
+			s.logger.WithError(err).Error("Error stopping bot poller")
+		}
+	}
 	
 	// Graceful shutdown
 	if err := s.httpServer.Shutdown(ctx); err != nil {
@@ -213,4 +230,6 @@ func (s *Server) SetRecoveryManager(rm *RecoveryManager) {
 	s.recoveryManager = rm
 	// Initialize services after recovery manager is set
 	s.services = service.NewManager(s.state, s.timeoutManager, s.recoveryManager, s.config, s.logger)
+	// Initialize bot poller with 10 second interval
+	s.botPoller = NewBotPoller(s.state, s.services, s.logger, 10*time.Second)
 }

@@ -88,11 +88,12 @@ func NewRetryClient(config *common.BotConfig) (*RetryClient, error) {
 }
 
 // RegisterBot registers the bot with the master
-func (rc *RetryClient) RegisterBot(botID string, capabilities []string) (*BotRegisterResponse, error) {
+func (rc *RetryClient) RegisterBot(botID string, capabilities []string, apiEndpoint string) (*BotRegisterResponse, error) {
 	request := map[string]interface{}{
 		"hostname":     rc.getHostname(),
 		"name":         rc.config.Name,
 		"capabilities": capabilities,
+		"api_endpoint": apiEndpoint,
 	}
 	
 	var response BotRegisterResponse
