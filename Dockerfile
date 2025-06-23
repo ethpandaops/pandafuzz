@@ -11,7 +11,7 @@ COPY web/package*.json ./
 # Clean install with dependency resolution
 RUN rm -f package-lock.json && \
     npm cache clean --force && \
-    npm install --legacy-peer-deps
+    npm install --legacy-peer-deps --force
 
 COPY web/ ./
 
