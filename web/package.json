@@ -41,9 +41,10 @@
     "typescript": "^5.0.4"
   },
   "overrides": {
+    "fork-ts-checker-webpack-plugin": "^6.5.3",
+    "schema-utils": "^4.0.0",
     "ajv": "^8.11.0",
-    "ajv-keywords": "^5.0.0",
-    "ajv-formats": "^2.1.1"
+    "ajv-keywords": "^5.0.0"
   },
   "eslintConfig": {
     "extends": [
