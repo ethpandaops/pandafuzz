@@ -1,20 +1,22 @@
 # Multi-stage Dockerfile for PandaFuzz
 
 # Build stage for web UI
-FROM node:18-alpine AS web-builder
+FROM node:16-alpine AS web-builder
 
 WORKDIR /build
 
 # Copy web source
 COPY web/package*.json ./
 
-# Install dependencies using package-lock.json for consistency
-RUN npm ci --legacy-peer-deps
+# Install dependencies with clean install
+RUN npm install --legacy-peer-deps
 
 COPY web/ ./
 
 # Set NODE_OPTIONS to increase memory limit for build
 ENV NODE_OPTIONS="--max-old-space-size=2048"
+ENV SKIP_PREFLIGHT_CHECK=true
+ENV GENERATE_SOURCEMAP=false
 
 RUN npm run build
 
