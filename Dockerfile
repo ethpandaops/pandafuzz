@@ -8,10 +8,8 @@ WORKDIR /build
 # Copy web source
 COPY web/package*.json ./
 
-# Clean install with dependency resolution
-RUN rm -f package-lock.json && \
-    npm cache clean --force && \
-    npm install --legacy-peer-deps --force
+# Install dependencies using package-lock.json for consistency
+RUN npm ci --legacy-peer-deps
 
 COPY web/ ./
 
