@@ -170,16 +170,19 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 
 	rje.writeLog(execution.LogWriter, "info", "afl++", "Preparing AFL++ execution")
 
+	// Use the local binary path instead of job.Target which is on master
+	localBinaryPath := filepath.Join(job.WorkDir, "target_binary")
+	
 	// Check if target exists
-	if _, err := os.Stat(job.Target); os.IsNotExist(err) {
-		msg := fmt.Sprintf("Target binary not found: %s", job.Target)
+	if _, err := os.Stat(localBinaryPath); os.IsNotExist(err) {
+		msg := fmt.Sprintf("Target binary not found at local path: %s (original: %s)", localBinaryPath, job.Target)
 		rje.writeLog(execution.LogWriter, "error", "system", msg)
 		execution.LogWriter.Flush()
 		return false, msg, nil
 	}
 	
 	// Check if target is executable
-	fileInfo, err := os.Stat(job.Target)
+	fileInfo, err := os.Stat(localBinaryPath)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to stat target binary: %v", err)
 		rje.writeLog(execution.LogWriter, "error", "system", msg)
@@ -189,7 +192,7 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 	
 	// Check execution permissions
 	if fileInfo.Mode().Perm()&0111 == 0 {
-		msg := fmt.Sprintf("Target binary is not executable: %s (mode: %v)", job.Target, fileInfo.Mode())
+		msg := fmt.Sprintf("Target binary is not executable: %s (mode: %v)", localBinaryPath, fileInfo.Mode())
 		rje.writeLog(execution.LogWriter, "error", "system", msg)
 		execution.LogWriter.Flush()
 		return false, msg, nil
@@ -197,7 +200,7 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 	
 	// Test if binary runs at all
 	rje.writeLog(execution.LogWriter, "info", "system", "Testing target binary...")
-	testCmd := exec.Command(job.Target)
+	testCmd := exec.Command(localBinaryPath)
 	testCmd.Dir = job.WorkDir
 	testOutput, testErr := testCmd.CombinedOutput()
 	
@@ -230,7 +233,7 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 	}
 
 	// Add target
-	args = append(args, "--", job.Target)
+	args = append(args, "--", localBinaryPath)
 	// TODO: Add support for target arguments when they're added to the Job struct
 
 	// Create command
@@ -398,9 +401,12 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 
 	rje.writeLog(execution.LogWriter, "info", "libfuzzer", "Starting LibFuzzer execution")
 
+	// Use the local binary path instead of job.Target which is on master
+	localBinaryPath := filepath.Join(job.WorkDir, "target_binary")
+	
 	// Check if target exists
-	if _, err := os.Stat(job.Target); os.IsNotExist(err) {
-		msg := fmt.Sprintf("Target binary not found: %s", job.Target)
+	if _, err := os.Stat(localBinaryPath); os.IsNotExist(err) {
+		msg := fmt.Sprintf("Target binary not found at local path: %s (original: %s)", localBinaryPath, job.Target)
 		rje.writeLog(execution.LogWriter, "error", "system", msg)
 		execution.LogWriter.Flush()
 		return false, msg, nil
@@ -408,7 +414,7 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 
 	// Test if binary runs
 	rje.writeLog(execution.LogWriter, "info", "system", "Testing target binary...")
-	testCmd := exec.Command(job.Target)
+	testCmd := exec.Command(localBinaryPath)
 	testCmd.Dir = job.WorkDir
 	testOutput, testErr := testCmd.CombinedOutput()
 	
@@ -442,7 +448,7 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 	args = append(args, fmt.Sprintf("-max_total_time=%d", int(duration.Seconds())))
 
 	// Create command
-	cmd := exec.CommandContext(execution.Context, job.Target, args...)
+	cmd := exec.CommandContext(execution.Context, localBinaryPath, args...)
 	cmd.Dir = job.WorkDir
 
 	// Capture output
@@ -463,7 +469,7 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 	execution.Process = cmd
 
 	// Start command
-	rje.writeLog(execution.LogWriter, "info", "libfuzzer", fmt.Sprintf("Starting LibFuzzer with command: %s %s", job.Target, strings.Join(args, " ")))
+	rje.writeLog(execution.LogWriter, "info", "libfuzzer", fmt.Sprintf("Starting LibFuzzer with command: %s %s", localBinaryPath, strings.Join(args, " ")))
 	
 	if err := cmd.Start(); err != nil {
 		msg := fmt.Sprintf("Failed to start LibFuzzer: %v", err)
