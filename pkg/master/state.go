@@ -284,6 +284,9 @@ func (ps *PersistentState) AtomicJobAssignmentWithRetry(botID string) (*common.J
 			job.AssignedBot = &botID
 			job.StartedAt = &now
 			
+			// Set the work directory for the bot
+			job.WorkDir = fmt.Sprintf("/tmp/pandafuzz/job_%s", job.ID)
+			
 			// Update bot status
 			bot.Status = common.BotStatusBusy
 			bot.CurrentJob = &job.ID
