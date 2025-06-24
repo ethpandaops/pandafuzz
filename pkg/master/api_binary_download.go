@@ -37,6 +37,15 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 
 	// Get binary path
 	binaryPath := job.Target
+	originalPath := binaryPath
+	
+	// Log initial binary path
+	s.logger.WithFields(logrus.Fields{
+		"job_id": jobID,
+		"bot_id": botID,
+		"target_path": binaryPath,
+		"is_absolute": filepath.IsAbs(binaryPath),
+	}).Debug("Attempting to download binary")
 	
 	// If the path is relative, check in storage
 	if !filepath.IsAbs(binaryPath) {
@@ -44,6 +53,10 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 		storagePath := filepath.Join(s.config.Storage.BasePath, binaryPath)
 		if _, err := os.Stat(storagePath); err == nil {
 			binaryPath = storagePath
+			s.logger.WithFields(logrus.Fields{
+				"original_path": originalPath,
+				"resolved_path": binaryPath,
+			}).Debug("Resolved relative path to storage path")
 		} else {
 			// Try without storage prefix
 			if strings.HasPrefix(binaryPath, "storage/") {
@@ -51,6 +64,10 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 				storagePath = filepath.Join(s.config.Storage.BasePath, trimmedPath)
 				if _, err := os.Stat(storagePath); err == nil {
 					binaryPath = storagePath
+					s.logger.WithFields(logrus.Fields{
+						"original_path": originalPath,
+						"resolved_path": binaryPath,
+					}).Debug("Resolved storage-prefixed path")
 				}
 			}
 		}
@@ -63,10 +80,17 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 			"job_id": jobID,
 			"bot_id": botID,
 			"binary_path": binaryPath,
+			"original_path": originalPath,
+			"storage_base": s.config.Storage.BasePath,
 		}).Error("Failed to open binary file")
 		
 		if os.IsNotExist(err) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Binary file not found", nil)
+			// Provide detailed error information
+			errorMsg := fmt.Sprintf("Binary file not found at path: %s", binaryPath)
+			if originalPath != binaryPath {
+				errorMsg += fmt.Sprintf(" (original path: %s)", originalPath)
+			}
+			s.writeErrorResponse(w, http.StatusNotFound, errorMsg, nil)
 		} else {
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to open binary file", err)
 		}

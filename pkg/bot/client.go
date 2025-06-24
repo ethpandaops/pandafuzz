@@ -513,9 +513,23 @@ func (rc *RetryClient) DownloadJobBinary(jobID, botID string, targetPath string)
 				return fmt.Errorf("failed to write binary: %v", err)
 			}
 			
+			// Verify we actually wrote something
+			if written == 0 {
+				file.Close()
+				os.Remove(targetPath)
+				return fmt.Errorf("downloaded binary is empty (0 bytes)")
+			}
+			
 			// Make binary executable
 			if err := os.Chmod(targetPath, 0755); err != nil {
 				return fmt.Errorf("failed to make binary executable: %v", err)
+			}
+			
+			// Verify file exists after download
+			if stat, err := os.Stat(targetPath); err != nil {
+				return fmt.Errorf("binary file missing after download: %v", err)
+			} else if stat.Size() != written {
+				return fmt.Errorf("binary size mismatch: wrote %d bytes but file is %d bytes", written, stat.Size())
 			}
 			
 			rc.logger.WithFields(logrus.Fields{

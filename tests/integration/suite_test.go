@@ -144,10 +144,10 @@ func BenchmarkJobAssignment(b *testing.B) {
 		job := jobs[i]
 		job.Status = common.JobStatusAssigned
 		job.AssignedBot = &bot.ID
-		env.state.SaveJob(job)
+		env.state.SaveJobWithRetry(job)
 		
 		// Reset for next iteration
 		job.Status = common.JobStatusCompleted
-		env.state.SaveJob(job)
+		env.state.SaveJobWithRetry(job)
 	}
 }

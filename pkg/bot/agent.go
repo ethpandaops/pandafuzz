@@ -338,6 +338,13 @@ func (a *Agent) requestNewJob() {
 func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 	a.logger.WithField("job_id", job.ID).Info("Preparing job for execution")
 	
+	// Create work directory first
+	if err := os.MkdirAll(job.WorkDir, 0755); err != nil {
+		a.logger.WithError(err).WithField("work_dir", job.WorkDir).Error("Failed to create work directory")
+		a.completeCurrentJob(false, fmt.Sprintf("Failed to create work directory: %v", err))
+		return
+	}
+	
 	// Always download binary from master since the path refers to the master's filesystem
 	localBinaryPath := filepath.Join(job.WorkDir, "target_binary")
 	a.logger.WithFields(logrus.Fields{
@@ -351,6 +358,47 @@ func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 		a.completeCurrentJob(false, fmt.Sprintf("Failed to download binary: %v", err))
 		return
 	}
+	
+	// Verify binary was actually downloaded
+	if _, err := os.Stat(localBinaryPath); os.IsNotExist(err) {
+		a.logger.WithFields(logrus.Fields{
+			"job_id": job.ID,
+			"expected_path": localBinaryPath,
+		}).Error("Binary download succeeded but file does not exist")
+		a.completeCurrentJob(false, "Binary download verification failed: file not found")
+		return
+	}
+	
+	// Verify binary is executable
+	fileInfo, err := os.Stat(localBinaryPath)
+	if err != nil {
+		a.logger.WithError(err).Error("Failed to stat downloaded binary")
+		a.completeCurrentJob(false, fmt.Sprintf("Failed to verify binary: %v", err))
+		return
+	}
+	
+	// Check if file has execute permissions
+	if fileInfo.Mode().Perm()&0111 == 0 {
+		a.logger.WithFields(logrus.Fields{
+			"job_id": job.ID,
+			"path": localBinaryPath,
+			"mode": fileInfo.Mode(),
+		}).Warn("Downloaded binary is not executable, attempting to fix permissions")
+		
+		// Try to make it executable
+		if err := os.Chmod(localBinaryPath, 0755); err != nil {
+			a.logger.WithError(err).Error("Failed to make binary executable")
+			a.completeCurrentJob(false, fmt.Sprintf("Failed to make binary executable: %v", err))
+			return
+		}
+	}
+	
+	a.logger.WithFields(logrus.Fields{
+		"job_id": job.ID,
+		"local_path": localBinaryPath,
+		"size": fileInfo.Size(),
+		"mode": fileInfo.Mode(),
+	}).Info("Binary download verified successfully")
 	
 	// Update job target to local path
 	job.Target = localBinaryPath
