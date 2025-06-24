@@ -212,8 +212,24 @@ func (a *Agent) registerWithMaster() error {
 	
 	// Determine the API endpoint for this bot
 	apiPort := 9000 + (int(a.config.ID[len(a.config.ID)-1]) % 1000)
+	
+	// In Docker, use the container's hostname which is accessible within the Docker network
 	hostname, _ := os.Hostname()
-	apiEndpoint := fmt.Sprintf("http://%s:%d", hostname, apiPort)
+	var apiEndpoint string
+	
+	// Check if we're running in Docker by looking for common Docker environment variables
+	if _, inDocker := os.LookupEnv("HOSTNAME"); inDocker {
+		// In Docker, the hostname is the container ID which is accessible within the network
+		apiEndpoint = fmt.Sprintf("http://%s:%d", hostname, apiPort)
+		a.logger.WithFields(logrus.Fields{
+			"hostname": hostname,
+			"port": apiPort,
+			"endpoint": apiEndpoint,
+		}).Info("Bot API endpoint (Docker)")
+	} else {
+		// For non-Docker environments, use localhost
+		apiEndpoint = fmt.Sprintf("http://localhost:%d", apiPort)
+	}
 	
 	response, err := a.client.RegisterBot(a.config.ID, a.config.Capabilities, apiEndpoint)
 	if err != nil {

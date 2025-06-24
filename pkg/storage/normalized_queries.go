@@ -19,11 +19,11 @@ func (s *SQLiteStorage) SaveBotWithCapabilities(bot *common.Bot) error {
 	// Save bot
 	_, err = tx.Exec(`
 		INSERT OR REPLACE INTO bots (
-			id, hostname, status, last_seen, registered_at, 
-			current_job, timeout_at, is_online, failure_count
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, bot.ID, bot.Hostname, bot.Status, bot.LastSeen, bot.RegisteredAt,
-		bot.CurrentJob, bot.TimeoutAt, bot.IsOnline, bot.FailureCount)
+			id, name, hostname, status, last_seen, registered_at, 
+			current_job, timeout_at, is_online, failure_count, api_endpoint
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, bot.ID, bot.Name, bot.Hostname, bot.Status, bot.LastSeen, bot.RegisteredAt,
+		bot.CurrentJob, bot.TimeoutAt, bot.IsOnline, bot.FailureCount, bot.APIEndpoint)
 	if err != nil {
 		return fmt.Errorf("failed to save bot: %w", err)
 	}

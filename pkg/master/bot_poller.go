@@ -299,12 +299,15 @@ func (p *BotPoller) updateBotStatus(bot *common.Bot, health *BotHealthStatus) {
 
 // updateJobStatus updates job status based on bot's report
 func (p *BotPoller) updateJobStatus(bot *common.Bot, jobStatus *BotJobStatus) {
-	if jobStatus.Status != "completed" {
-		return // Only process completed jobs
+	if jobStatus.Status != "completed" && jobStatus.Status != "failed" {
+		return // Only process completed or failed jobs
 	}
 	
+	// Determine success based on status
+	success := jobStatus.Status == "completed" && jobStatus.Success
+	
 	// Complete the job
-	err := p.services.Job.CompleteJob(p.ctx, jobStatus.JobID, bot.ID, jobStatus.Success)
+	err := p.services.Job.CompleteJob(p.ctx, jobStatus.JobID, bot.ID, success)
 	if err != nil {
 		p.logger.WithError(err).WithFields(logrus.Fields{
 			"bot_id": bot.ID,
@@ -316,9 +319,10 @@ func (p *BotPoller) updateJobStatus(bot *common.Bot, jobStatus *BotJobStatus) {
 	p.logger.WithFields(logrus.Fields{
 		"bot_id":  bot.ID,
 		"job_id":  jobStatus.JobID,
-		"success": jobStatus.Success,
+		"status":  jobStatus.Status,
+		"success": success,
 		"message": jobStatus.Message,
-	}).Info("Job completed via polling")
+	}).Info("Job status updated via polling")
 }
 
 // handlePollError handles polling errors with backoff

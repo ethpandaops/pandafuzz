@@ -44,7 +44,7 @@ services:
     networks:
       - pandafuzz
     deploy:
-      replicas: 2  # Number of bot instances
+      replicas: 1  # Number of bot instances
       resources:
         limits:
           cpus: '2'
