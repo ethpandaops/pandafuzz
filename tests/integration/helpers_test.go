@@ -124,7 +124,7 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 
 	timeoutMgr := master.NewTimeoutManager(state, masterConfig)
 	recoveryMgr := master.NewRecoveryManager(state, timeoutMgr, masterConfig)
-	server := master.NewServer(masterConfig, state, timeoutMgr)
+	server := master.NewServer(masterConfig, state, timeoutMgr, nil)
 
 	// Create HTTP client with shorter timeout for tests
 	httpClient := &http.Client{

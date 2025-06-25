@@ -13,7 +13,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    "healthy",
 		"timestamp": time.Now(),
 		"uptime":    time.Since(s.stats.StartTime),
-		"version":   "1.0.0", // TODO: Get from build info
+		"version":   s.version,
+		"build_time": s.buildTime,
+		"git_commit": s.gitCommit,
 	}
 	
 	// Check component health

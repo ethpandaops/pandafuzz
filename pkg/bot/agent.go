@@ -347,6 +347,13 @@ func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 	
 	// Always download binary from master since the path refers to the master's filesystem
 	localBinaryPath := filepath.Join(job.WorkDir, "target_binary")
+	
+	// Remove any existing file to avoid confusion
+	if _, err := os.Stat(localBinaryPath); err == nil {
+		a.logger.WithField("path", localBinaryPath).Warn("Removing existing target_binary before download")
+		os.Remove(localBinaryPath)
+	}
+	
 	a.logger.WithFields(logrus.Fields{
 		"job_id": job.ID,
 		"remote_path": job.Target,
@@ -354,28 +361,52 @@ func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 	}).Info("Downloading binary from master")
 	
 	if err := a.client.DownloadJobBinary(job.ID, a.config.ID, localBinaryPath); err != nil {
-		a.logger.WithError(err).Error("Failed to download binary")
+		a.logger.WithError(err).WithFields(logrus.Fields{
+			"job_id": job.ID,
+			"bot_id": a.config.ID,
+			"target_path": localBinaryPath,
+		}).Error("Failed to download binary")
 		a.completeCurrentJob(false, fmt.Sprintf("Failed to download binary: %v", err))
 		return
 	}
 	
+	a.logger.WithFields(logrus.Fields{
+		"job_id": job.ID,
+		"local_path": localBinaryPath,
+	}).Info("Binary download completed, verifying file existence")
+	
 	// Verify binary was actually downloaded
-	if _, err := os.Stat(localBinaryPath); os.IsNotExist(err) {
+	stat, err := os.Stat(localBinaryPath)
+	if os.IsNotExist(err) {
 		a.logger.WithFields(logrus.Fields{
 			"job_id": job.ID,
 			"expected_path": localBinaryPath,
 		}).Error("Binary download succeeded but file does not exist")
 		a.completeCurrentJob(false, "Binary download verification failed: file not found")
 		return
-	}
-	
-	// Verify binary is executable
-	fileInfo, err := os.Stat(localBinaryPath)
-	if err != nil {
-		a.logger.WithError(err).Error("Failed to stat downloaded binary")
-		a.completeCurrentJob(false, fmt.Sprintf("Failed to verify binary: %v", err))
+	} else if err != nil {
+		a.logger.WithError(err).WithField("path", localBinaryPath).Error("Failed to stat binary file")
+		a.completeCurrentJob(false, fmt.Sprintf("Failed to stat binary: %v", err))
 		return
 	}
+	
+	// Check file details
+	a.logger.WithFields(logrus.Fields{
+		"job_id": job.ID,
+		"path": localBinaryPath,
+		"size": stat.Size(),
+		"mode": stat.Mode().String(),
+		"is_regular": stat.Mode().IsRegular(),
+	}).Info("Binary file details")
+	
+	if stat.Size() == 0 {
+		a.logger.Error("Downloaded binary is empty (0 bytes)")
+		a.completeCurrentJob(false, "Downloaded binary is empty")
+		return
+	}
+	
+	// fileInfo is already set from stat above
+	fileInfo := stat
 	
 	// Check if file has execute permissions
 	if fileInfo.Mode().Perm()&0111 == 0 {

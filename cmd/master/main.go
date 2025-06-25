@@ -120,8 +120,15 @@ func main() {
 		logger.WithError(err).Error("Recovery failed, continuing anyway")
 	}
 	
+	// Create version info
+	versionInfo := &common.VersionInfo{
+		Version:   version,
+		BuildTime: buildTime,
+		GitCommit: gitCommit,
+	}
+	
 	// Create HTTP server
-	server := master.NewServer(config, state, timeoutMgr)
+	server := master.NewServer(config, state, timeoutMgr, versionInfo)
 	
 	// Set recovery manager on server to avoid circular dependency
 	server.SetRecoveryManager(recoveryMgr)

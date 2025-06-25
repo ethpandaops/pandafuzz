@@ -1,0 +1,56 @@
+# Dockerfile for building the vulnerable target program on Alpine
+FROM alpine:3.19
+
+# Install build tools
+RUN apk add --no-cache \
+    build-base \
+    clang \
+    clang-dev \
+    compiler-rt
+
+# Create directory for the target
+RUN mkdir -p /targets
+
+# Copy and compile the vulnerable program
+COPY vulnerable_program.c /targets/
+WORKDIR /targets
+
+# Compile with AFL++ instrumentation (for AFL++ fuzzing)
+RUN clang -g -O1 -fsanitize=address vulnerable_program.c -o vulnerable_afl
+
+# Also compile a version for libfuzzer
+RUN echo '#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+void vulnerable_function(char *input);
+
+int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+    if (Size > 255) Size = 255;
+    char input[256];
+    memcpy(input, Data, Size);
+    input[Size] = 0;
+    vulnerable_function(input);
+    return 0;
+}' > libfuzzer_harness.c
+
+# Include the vulnerable function in libfuzzer build
+RUN sed -n '/^void vulnerable_function/,/^}/p' vulnerable_program.c > vulnerable_func.c
+RUN clang -g -O1 -fsanitize=fuzzer,address libfuzzer_harness.c vulnerable_func.c -o vulnerable_libfuzzer
+
+# Create initial seed corpus
+RUN mkdir -p /corpus && \
+    echo "test" > /corpus/seed1.txt && \
+    echo "hello" > /corpus/seed2.txt && \
+    echo "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" > /corpus/seed3.txt && \
+    echo "0123456789BUG" > /corpus/seed4.txt
+
+# Create a dictionary file with interesting tokens
+RUN echo '"CRASH"' > /targets/vuln.dict && \
+    echo '"BUG"' >> /targets/vuln.dict && \
+    echo '"AAAA"' >> /targets/vuln.dict && \
+    echo '"\\x00"' >> /targets/vuln.dict && \
+    echo '"\\xff"' >> /targets/vuln.dict
+
+CMD ["/bin/sh"]

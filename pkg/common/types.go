@@ -5,6 +5,13 @@ import (
 	"time"
 )
 
+// VersionInfo contains build version information
+type VersionInfo struct {
+	Version   string `json:"version"`
+	BuildTime string `json:"build_time"`
+	GitCommit string `json:"git_commit"`
+}
+
 // Bot management
 type Bot struct {
 	ID           string    `json:"id" db:"id"`

@@ -30,7 +30,27 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 
 	// Verify bot authorization
 	botID := r.Header.Get("X-Bot-ID")
-	if botID == "" || job.AssignedBot == nil || *job.AssignedBot != botID {
+	if botID == "" {
+		s.logger.WithField("job_id", jobID).Error("Binary download request missing X-Bot-ID header")
+		s.writeErrorResponse(w, http.StatusForbidden, "Bot ID header required", nil)
+		return
+	}
+	
+	if job.AssignedBot == nil {
+		s.logger.WithFields(logrus.Fields{
+			"job_id": jobID,
+			"bot_id": botID,
+		}).Error("Job has no assigned bot")
+		s.writeErrorResponse(w, http.StatusForbidden, "Job not assigned to any bot", nil)
+		return
+	}
+	
+	if *job.AssignedBot != botID {
+		s.logger.WithFields(logrus.Fields{
+			"job_id": jobID,
+			"requesting_bot": botID,
+			"assigned_bot": *job.AssignedBot,
+		}).Error("Bot not authorized for this job")
 		s.writeErrorResponse(w, http.StatusForbidden, "Unauthorized to download binary for this job", nil)
 		return
 	}

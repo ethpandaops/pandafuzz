@@ -10,6 +10,11 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
+# Export for docker-compose
+export VERSION
+export BUILD_TIME
+export GIT_COMMIT
+
 # Build flags
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.gitCommit=$(GIT_COMMIT)"
 

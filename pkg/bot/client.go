@@ -473,6 +473,13 @@ func (rc *RetryClient) PushJobLogs(jobID, botID string, logFilePath string) erro
 func (rc *RetryClient) DownloadJobBinary(jobID, botID string, targetPath string) error {
 	url := fmt.Sprintf("%s/api/v1/jobs/%s/binary/download", rc.masterURL, jobID)
 	
+	rc.logger.WithFields(logrus.Fields{
+		"job_id": jobID,
+		"bot_id": botID,
+		"url": url,
+		"target_path": targetPath,
+	}).Info("Starting binary download")
+	
 	var downloadErr error
 	err := rc.retryManager.Execute(func() error {
 		req, err := http.NewRequest("GET", url, nil)
@@ -489,6 +496,13 @@ func (rc *RetryClient) DownloadJobBinary(jobID, botID string, targetPath string)
 			}
 			defer resp.Body.Close()
 			
+			rc.logger.WithFields(logrus.Fields{
+				"job_id": jobID,
+				"bot_id": botID,
+				"status": resp.StatusCode,
+				"content_length": resp.ContentLength,
+			}).Debug("Binary download response received")
+			
 			if resp.StatusCode != http.StatusOK {
 				body, _ := io.ReadAll(resp.Body)
 				return fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(body))
@@ -500,6 +514,9 @@ func (rc *RetryClient) DownloadJobBinary(jobID, botID string, targetPath string)
 				return fmt.Errorf("failed to create target directory: %v", err)
 			}
 			
+			// Remove any existing file first
+			os.Remove(targetPath)
+			
 			// Create target file
 			file, err := os.Create(targetPath)
 			if err != nil {
@@ -510,7 +527,16 @@ func (rc *RetryClient) DownloadJobBinary(jobID, botID string, targetPath string)
 			// Copy content
 			written, err := io.Copy(file, resp.Body)
 			if err != nil {
+				file.Close()
+				os.Remove(targetPath)
 				return fmt.Errorf("failed to write binary: %v", err)
+			}
+			
+			// Flush to disk
+			if err := file.Sync(); err != nil {
+				file.Close()
+				os.Remove(targetPath)
+				return fmt.Errorf("failed to sync binary to disk: %v", err)
 			}
 			
 			// Verify we actually wrote something
@@ -520,8 +546,12 @@ func (rc *RetryClient) DownloadJobBinary(jobID, botID string, targetPath string)
 				return fmt.Errorf("downloaded binary is empty (0 bytes)")
 			}
 			
+			// Close file before chmod
+			file.Close()
+			
 			// Make binary executable
 			if err := os.Chmod(targetPath, 0755); err != nil {
+				os.Remove(targetPath)
 				return fmt.Errorf("failed to make binary executable: %v", err)
 			}
 			
@@ -545,9 +575,33 @@ func (rc *RetryClient) DownloadJobBinary(jobID, botID string, targetPath string)
 	})
 	
 	if err != nil {
+		rc.logger.WithError(err).WithFields(logrus.Fields{
+			"job_id": jobID,
+			"bot_id": botID,
+			"target_path": targetPath,
+		}).Error("Binary download failed")
 		return fmt.Errorf("failed to download binary: %v", err)
 	}
-	return downloadErr
+	
+	if downloadErr != nil {
+		rc.logger.WithError(downloadErr).WithFields(logrus.Fields{
+			"job_id": jobID,
+			"bot_id": botID,
+			"target_path": targetPath,
+		}).Error("Binary download error")
+		return downloadErr
+	}
+	
+	// Final verification
+	if stat, err := os.Stat(targetPath); err != nil {
+		rc.logger.WithError(err).WithField("target_path", targetPath).Error("Binary file not found after download")
+		return fmt.Errorf("binary file not found after download: %v", err)
+	} else if stat.Size() == 0 {
+		rc.logger.WithField("target_path", targetPath).Error("Binary file is empty after download")
+		return fmt.Errorf("binary file is empty after download")
+	}
+	
+	return nil
 }
 
 // DownloadJobCorpus downloads the seed corpus for a job

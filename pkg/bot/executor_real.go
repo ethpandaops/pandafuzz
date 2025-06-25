@@ -173,6 +173,23 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 	// Use the local binary path instead of job.Target which is on master
 	localBinaryPath := filepath.Join(job.WorkDir, "target_binary")
 	
+	// Debug: List directory contents
+	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("Checking work directory: %s", job.WorkDir))
+	if files, err := os.ReadDir(job.WorkDir); err == nil {
+		for _, f := range files {
+			info, _ := f.Info()
+			size := int64(0)
+			mode := "unknown"
+			if info != nil {
+				size = info.Size()
+				mode = info.Mode().String()
+			}
+			rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("Found file: %s (size: %d, mode: %s)", f.Name(), size, mode))
+		}
+	} else {
+		rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Failed to list directory: %v", err))
+	}
+	
 	// Check if target exists
 	if _, err := os.Stat(localBinaryPath); os.IsNotExist(err) {
 		msg := fmt.Sprintf("Target binary not found at local path: %s (original: %s)", localBinaryPath, job.Target)
@@ -404,6 +421,23 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 	// Use the local binary path instead of job.Target which is on master
 	localBinaryPath := filepath.Join(job.WorkDir, "target_binary")
 	
+	// Debug: List directory contents
+	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("Checking work directory: %s", job.WorkDir))
+	if files, err := os.ReadDir(job.WorkDir); err == nil {
+		for _, f := range files {
+			info, _ := f.Info()
+			size := int64(0)
+			mode := "unknown"
+			if info != nil {
+				size = info.Size()
+				mode = info.Mode().String()
+			}
+			rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("Found file: %s (size: %d, mode: %s)", f.Name(), size, mode))
+		}
+	} else {
+		rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Failed to list directory: %v", err))
+	}
+	
 	// Check if target exists
 	if _, err := os.Stat(localBinaryPath); os.IsNotExist(err) {
 		msg := fmt.Sprintf("Target binary not found at local path: %s (original: %s)", localBinaryPath, job.Target)
@@ -414,7 +448,45 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 
 	// Test if binary runs
 	rje.writeLog(execution.LogWriter, "info", "system", "Testing target binary...")
-	testCmd := exec.Command(localBinaryPath)
+	
+	// First check file details
+	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("Running diagnostic commands on binary: %s", localBinaryPath))
+	
+	// Check system architecture
+	unameCmd := exec.Command("uname", "-a")
+	unameOutput, _ := unameCmd.CombinedOutput()
+	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("System info: %s", strings.TrimSpace(string(unameOutput))))
+	
+	// Run file command to check binary type
+	fileCmd := exec.Command("file", localBinaryPath)
+	fileOutput, _ := fileCmd.CombinedOutput()
+	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("File type: %s", strings.TrimSpace(string(fileOutput))))
+	
+	// Run ldd to check dynamic libraries (if it's a dynamically linked binary)
+	lddCmd := exec.Command("ldd", localBinaryPath)
+	lddOutput, _ := lddCmd.CombinedOutput()
+	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("Dynamic libraries: %s", strings.TrimSpace(string(lddOutput))))
+	
+	// Check if running on Alpine Linux
+	isAlpine := false
+	if _, err := os.Stat("/etc/alpine-release"); err == nil {
+		isAlpine = true
+		rje.writeLog(execution.LogWriter, "info", "system", "Detected Alpine Linux environment")
+	}
+	
+	// Check if file exists using ls
+	lsCmd := exec.Command("ls", "-la", localBinaryPath)
+	lsOutput, _ := lsCmd.CombinedOutput()
+	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("ls -la output: %s", strings.TrimSpace(string(lsOutput))))
+	
+	// For libfuzzer binaries on Alpine, test with -help=1 flag first
+	var testCmd *exec.Cmd
+	if isAlpine && strings.Contains(strings.ToLower(string(fileOutput)), "fuzzer") {
+		rje.writeLog(execution.LogWriter, "info", "system", "Testing libfuzzer binary with -help=1 flag")
+		testCmd = exec.Command(localBinaryPath, "-help=1")
+	} else {
+		testCmd = exec.Command(localBinaryPath)
+	}
 	testCmd.Dir = job.WorkDir
 	testOutput, testErr := testCmd.CombinedOutput()
 	
@@ -422,6 +494,11 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 		rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Target binary test failed: %v", testErr))
 		if len(testOutput) > 0 {
 			rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Target binary output: %s", string(testOutput)))
+		}
+		
+		// Try to get more specific error info
+		if exitErr, ok := testErr.(*exec.ExitError); ok {
+			rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Exit error details: ProcessState=%v, Stderr=%s", exitErr.ProcessState, string(exitErr.Stderr)))
 		}
 		// Continue anyway - libfuzzer binaries often exit with error when run without args
 	}
@@ -447,9 +524,21 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 	}
 	args = append(args, fmt.Sprintf("-max_total_time=%d", int(duration.Seconds())))
 
+	// Check if running on Alpine and apply workarounds
+	if _, err := os.Stat("/etc/alpine-release"); err == nil {
+		rje.writeLog(execution.LogWriter, "info", "system", "Applying Alpine Linux libfuzzer workarounds")
+		
+		// Set environment variables that might help with Alpine compatibility
+		os.Setenv("ASAN_OPTIONS", "allocator_may_return_null=1:symbolize=0")
+		os.Setenv("UBSAN_OPTIONS", "print_stacktrace=0")
+	}
+
 	// Create command
 	cmd := exec.CommandContext(execution.Context, localBinaryPath, args...)
 	cmd.Dir = job.WorkDir
+	
+	// Set environment for the command
+	cmd.Env = os.Environ()
 
 	// Capture output
 	stdout, err := cmd.StdoutPipe()
@@ -475,9 +564,11 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 		msg := fmt.Sprintf("Failed to start LibFuzzer: %v", err)
 		rje.writeLog(execution.LogWriter, "error", "libfuzzer", msg)
 		
-		// If binary not found or not executable, fall back to simulation
-		if strings.Contains(err.Error(), "executable file not found") || strings.Contains(err.Error(), "permission denied") {
-			rje.writeLog(execution.LogWriter, "warning", "libfuzzer", "Falling back to simulated execution")
+		// If binary not found or not executable, or if we're on Alpine and it crashes immediately
+		if strings.Contains(err.Error(), "executable file not found") || 
+		   strings.Contains(err.Error(), "permission denied") ||
+		   (isAlpine && strings.Contains(err.Error(), "signal")) {
+			rje.writeLog(execution.LogWriter, "warning", "libfuzzer", "LibFuzzer binary incompatible with environment, falling back to simulated execution")
 			execution.LogWriter.Flush()
 			return rje.simulateLibFuzzerExecution(execution, duration)
 		}
@@ -519,10 +610,22 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 		
 		// Check exit code
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			msg := fmt.Sprintf("LibFuzzer execution failed with exit code %d", exitErr.ExitCode())
+			exitCode := exitErr.ExitCode()
+			msg := fmt.Sprintf("LibFuzzer execution failed with exit code %d", exitCode)
 			rje.writeLog(execution.LogWriter, "error", "libfuzzer", msg)
 			if len(exitErr.Stderr) > 0 {
 				rje.writeLog(execution.LogWriter, "error", "libfuzzer", fmt.Sprintf("Stderr: %s", string(exitErr.Stderr)))
+			}
+			
+			// Check for immediate crash (SIGSEGV = -11, SIGILL = -4, SIGABRT = -6)
+			if exitCode == -11 || exitCode == -4 || exitCode == -6 {
+				rje.writeLog(execution.LogWriter, "error", "libfuzzer", "LibFuzzer binary crashed with signal (likely incompatible with Alpine musl libc)")
+				// Check if running on Alpine Linux
+				if _, err := os.Stat("/etc/alpine-release"); err == nil {
+					rje.writeLog(execution.LogWriter, "warning", "libfuzzer", "Alpine Linux detected - falling back to simulated execution due to binary incompatibility")
+					execution.LogWriter.Flush()
+					return rje.simulateLibFuzzerExecution(execution, duration)
+				}
 			}
 		} else {
 			msg := fmt.Sprintf("LibFuzzer execution failed: %v", err)

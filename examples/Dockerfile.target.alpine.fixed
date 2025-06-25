@@ -1,0 +1,121 @@
+# Dockerfile for building the vulnerable target program on Alpine with libfuzzer fix
+FROM alpine:3.19
+
+# Install build tools and runtime dependencies
+RUN apk add --no-cache \
+    build-base \
+    clang \
+    clang-dev \
+    compiler-rt \
+    llvm \
+    llvm-dev \
+    clang-libs \
+    libc++-dev \
+    libc++ \
+    # Additional runtime libraries that might be needed
+    libgcc \
+    libstdc++ \
+    musl-dev
+
+# Create directory for the target
+RUN mkdir -p /targets
+
+# Copy and compile the vulnerable program
+COPY vulnerable_program.c /targets/
+WORKDIR /targets
+
+# Compile with AFL++ instrumentation (for AFL++ fuzzing)
+RUN clang -g -O1 -fsanitize=address vulnerable_program.c -o vulnerable_afl
+
+# Create a libfuzzer harness with proper initialization
+RUN echo '#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+void vulnerable_function(char *input);
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+    if (Size > 255) Size = 255;
+    char input[256];
+    memcpy(input, Data, Size);
+    input[Size] = 0;
+    vulnerable_function(input);
+    return 0;
+}' > libfuzzer_harness.c
+
+# Include the vulnerable function in libfuzzer build
+RUN sed -n '/^void vulnerable_function/,/^}/p' vulnerable_program.c > vulnerable_func.c
+
+# Try different compilation strategies for libfuzzer
+# Method 1: Standard compilation with explicit runtime linking
+RUN clang -g -O1 -fsanitize=fuzzer,address \
+    -fno-omit-frame-pointer \
+    libfuzzer_harness.c vulnerable_func.c \
+    -o vulnerable_libfuzzer_v1 || echo "Method 1 failed"
+
+# Method 2: Static linking to avoid runtime issues
+RUN clang -g -O1 -fsanitize=fuzzer,address \
+    -fno-omit-frame-pointer \
+    -static-libasan \
+    -static-libgcc \
+    libfuzzer_harness.c vulnerable_func.c \
+    -o vulnerable_libfuzzer_v2 || echo "Method 2 failed"
+
+# Method 3: Use clang++ with libc++
+RUN clang++ -g -O1 -fsanitize=fuzzer,address \
+    -fno-omit-frame-pointer \
+    -stdlib=libc++ \
+    -x c libfuzzer_harness.c vulnerable_func.c \
+    -o vulnerable_libfuzzer_v3 || echo "Method 3 failed"
+
+# Method 4: Minimal fuzzer without address sanitizer
+RUN clang -g -O1 -fsanitize=fuzzer \
+    -fno-omit-frame-pointer \
+    libfuzzer_harness.c vulnerable_func.c \
+    -o vulnerable_libfuzzer_v4 || echo "Method 4 failed"
+
+# Create a wrapper script to test which binary works
+RUN echo '#!/bin/sh
+echo "Testing libfuzzer binaries..."
+for ver in v1 v2 v3 v4; do
+    if [ -f "/targets/vulnerable_libfuzzer_$ver" ]; then
+        echo "Testing $ver..."
+        /targets/vulnerable_libfuzzer_$ver -help=1 2>&1 | head -2
+        if [ $? -eq 0 ]; then
+            echo "Using $ver as default"
+            cp /targets/vulnerable_libfuzzer_$ver /targets/vulnerable_libfuzzer
+            break
+        fi
+    fi
+done
+
+if [ ! -f "/targets/vulnerable_libfuzzer" ]; then
+    echo "ERROR: No working libfuzzer binary found"
+    echo "Falling back to v4 (minimal fuzzer)"
+    [ -f "/targets/vulnerable_libfuzzer_v4" ] && cp /targets/vulnerable_libfuzzer_v4 /targets/vulnerable_libfuzzer
+fi
+' > /targets/select_fuzzer.sh && chmod +x /targets/select_fuzzer.sh
+
+# Run the selection script
+RUN /targets/select_fuzzer.sh
+
+# Create initial seed corpus
+RUN mkdir -p /corpus && \
+    echo "test" > /corpus/seed1.txt && \
+    echo "hello" > /corpus/seed2.txt && \
+    echo "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" > /corpus/seed3.txt && \
+    echo "0123456789BUG" > /corpus/seed4.txt
+
+# Create a dictionary file with interesting tokens
+RUN echo '"CRASH"' > /targets/vuln.dict && \
+    echo '"BUG"' >> /targets/vuln.dict && \
+    echo '"AAAA"' >> /targets/vuln.dict && \
+    echo '"\\x00"' >> /targets/vuln.dict && \
+    echo '"\\xff"' >> /targets/vuln.dict
+
+# Add debugging script
+COPY debug-alpine-fuzzer.sh /targets/
+RUN chmod +x /targets/debug-alpine-fuzzer.sh || true
+
+CMD ["/bin/sh"]

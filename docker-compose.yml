@@ -6,6 +6,10 @@ services:
     build:
       context: .
       target: master
+      args:
+        VERSION: ${VERSION:-dev}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: pandafuzz-master
     restart: unless-stopped
     ports:
@@ -30,6 +34,10 @@ services:
     build:
       context: .
       target: bot
+      args:
+        VERSION: ${VERSION:-dev}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     restart: unless-stopped
     depends_on:
       master:
@@ -62,6 +70,10 @@ services:
     build:
       context: .
       target: development
+      args:
+        VERSION: ${VERSION:-dev}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: pandafuzz-bot-dev
     restart: unless-stopped
     depends_on:

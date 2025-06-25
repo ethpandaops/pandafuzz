@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useGlobalKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
+import { useHealthCheck } from '../hooks/useHealthCheck';
 import {
   AppBar,
   Box,
@@ -57,6 +58,7 @@ function Layout({ children, darkMode, toggleTheme }: LayoutProps) {
   const location = useLocation();
   const theme = useTheme();
   useGlobalKeyboardShortcuts();
+  const { health } = useHealthCheck();
 
   const handleDrawerToggle = () => {
     setMobileOpen(!mobileOpen);
@@ -120,21 +122,35 @@ function Layout({ children, darkMode, toggleTheme }: LayoutProps) {
       </List>
       <Divider />
       <Box sx={{ p: 2 }}>
-        <Tooltip title="GitHub Repository" placement="right">
-          <IconButton
-            component="a"
-            href="https://github.com/ethpandaops/pandafuzz"
-            target="_blank"
-            sx={{ mr: 1 }}
-          >
-            <GitHubIcon />
-          </IconButton>
-        </Tooltip>
-        <Tooltip title="Settings" placement="right">
-          <IconButton sx={{ mr: 1 }}>
-            <SettingsIcon />
-          </IconButton>
-        </Tooltip>
+        <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+          <Tooltip title="GitHub Repository" placement="right">
+            <IconButton
+              component="a"
+              href="https://github.com/ethpandaops/pandafuzz"
+              target="_blank"
+              sx={{ mr: 1 }}
+            >
+              <GitHubIcon />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Settings" placement="right">
+            <IconButton sx={{ mr: 1 }}>
+              <SettingsIcon />
+            </IconButton>
+          </Tooltip>
+        </Box>
+        {health && health.git_commit && (
+          <Box sx={{ mt: 1 }}>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+              Version: {health.version || 'dev'}
+            </Typography>
+            <Tooltip title={`Build: ${health.build_time || 'unknown'}`} placement="right">
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', cursor: 'help' }}>
+                Commit: {health.git_commit.substring(0, 7)}
+              </Typography>
+            </Tooltip>
+          </Box>
+        )}
       </Box>
     </Box>
   );

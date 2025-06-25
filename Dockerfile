@@ -39,9 +39,18 @@ RUN go mod download all
 # Copy source code
 COPY . .
 
-# Build binaries
-RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o pandafuzz-master ./cmd/master
-RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o pandafuzz-bot ./cmd/bot
+# Get version info
+ARG VERSION=dev
+ARG BUILD_TIME=unknown
+ARG GIT_COMMIT=unknown
+
+# Build binaries with version info
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo \
+    -ldflags "-X main.version=${VERSION} -X main.buildTime=${BUILD_TIME} -X main.gitCommit=${GIT_COMMIT}" \
+    -o pandafuzz-master ./cmd/master
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo \
+    -ldflags "-X main.version=${VERSION} -X main.buildTime=${BUILD_TIME} -X main.gitCommit=${GIT_COMMIT}" \
+    -o pandafuzz-bot ./cmd/bot
 
 # Runtime stage for master
 FROM alpine:3.19 AS master
@@ -101,6 +110,11 @@ RUN apk add --no-cache \
     python3-dev \
     py3-pip \
     libstdc++ \
+    # Additional runtime libraries for libfuzzer
+    clang-libs \
+    libc++ \
+    libc++-dev \
+    libgcc \
     # AFL++ dependencies
     automake \
     autoconf \
@@ -110,7 +124,9 @@ RUN apk add --no-cache \
     # Additional tools
     wget \
     curl \
-    file
+    file \
+    # glibc compatibility for running binaries built on glibc systems
+    gcompat
 
 # Set LLVM_CONFIG for AFL++ build
 ENV LLVM_CONFIG=llvm-config

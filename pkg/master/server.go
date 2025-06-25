@@ -33,6 +33,9 @@ type Server struct {
 	mu               sync.RWMutex
 	running          bool
 	stats            ServerStats
+	version          string
+	buildTime        string
+	gitCommit        string
 }
 
 // ServerStats tracks server performance metrics
@@ -51,7 +54,7 @@ type ServerStats struct {
 type Middleware func(http.Handler) http.Handler
 
 // NewServer creates a new master server instance
-func NewServer(config *common.MasterConfig, state *PersistentState, timeoutManager *TimeoutManager) *Server {
+func NewServer(config *common.MasterConfig, state *PersistentState, timeoutManager *TimeoutManager, versionInfo *common.VersionInfo) *Server {
 	logger := logrus.New()
 	logger.SetLevel(logrus.InfoLevel)
 	
@@ -67,7 +70,7 @@ func NewServer(config *common.MasterConfig, state *PersistentState, timeoutManag
 		config.Circuit.ResetTimeout,
 	)
 	
-	return &Server{
+	server := &Server{
 		config:          config,
 		state:           state,
 		timeoutManager:  timeoutManager,
@@ -79,7 +82,19 @@ func NewServer(config *common.MasterConfig, state *PersistentState, timeoutManag
 		stats: ServerStats{
 			StartTime: time.Now(),
 		},
+		version:   "dev",
+		buildTime: "unknown",
+		gitCommit: "unknown",
 	}
+	
+	// Set version info if provided
+	if versionInfo != nil {
+		server.version = versionInfo.Version
+		server.buildTime = versionInfo.BuildTime
+		server.gitCommit = versionInfo.GitCommit
+	}
+	
+	return server
 }
 
 // Start starts the HTTP server

@@ -106,6 +106,8 @@ export interface HealthCheck {
   timestamp: string;
   database: string;
   version?: string;
+  build_time?: string;
+  git_commit?: string;
 }
 
 export interface ApiError {
