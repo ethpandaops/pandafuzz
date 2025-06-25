@@ -21,10 +21,12 @@ ENV GENERATE_SOURCEMAP=false
 RUN npm run build
 
 # Build stage for Go binaries
-FROM golang:1.22-alpine AS builder
+FROM golang:1.22 AS builder
 
 # Install build dependencies
-RUN apk add --no-cache git make gcc musl-dev sqlite-dev
+RUN apt-get update && apt-get install -y \
+    git make gcc libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /build
@@ -53,14 +55,21 @@ RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo \
     -o pandafuzz-bot ./cmd/bot
 
 # Runtime stage for master
-FROM alpine:3.19 AS master
+FROM ubuntu:22.04 AS master
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates sqlite-libs
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libsqlite3-0 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN addgroup -g 1000 pandafuzz && \
-    adduser -D -u 1000 -G pandafuzz pandafuzz
+RUN groupadd -g 1000 pandafuzz && \
+    useradd -u 1000 -g pandafuzz -m -s /bin/bash pandafuzz
 
 # Create necessary directories
 RUN mkdir -p /app/data /app/logs && \
@@ -83,50 +92,51 @@ EXPOSE 8080 9090
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
 # Run master
 CMD ["./pandafuzz-master", "-config", "master.yaml"]
 
 # Runtime stage for bot with fuzzing tools
-FROM alpine:3.19 AS bot
+FROM ubuntu:22.04 AS bot
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime dependencies and fuzzing tools
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y \
     ca-certificates \
-    sqlite-libs \
+    libsqlite3-0 \
     bash \
     git \
     make \
     gcc \
     g++ \
-    musl-dev \
+    libc6-dev \
     clang \
-    clang-dev \
     llvm \
     llvm-dev \
-    compiler-rt \
+    libclang-dev \
     python3 \
     python3-dev \
-    py3-pip \
-    libstdc++ \
+    python3-pip \
+    libstdc++6 \
     # Additional runtime libraries for libfuzzer
-    clang-libs \
-    libc++ \
+    libc++1 \
     libc++-dev \
-    libgcc \
+    libc++abi-dev \
     # AFL++ dependencies
     automake \
     autoconf \
     libtool \
-    gmp-dev \
-    zlib-dev \
+    libgmp-dev \
+    zlib1g-dev \
     # Additional tools
     wget \
     curl \
     file \
-    # glibc compatibility for running binaries built on glibc systems
-    gcompat
+    # Clean up
+    && rm -rf /var/lib/apt/lists/*
 
 # Set LLVM_CONFIG for AFL++ build
 ENV LLVM_CONFIG=llvm-config
@@ -139,8 +149,8 @@ RUN git clone https://github.com/AFLplusplus/AFLplusplus.git /tmp/aflplusplus &&
     rm -rf /tmp/aflplusplus
 
 # Create non-root user
-RUN addgroup -g 1000 pandafuzz && \
-    adduser -D -u 1000 -G pandafuzz pandafuzz
+RUN groupadd -g 1000 pandafuzz && \
+    useradd -u 1000 -g pandafuzz -m -s /bin/bash pandafuzz
 
 # Create necessary directories
 RUN mkdir -p /app/work /app/logs && \
@@ -173,22 +183,23 @@ FROM bot AS development
 USER root
 
 # Install additional development tools
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y \
     vim \
     tmux \
     htop \
     strace \
     gdb \
     valgrind \
-    perf-tools \
+    linux-tools-generic \
     tcpdump \
     netcat-openbsd \
     # Ensure all AFL++ dependencies are present
-    clang-dev \
+    libclang-dev \
     llvm-dev \
     python3-dev \
-    gmp-dev \
-    zlib-dev
+    libgmp-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Go for development
 COPY --from=builder /usr/local/go /usr/local/go
