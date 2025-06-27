@@ -39,10 +39,15 @@ type LibFuzzer struct {
 	botID         string
 }
 
-// NewLibFuzzer creates a new LibFuzzer instance
-func NewLibFuzzer() *LibFuzzer {
-	logger := logrus.New()
-	logger.SetLevel(logrus.InfoLevel)
+// Compile-time interface compliance check
+var _ Fuzzer = (*LibFuzzer)(nil)
+
+// NewLibFuzzer creates a new LibFuzzer instance with the provided logger
+func NewLibFuzzer(logger *logrus.Logger) *LibFuzzer {
+	if logger == nil {
+		logger = logrus.New()
+		logger.SetLevel(logrus.InfoLevel)
+	}
 	
 	return &LibFuzzer{
 		status:       StatusUninitialized,
@@ -530,6 +535,7 @@ func (lf *LibFuzzer) GetCrashes() ([]*common.CrashResult, error) {
 			Size:      int64(len(crashData)),
 			Hash:      lf.hashInput(crashData),
 			Type:      lf.detectCrashType(file.Name()),
+			Input:     crashData,
 		}
 		
 		crashes = append(crashes, crash)
@@ -559,6 +565,7 @@ func (lf *LibFuzzer) GetCrashes() ([]*common.CrashResult, error) {
 				Size:      int64(len(crashData)),
 				Hash:      lf.hashInput(crashData),
 				Type:      "artifact_crash",
+				Input:     crashData,
 			}
 			
 			crashes = append(crashes, crash)
@@ -1063,7 +1070,7 @@ func (lf *LibFuzzer) collectArtifacts() []Artifact {
 	return artifacts
 }
 
-// Factory function for creating LibFuzzer instances
-func CreateLibFuzzer() (Fuzzer, error) {
-	return NewLibFuzzer(), nil
+// CreateLibFuzzer creates a new LibFuzzer instance with optional logger
+func CreateLibFuzzer(logger *logrus.Logger) (Fuzzer, error) {
+	return NewLibFuzzer(logger), nil
 }

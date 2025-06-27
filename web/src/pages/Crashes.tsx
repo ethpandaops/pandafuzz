@@ -62,20 +62,39 @@ function Crashes() {
     fetchCrashes();
   }, [filter]);
 
-  const downloadCrash = (crash: CrashResult) => {
-    // Decode base64 input
-    const binaryString = atob(crash.input);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
+  const downloadCrash = async (crash: CrashResult) => {
+    try {
+      // Use the new API endpoint to download crash input
+      const response = await fetch(`/api/v1/results/crashes/${crash.id}/input`);
+      if (!response.ok) {
+        throw new Error('Failed to download crash input');
+      }
+      
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `crash_${crash.hash.substring(0, 8)}.bin`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to download crash:', error);
+      // Fallback to inline data if available
+      if (crash.input) {
+        const binaryString = atob(crash.input);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `crash_${crash.hash.substring(0, 8)}.bin`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
     }
-    const blob = new Blob([bytes], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `crash_${crash.hash.substring(0, 8)}.bin`;
-    a.click();
-    URL.revokeObjectURL(url);
   };
 
   const copyToClipboard = (text: string) => {

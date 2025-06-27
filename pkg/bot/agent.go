@@ -1,11 +1,16 @@
 package bot
 
 import (
+	"archive/zip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -58,12 +63,9 @@ type AgentStats struct {
 }
 
 // NewAgent creates a new bot agent
-func NewAgent(config *common.BotConfig) (*Agent, error) {
-	logger := logrus.New()
-	logger.SetLevel(logrus.InfoLevel)
-	
+func NewAgent(config *common.BotConfig, logger *logrus.Logger) (*Agent, error) {
 	// Create retry client for master communication
-	client, err := NewRetryClient(config)
+	client, err := NewRetryClient(config, logger)
 	if err != nil {
 		return nil, common.NewSystemError("create_retry_client", err)
 	}
@@ -104,18 +106,30 @@ func (a *Agent) Start() error {
 		"master_url": a.config.MasterURL,
 	}).Info("Starting bot agent")
 	
-	// Register with master
-	if err := a.registerWithMaster(); err != nil {
-		return common.NewSystemError("register_with_master", err)
+	// Use configured API port or default to 9049
+	apiPort := a.config.APIPort
+	if apiPort == 0 {
+		apiPort = 9049 // Default port
 	}
 	
-	// Start API server for master polling
-	apiPort := 9000 + (int(a.config.ID[len(a.config.ID)-1]) % 1000) // Use last char of ID to determine port
-	a.apiServer = NewAPIServer(a, apiPort)
+	a.logger.WithFields(logrus.Fields{
+		"bot_id": a.config.ID,
+		"api_port": apiPort,
+	}).Info("Using API port for bot")
+	
+	// Start API server before registration so it's ready for polling
+	a.apiServer = NewAPIServer(a, apiPort, a.logger)
 	if err := a.apiServer.Start(); err != nil {
 		return common.NewSystemError("start_api_server", err)
 	}
 	a.logger.WithField("api_port", apiPort).Info("Started bot API server")
+	
+	// Register with master (this will use the same apiPort)
+	if err := a.registerWithMaster(); err != nil {
+		// Stop API server if registration fails
+		// Note: We don't have a Stop method, so just log the error
+		return common.NewSystemError("register_with_master", err)
+	}
 	
 	// Start heartbeat
 	a.startHeartbeat()
@@ -197,6 +211,9 @@ func (a *Agent) processWorkCycle() {
 	hasJob := a.currentJob != nil
 	a.mu.RUnlock()
 	
+	// First check if we have any pending acknowledgments to retry
+	a.retryPendingAcknowledgments()
+	
 	if hasJob {
 		// Continue working on current job
 		a.continueCurrentJob()
@@ -210,8 +227,8 @@ func (a *Agent) processWorkCycle() {
 func (a *Agent) registerWithMaster() error {
 	a.logger.Info("Registering with master")
 	
-	// Determine the API endpoint for this bot
-	apiPort := 9000 + (int(a.config.ID[len(a.config.ID)-1]) % 1000)
+	// Get the API port from the running server
+	apiPort := a.apiServer.port
 	
 	// In Docker, use the container's hostname which is accessible within the Docker network
 	hostname, _ := os.Hostname()
@@ -449,8 +466,14 @@ func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 		inputDir := filepath.Join(job.WorkDir, "input")
 		if err := os.MkdirAll(inputDir, 0755); err != nil {
 			a.logger.WithError(err).Warn("Failed to create input directory")
+		} else {
+			// Extract zip file to input directory
+			if err := a.extractZipFile(corpusPath, inputDir); err != nil {
+				a.logger.WithError(err).Warn("Failed to extract seed corpus")
+			} else {
+				a.logger.WithField("input_dir", inputDir).Info("Seed corpus extracted successfully")
+			}
 		}
-		// TODO: Extract zip file to input directory
 		a.logger.Info("Seed corpus downloaded successfully")
 	}
 	
@@ -483,6 +506,21 @@ func (a *Agent) executeJob(job *common.Job) {
 			"duration": duration,
 			"message":  message,
 		}).Info("Job completed successfully")
+		
+		// Check for crashes BEFORE completing the job
+		// This ensures crashes are reported while job is still active
+		crashesFound := a.checkAndReportCrashes(job)
+		if crashesFound > 0 {
+			a.logger.WithFields(logrus.Fields{
+				"job_id": job.ID,
+				"crashes": crashesFound,
+			}).Info("Crashes found and reported")
+			message = fmt.Sprintf("%s (found %d crashes)", message, crashesFound)
+			
+			// Give some time for crash reports to be processed
+			time.Sleep(1 * time.Second)
+		}
+		
 		a.stats.JobsCompleted++
 		a.completeCurrentJob(true, message)
 	} else {
@@ -521,7 +559,7 @@ func (a *Agent) continueCurrentJob() {
 func (a *Agent) completeCurrentJob(success bool, message string) {
 	a.mu.Lock()
 	job := a.currentJob
-	a.currentJob = nil
+	// Don't clear currentJob yet - we need it for the API server
 	a.mu.Unlock()
 	
 	if job == nil {
@@ -559,15 +597,24 @@ func (a *Agent) completeCurrentJob(success bool, message string) {
 		a.apiServer.MarkJobCompleted(job.ID, success, message, output)
 	}
 	
-	// Try to notify master of job completion, but don't block on failure
-	// The master will poll the bot's API to get the status
-	go func() {
-		err := a.client.CompleteJob(a.config.ID, success, message)
-		if err != nil {
-			a.logger.WithError(err).Warn("Failed to notify master of job completion (master will poll for status)")
-			a.stats.ConnectionErrors++
+	// Try to notify master of job completion with acknowledgment
+	err := a.client.CompleteJob(a.config.ID, success, message)
+	if err != nil {
+		a.logger.WithError(err).Error("Failed to complete job - master did not acknowledge")
+		a.stats.ConnectionErrors++
+		
+		// Keep the job status as "pending completion" in our cache
+		// The master's poller will eventually pick this up
+		if a.apiServer != nil {
+			a.apiServer.MarkJobPendingCompletion(job.ID, success, message, "")
 		}
-	}()
+		
+		// Don't clear the current job yet - wait for master acknowledgment via polling
+		return
+	}
+	
+	// Master acknowledged - now we can safely log success
+	a.logger.WithField("job_id", job.ID).Info("Job completion acknowledged by master")
 	
 	// Update stats
 	if success {
@@ -579,7 +626,128 @@ func (a *Agent) completeCurrentJob(success bool, message string) {
 	// Stop job execution
 	a.executor.StopJob(job.ID)
 	
+	// Now clear the current job
+	a.mu.Lock()
+	a.currentJob = nil
+	a.mu.Unlock()
+	
 	a.stats.CurrentStatus = "idle"
+}
+
+// checkAndReportCrashes checks for crash files and reports them to the master
+func (a *Agent) checkAndReportCrashes(job *common.Job) int {
+	crashCount := 0
+	
+	// Look for crash files in the working directory
+	entries, err := os.ReadDir(job.WorkDir)
+	if err != nil {
+		a.logger.WithError(err).WithField("job_id", job.ID).Error("Failed to read work directory for crashes")
+		return 0
+	}
+	
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		
+		// LibFuzzer crash files start with "crash-"
+		if strings.HasPrefix(entry.Name(), "crash-") {
+			crashPath := filepath.Join(job.WorkDir, entry.Name())
+			
+			// Read crash file
+			crashData, err := os.ReadFile(crashPath)
+			if err != nil {
+				a.logger.WithError(err).WithField("crash_file", entry.Name()).Error("Failed to read crash file")
+				continue
+			}
+			
+			// Get file info
+			info, err := entry.Info()
+			if err != nil {
+				a.logger.WithError(err).WithField("crash_file", entry.Name()).Error("Failed to get crash file info")
+				continue
+			}
+			
+			// Create crash result
+			crash := &common.CrashResult{
+				ID:        fmt.Sprintf("%s_%s", job.ID, entry.Name()),
+				JobID:     job.ID,
+				BotID:     a.config.ID,
+				Timestamp: info.ModTime(),
+				FilePath:  crashPath,
+				Size:      info.Size(),
+				Hash:      a.hashCrashInput(crashData),
+				Type:      "libfuzzer",
+				Input:     crashData,
+			}
+			
+			// Report crash to master
+			a.logger.WithFields(logrus.Fields{
+				"crash_id": crash.ID,
+				"job_id":   crash.JobID,
+				"bot_id":   crash.BotID,
+				"hash":     crash.Hash,
+				"size":     crash.Size,
+			}).Info("Attempting to report crash to master")
+			
+			if err := a.ReportCrash(crash); err != nil {
+				a.logger.WithError(err).WithFields(logrus.Fields{
+					"crash_file": entry.Name(),
+					"crash_id":   crash.ID,
+				}).Error("Failed to report crash to master")
+			} else {
+				a.logger.WithFields(logrus.Fields{
+					"crash_file": entry.Name(),
+					"crash_id":   crash.ID,
+				}).Info("Successfully reported crash to master")
+				crashCount++
+			}
+		}
+	}
+	
+	return crashCount
+}
+
+// hashCrashInput computes a simple hash for crash deduplication
+func (a *Agent) hashCrashInput(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+// findCrashFiles finds all crash files in a directory
+func (a *Agent) findCrashFiles(workDir string) ([]string, error) {
+	var crashFiles []string
+	
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		return nil, err
+	}
+	
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		
+		// LibFuzzer crash files start with "crash-"
+		if strings.HasPrefix(entry.Name(), "crash-") {
+			crashPath := filepath.Join(workDir, entry.Name())
+			crashFiles = append(crashFiles, crashPath)
+		}
+	}
+	
+	return crashFiles, nil
+}
+
+// hash computes a simple numeric hash for a string
+func hash(s string) int {
+	h := 0
+	for _, c := range s {
+		h = h*31 + int(c)
+	}
+	if h < 0 {
+		h = -h
+	}
+	return h
 }
 
 // ReportCrash reports a crash to the master
@@ -723,4 +891,100 @@ func (a *Agent) SetLogLevel(level logrus.Level) {
 // GetConfig returns the agent configuration
 func (a *Agent) GetConfig() *common.BotConfig {
 	return a.config
+}
+
+// retryPendingAcknowledgments checks for jobs pending acknowledgment and retries them
+func (a *Agent) retryPendingAcknowledgments() {
+	if a.apiServer == nil {
+		return
+	}
+	
+	// Check job cache for pending acknowledgments
+	a.apiServer.mu.RLock()
+	pendingJobs := make([]*JobStatus, 0)
+	for _, status := range a.apiServer.jobCache {
+		if status.Status == "pending_ack" {
+			// Only retry if it's been pending for more than 30 seconds
+			if time.Since(status.UpdatedAt) > 30*time.Second {
+				pendingJobs = append(pendingJobs, status)
+			}
+		}
+	}
+	a.apiServer.mu.RUnlock()
+	
+	for _, jobStatus := range pendingJobs {
+		a.logger.WithFields(logrus.Fields{
+			"job_id": jobStatus.JobID,
+			"age":    time.Since(jobStatus.UpdatedAt),
+		}).Info("Retrying job completion for pending acknowledgment")
+		
+		// Try to complete the job again
+		err := a.client.CompleteJob(a.config.ID, jobStatus.Success, jobStatus.Message)
+		if err != nil {
+			a.logger.WithError(err).WithField("job_id", jobStatus.JobID).Warn("Retry failed for pending job completion")
+			// Keep it as pending - the poller will eventually handle it
+		} else {
+			// Success! Update the cache
+			a.logger.WithField("job_id", jobStatus.JobID).Info("Job completion acknowledged on retry")
+			a.apiServer.MarkJobCompleted(jobStatus.JobID, jobStatus.Success, jobStatus.Message, jobStatus.Output)
+			
+			// Clear current job if this was it
+			a.mu.Lock()
+			if a.currentJob != nil && a.currentJob.ID == jobStatus.JobID {
+				a.currentJob = nil
+			}
+			a.mu.Unlock()
+		}
+	}
+}
+
+// extractZipFile extracts a zip file to the specified directory
+func (a *Agent) extractZipFile(zipPath, destDir string) error {
+	reader, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("failed to open zip file: %w", err)
+	}
+	defer reader.Close()
+
+	for _, file := range reader.File {
+		// Construct the file path
+		path := filepath.Join(destDir, file.Name)
+
+		// Check for directory traversal
+		if !strings.HasPrefix(path, filepath.Clean(destDir)+string(os.PathSeparator)) {
+			return fmt.Errorf("invalid file path in zip: %s", file.Name)
+		}
+
+		if file.FileInfo().IsDir() {
+			os.MkdirAll(path, file.Mode())
+			continue
+		}
+
+		// Create the directories if necessary
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return fmt.Errorf("failed to create directory: %w", err)
+		}
+
+		// Open the file in the zip
+		fileReader, err := file.Open()
+		if err != nil {
+			return fmt.Errorf("failed to open file in zip: %w", err)
+		}
+		defer fileReader.Close()
+
+		// Create the destination file
+		targetFile, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, file.Mode())
+		if err != nil {
+			return fmt.Errorf("failed to create file: %w", err)
+		}
+		defer targetFile.Close()
+
+		// Copy the file contents
+		_, err = io.Copy(targetFile, fileReader)
+		if err != nil {
+			return fmt.Errorf("failed to copy file contents: %w", err)
+		}
+	}
+
+	return nil
 }

@@ -17,7 +17,14 @@ type systemService struct {
 	recoveryManager RecoveryManager
 	config          *common.MasterConfig
 	logger          *logrus.Logger
+	
+	// Lifecycle management
+	ctx    context.Context
+	cancel context.CancelFunc
 }
+
+// Compile-time interface compliance check
+var _ SystemService = (*systemService)(nil)
 
 // NewSystemService creates a new system service
 func NewSystemService(
@@ -55,7 +62,7 @@ func (s *systemService) TriggerRecovery(ctx context.Context) error {
 	}
 
 	// Trigger recovery
-	if err := s.recoveryManager.RecoverOnStartup(); err != nil {
+	if err := s.recoveryManager.RecoverOnStartup(ctx); err != nil {
 		return errors.Wrap(errors.ErrorTypeSystem, "trigger_recovery", "Recovery failed", err)
 	}
 
@@ -117,4 +124,54 @@ func (s *systemService) ForceTimeout(ctx context.Context, entityType string, ent
 	}).Info("Timeout forced manually")
 
 	return nil
+}
+
+// Start starts the system service
+func (s *systemService) Start(ctx context.Context) error {
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	
+	// Start system monitoring goroutine
+	go s.monitorSystemHealth()
+	
+	s.logger.Info("System service started")
+	return nil
+}
+
+// Stop stops the system service
+func (s *systemService) Stop() error {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	
+	// Clean up any resources
+	// Currently system service doesn't have resources to clean up
+	
+	s.logger.Info("System service stopped")
+	return nil
+}
+
+// monitorSystemHealth monitors system health metrics
+func (s *systemService) monitorSystemHealth() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			// Log system stats periodically
+			stats, err := s.GetSystemStats(s.ctx)
+			if err != nil {
+				s.logger.WithError(err).Error("Failed to get system stats")
+				continue
+			}
+			
+			s.logger.WithFields(logrus.Fields{
+				"state_stats":    stats.StateStats,
+				"timeout_stats":  stats.TimeoutStats,
+				"database_stats": stats.DatabaseStats,
+			}).Debug("System health check")
+		}
+	}
 }

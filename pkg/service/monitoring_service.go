@@ -29,6 +29,9 @@ type monitoringService struct {
 	updateInterval  time.Duration
 }
 
+// Compile-time interface compliance check
+var _ MonitoringService = (*monitoringService)(nil)
+
 // NewMonitoringService creates a new monitoring service
 func NewMonitoringService(
 	stateStore StateStore,
@@ -134,12 +137,25 @@ type MonitoringAwareBotService struct {
 	collector *monitoring.Collector
 }
 
+// Compile-time interface compliance check
+var _ BotService = (*MonitoringAwareBotService)(nil)
+
 // NewMonitoringAwareBotService creates a bot service with monitoring
 func NewMonitoringAwareBotService(base BotService, collector *monitoring.Collector) BotService {
 	return &MonitoringAwareBotService{
 		BotService: base,
 		collector:  collector,
 	}
+}
+
+// Start delegates to the wrapped service
+func (s *MonitoringAwareBotService) Start(ctx context.Context) error {
+	return s.BotService.Start(ctx)
+}
+
+// Stop delegates to the wrapped service
+func (s *MonitoringAwareBotService) Stop() error {
+	return s.BotService.Stop()
 }
 
 // UpdateHeartbeat with monitoring
@@ -168,12 +184,25 @@ type MonitoringAwareJobService struct {
 	collector *monitoring.Collector
 }
 
+// Compile-time interface compliance check
+var _ JobService = (*MonitoringAwareJobService)(nil)
+
 // NewMonitoringAwareJobService creates a job service with monitoring
 func NewMonitoringAwareJobService(base JobService, collector *monitoring.Collector) JobService {
 	return &MonitoringAwareJobService{
 		JobService: base,
 		collector:  collector,
 	}
+}
+
+// Start delegates to the wrapped service
+func (s *MonitoringAwareJobService) Start(ctx context.Context) error {
+	return s.JobService.Start(ctx)
+}
+
+// Stop delegates to the wrapped service
+func (s *MonitoringAwareJobService) Stop() error {
+	return s.JobService.Stop()
 }
 
 // CreateJob with monitoring
@@ -221,12 +250,25 @@ type MonitoringAwareResultService struct {
 	collector *monitoring.Collector
 }
 
+// Compile-time interface compliance check
+var _ ResultService = (*MonitoringAwareResultService)(nil)
+
 // NewMonitoringAwareResultService creates a result service with monitoring
 func NewMonitoringAwareResultService(base ResultService, collector *monitoring.Collector) ResultService {
 	return &MonitoringAwareResultService{
 		ResultService: base,
 		collector:     collector,
 	}
+}
+
+// Start delegates to the wrapped service
+func (s *MonitoringAwareResultService) Start(ctx context.Context) error {
+	return s.ResultService.Start(ctx)
+}
+
+// Stop delegates to the wrapped service
+func (s *MonitoringAwareResultService) Stop() error {
+	return s.ResultService.Stop()
 }
 
 // ProcessCrashResult with monitoring

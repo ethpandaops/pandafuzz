@@ -2,6 +2,7 @@ package master
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -110,7 +111,7 @@ func (s *Server) handleBotDelete(w http.ResponseWriter, r *http.Request) {
 	s.timeoutManager.RemoveBotTimeout(botID)
 	
 	// Delete bot
-	if err := s.state.DeleteBot(botID); err != nil {
+	if err := s.state.DeleteBot(r.Context(), botID); err != nil {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete bot", err)
 		return
 	}
@@ -137,7 +138,7 @@ func (s *Server) handleBotHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Get existing bot
-	bot, err := s.state.GetBot(botID)
+	bot, err := s.state.GetBot(r.Context(), botID)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusNotFound, "Bot not found", err)
 		return
@@ -152,7 +153,7 @@ func (s *Server) handleBotHeartbeat(w http.ResponseWriter, r *http.Request) {
 	bot.TimeoutAt = now.Add(s.config.Timeouts.BotHeartbeat)
 	
 	// Save bot
-	if err := s.state.SaveBotWithRetry(bot); err != nil {
+	if err := s.state.SaveBotWithRetry(r.Context(), bot); err != nil {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to update bot", err)
 		return
 	}
@@ -165,7 +166,7 @@ func (s *Server) handleBotHeartbeat(w http.ResponseWriter, r *http.Request) {
 		"status": req.Status,
 	}).Debug("Bot heartbeat received")
 	
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status":    "ok",
 		"timestamp": now,
 		"timeout":   bot.TimeoutAt,
@@ -185,10 +186,10 @@ func (s *Server) handleBotGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Atomic job assignment
-	job, err := s.state.AtomicJobAssignmentWithRetry(botID)
+	job, err := s.state.AtomicJobAssignmentWithRetry(r.Context(), botID)
 	if err != nil {
 		if err.Error() == "no jobs available" {
-			s.writeJSONResponse(w, map[string]interface{}{
+			s.writeJSONResponse(w, map[string]any{
 				"status": "no_jobs_available",
 				"message": "No jobs available for assignment",
 			})
@@ -228,7 +229,7 @@ func (s *Server) handleBotCompleteJob(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Get bot's current job
-	bot, err := s.state.GetBot(botID)
+	bot, err := s.state.GetBot(r.Context(), botID)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusNotFound, "Bot not found", err)
 		return
@@ -242,8 +243,20 @@ func (s *Server) handleBotCompleteJob(w http.ResponseWriter, r *http.Request) {
 	jobID := *bot.CurrentJob
 	
 	// Complete job
-	if err := s.state.CompleteJobWithRetry(jobID, botID, req.Success); err != nil {
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to complete job", err)
+	if err := s.state.CompleteJobWithRetry(r.Context(), jobID, botID, req.Success); err != nil {
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"bot_id": botID,
+			"job_id": jobID,
+		}).Error("Failed to complete job in state")
+		
+		// Send negative acknowledgment
+		response := map[string]any{
+			"acknowledged": false,
+			"job_id":       jobID,
+			"message":      fmt.Sprintf("Failed to update job state: %v", err),
+			"timestamp":    time.Now(),
+		}
+		s.writeJSONResponse(w, response)
 		return
 	}
 	
@@ -255,11 +268,15 @@ func (s *Server) handleBotCompleteJob(w http.ResponseWriter, r *http.Request) {
 		"job_id":  jobID,
 		"success": req.Success,
 		"message": req.Message,
-	}).Info("Job completed")
+	}).Info("Job completed and acknowledged")
 	
-	response := map[string]interface{}{
-		"status":    "completed",
-		"timestamp": time.Now(),
+	// Send positive acknowledgment
+	response := map[string]any{
+		"acknowledged": true,
+		"job_id":       jobID,
+		"message":      "Job completion successfully recorded",
+		"status":       "completed",
+		"timestamp":    time.Now(),
 	}
 	
 	s.writeJSONResponse(w, response)
@@ -285,7 +302,7 @@ func (s *Server) handleBotList(w http.ResponseWriter, r *http.Request) {
 		bots = filtered
 	}
 	
-	response := map[string]interface{}{
+	response := map[string]any{
 		"bots":  bots,
 		"count": len(bots),
 	}
@@ -297,14 +314,27 @@ func (s *Server) handleBotList(w http.ResponseWriter, r *http.Request) {
 
 // handleResultCrash handles crash result submission
 func (s *Server) handleResultCrash(w http.ResponseWriter, r *http.Request) {
+	s.logger.Info("Received crash result submission request")
+	
 	var crash common.CrashResult
 	if err := json.NewDecoder(r.Body).Decode(&crash); err != nil {
+		s.logger.WithError(err).Error("Failed to decode crash result")
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid crash result", err)
 		return
 	}
 	
+	// Log crash details
+	s.logger.WithFields(logrus.Fields{
+		"crash_id": crash.ID,
+		"job_id":   crash.JobID,
+		"bot_id":   crash.BotID,
+		"hash":     crash.Hash,
+		"size":     crash.Size,
+	}).Debug("Processing crash submission")
+	
 	// Validate crash result
 	if crash.JobID == "" || crash.BotID == "" {
+		s.logger.Error("Crash result missing required fields")
 		s.writeErrorResponse(w, http.StatusBadRequest, "Job ID and Bot ID are required", nil)
 		return
 	}
@@ -315,7 +345,7 @@ func (s *Server) handleResultCrash(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Process crash result
-	if err := s.state.ProcessCrashResultWithRetry(&crash); err != nil {
+	if err := s.state.ProcessCrashResultWithRetry(r.Context(), &crash); err != nil {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to process crash result", err)
 		return
 	}
@@ -329,7 +359,7 @@ func (s *Server) handleResultCrash(w http.ResponseWriter, r *http.Request) {
 		"is_unique": crash.IsUnique,
 	}).Info("Crash result processed")
 	
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status":    "processed",
 		"crash_id":  crash.ID,
 		"is_unique": crash.IsUnique,
@@ -359,7 +389,7 @@ func (s *Server) handleResultCoverage(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Process coverage result
-	if err := s.state.ProcessCoverageResultWithRetry(&coverage); err != nil {
+	if err := s.state.ProcessCoverageResultWithRetry(r.Context(), &coverage); err != nil {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to process coverage result", err)
 		return
 	}
@@ -372,7 +402,7 @@ func (s *Server) handleResultCoverage(w http.ResponseWriter, r *http.Request) {
 		"new_edges":   coverage.NewEdges,
 	}).Debug("Coverage result processed")
 	
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status":     "processed",
 		"coverage_id": coverage.ID,
 		"timestamp":  time.Now(),
@@ -401,7 +431,7 @@ func (s *Server) handleResultCorpus(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Process corpus update
-	if err := s.state.ProcessCorpusUpdateWithRetry(&corpus); err != nil {
+	if err := s.state.ProcessCorpusUpdateWithRetry(r.Context(), &corpus); err != nil {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to process corpus update", err)
 		return
 	}
@@ -414,7 +444,7 @@ func (s *Server) handleResultCorpus(w http.ResponseWriter, r *http.Request) {
 		"total_size": corpus.TotalSize,
 	}).Debug("Corpus update processed")
 	
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status":    "processed",
 		"corpus_id": corpus.ID,
 		"timestamp": time.Now(),
@@ -425,7 +455,7 @@ func (s *Server) handleResultCorpus(w http.ResponseWriter, r *http.Request) {
 
 // handleResultStatus handles general status updates
 func (s *Server) handleResultStatus(w http.ResponseWriter, r *http.Request) {
-	var status map[string]interface{}
+	var status map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&status); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid status update", err)
 		return
@@ -434,7 +464,7 @@ func (s *Server) handleResultStatus(w http.ResponseWriter, r *http.Request) {
 	// Log status update
 	s.logger.WithField("status", status).Debug("Status update received")
 	
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status":    "received",
 		"timestamp": time.Now(),
 	}
@@ -522,7 +552,7 @@ func (s *Server) handleJobList(w http.ResponseWriter, r *http.Request) {
 		filtered = filtered[start:end]
 	}
 	
-	response := map[string]interface{}{
+	response := map[string]any{
 		"jobs":       filtered,
 		"count":      len(filtered),
 		"page":       page,
@@ -543,7 +573,7 @@ func (s *Server) handleJobGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	job, err := s.state.GetJob(jobID)
+	job, err := s.state.GetJob(r.Context(), jobID)
 	if err != nil {
 		if common.IsNotFoundError(err) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Job not found", err)
@@ -566,7 +596,7 @@ func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	job, err := s.state.GetJob(jobID)
+	job, err := s.state.GetJob(r.Context(), jobID)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusNotFound, "Job not found", err)
 		return
@@ -579,13 +609,13 @@ func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) {
 	
 	// If job is assigned, free up the bot
 	if job.AssignedBot != nil {
-		if err := s.state.CompleteJobWithRetry(jobID, *job.AssignedBot, false); err != nil {
+		if err := s.state.CompleteJobWithRetry(r.Context(), jobID, *job.AssignedBot, false); err != nil {
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to cancel job", err)
 			return
 		}
 	} else {
 		// Just update job status
-		if err := s.state.SaveJobWithRetry(job); err != nil {
+		if err := s.state.SaveJobWithRetry(r.Context(), job); err != nil {
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to cancel job", err)
 			return
 		}
@@ -596,7 +626,7 @@ func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) {
 	
 	s.logger.WithField("job_id", jobID).Info("Job cancelled")
 	
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status":    "cancelled",
 		"timestamp": now,
 	}
@@ -616,7 +646,7 @@ func (s *Server) handleJobLogs(w http.ResponseWriter, r *http.Request) {
 	
 	// For now, return placeholder logs
 	// In a real implementation, you would read from log files
-	logs := map[string]interface{}{
+	logs := map[string]any{
 		"job_id":    jobID,
 		"logs":      []string{"Log entry 1", "Log entry 2", "Log entry 3"},
 		"timestamp": time.Now(),
@@ -629,11 +659,11 @@ func (s *Server) handleJobLogs(w http.ResponseWriter, r *http.Request) {
 
 // handleSystemStats handles system statistics retrieval
 func (s *Server) handleSystemStats(w http.ResponseWriter, r *http.Request) {
-	stats := map[string]interface{}{
+	stats := map[string]any{
 		"server":     s.GetStats(),
 		"state":      s.state.GetStats(),
 		"timeouts":   s.timeoutManager.GetStats(),
-		"database":   s.state.GetDatabaseStats(),
+		"database":   s.state.GetDatabaseStats(r.Context()),
 		"timestamp":  time.Now(),
 	}
 	
@@ -648,14 +678,14 @@ func (s *Server) handleSystemRecovery(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Trigger recovery
-	if err := s.recoveryManager.RecoverOnStartup(); err != nil {
+	if err := s.recoveryManager.RecoverOnStartup(r.Context()); err != nil {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Recovery failed", err)
 		return
 	}
 	
 	s.logger.Info("Manual system recovery triggered")
 	
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status":    "recovery_completed",
 		"timestamp": time.Now(),
 	}
@@ -668,7 +698,7 @@ func (s *Server) handleTimeoutsList(w http.ResponseWriter, r *http.Request) {
 	botTimeouts := s.timeoutManager.ListBotTimeouts()
 	jobTimeouts := s.timeoutManager.ListJobTimeouts()
 	
-	response := map[string]interface{}{
+	response := map[string]any{
 		"bot_timeouts": botTimeouts,
 		"job_timeouts": jobTimeouts,
 		"timestamp":    time.Now(),
@@ -698,7 +728,7 @@ func (s *Server) handleTimeoutForce(w http.ResponseWriter, r *http.Request) {
 		"entity_id": entityID,
 	}).Info("Timeout forced manually")
 	
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status":    "timeout_forced",
 		"type":      timeoutType,
 		"entity_id": entityID,
@@ -706,4 +736,138 @@ func (s *Server) handleTimeoutForce(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	s.writeJSONResponse(w, response)
+}
+
+// handleGetCrashes retrieves all crashes
+func (s *Server) handleGetCrashes(w http.ResponseWriter, r *http.Request) {
+	// Get query parameters
+	limit := 100
+	offset := 0
+	
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 1000 {
+			limit = l
+		}
+	}
+	
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+	
+	// Get crashes from state
+	crashes, err := s.state.GetCrashes(r.Context(), limit, offset)
+	if err != nil {
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"limit":  limit,
+			"offset": offset,
+		}).Error("Failed to retrieve crashes from database")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve crashes", err)
+		return
+	}
+	
+	response := map[string]any{
+		"crashes": crashes,
+		"count":   len(crashes),
+		"limit":   limit,
+		"offset":  offset,
+	}
+	
+	s.writeJSONResponse(w, response)
+}
+
+// handleGetCrash retrieves a specific crash by ID
+func (s *Server) handleGetCrash(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	crashID := vars["id"]
+	
+	if crashID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Crash ID is required", nil)
+		return
+	}
+	
+	crash, err := s.state.GetCrash(r.Context(), crashID)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve crash", err)
+		return
+	}
+	
+	if crash == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Crash not found", nil)
+		return
+	}
+	
+	s.writeJSONResponse(w, crash)
+}
+
+// handleGetJobCrashes retrieves all crashes for a specific job
+func (s *Server) handleGetJobCrashes(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	jobID := vars["id"]
+	
+	if jobID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Job ID is required", nil)
+		return
+	}
+	
+	// Verify job exists
+	job, err := s.state.GetJob(r.Context(), jobID)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve job", err)
+		return
+	}
+	
+	if job == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Job not found", nil)
+		return
+	}
+	
+	// Get crashes for this job
+	crashes, err := s.state.GetJobCrashes(r.Context(), jobID)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve job crashes", err)
+		return
+	}
+	
+	response := map[string]any{
+		"job_id":  jobID,
+		"crashes": crashes,
+		"count":   len(crashes),
+	}
+	
+	s.writeJSONResponse(w, response)
+}
+
+// handleGetCrashInput retrieves the input file for a specific crash
+func (s *Server) handleGetCrashInput(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	crashID := vars["id"]
+	
+	if crashID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Crash ID is required", nil)
+		return
+	}
+	
+	// Get crash input data
+	input, err := s.state.GetCrashInput(r.Context(), crashID)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve crash input", err)
+		return
+	}
+	
+	if input == nil || len(input) == 0 {
+		s.writeErrorResponse(w, http.StatusNotFound, "Crash input not found", nil)
+		return
+	}
+	
+	// Set appropriate headers
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"crash_%s.bin\"", crashID[:8]))
+	w.Header().Set("Content-Length", strconv.Itoa(len(input)))
+	
+	// Write the binary data
+	if _, err := w.Write(input); err != nil {
+		s.logger.WithError(err).Error("Failed to write crash input response")
+	}
 }

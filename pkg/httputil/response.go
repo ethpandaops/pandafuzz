@@ -23,7 +23,7 @@ func NewResponseWriter(logger *logrus.Logger) *ResponseWriter {
 }
 
 // WriteJSON writes a JSON response with the given status code
-func (rw *ResponseWriter) WriteJSON(w http.ResponseWriter, statusCode int, data interface{}) error {
+func (rw *ResponseWriter) WriteJSON(w http.ResponseWriter, statusCode int, data any) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	
@@ -36,12 +36,12 @@ func (rw *ResponseWriter) WriteJSON(w http.ResponseWriter, statusCode int, data 
 }
 
 // WriteJSONOK writes a successful JSON response
-func (rw *ResponseWriter) WriteJSONOK(w http.ResponseWriter, data interface{}) error {
+func (rw *ResponseWriter) WriteJSONOK(w http.ResponseWriter, data any) error {
 	return rw.WriteJSON(w, http.StatusOK, data)
 }
 
 // WriteJSONCreated writes a created JSON response
-func (rw *ResponseWriter) WriteJSONCreated(w http.ResponseWriter, data interface{}) error {
+func (rw *ResponseWriter) WriteJSONCreated(w http.ResponseWriter, data any) error {
 	return rw.WriteJSON(w, http.StatusCreated, data)
 }
 
@@ -114,13 +114,13 @@ type ErrorResponse struct {
 type SuccessResponse struct {
 	Success   bool        `json:"success"`
 	Message   string      `json:"message,omitempty"`
-	Data      interface{} `json:"data,omitempty"`
+	Data      any `json:"data,omitempty"`
 	Timestamp time.Time   `json:"timestamp"`
 }
 
 // PaginatedResponse represents a paginated response
 type PaginatedResponse struct {
-	Items      interface{} `json:"items"`
+	Items      any `json:"items"`
 	Total      int         `json:"total"`
 	Page       int         `json:"page"`
 	Limit      int         `json:"limit"`
@@ -130,7 +130,7 @@ type PaginatedResponse struct {
 }
 
 // NewSuccessResponse creates a new success response
-func NewSuccessResponse(message string, data interface{}) SuccessResponse {
+func NewSuccessResponse(message string, data any) SuccessResponse {
 	return SuccessResponse{
 		Success:   true,
 		Message:   message,
@@ -140,7 +140,7 @@ func NewSuccessResponse(message string, data interface{}) SuccessResponse {
 }
 
 // NewPaginatedResponse creates a new paginated response
-func NewPaginatedResponse(items interface{}, total, page, limit int) PaginatedResponse {
+func NewPaginatedResponse(items any, total, page, limit int) PaginatedResponse {
 	totalPages := (total + limit - 1) / limit
 	return PaginatedResponse{
 		Items:      items,
@@ -156,7 +156,7 @@ func NewPaginatedResponse(items interface{}, total, page, limit int) PaginatedRe
 // Helper functions for common responses
 
 // WriteJSONResponse is a standalone function for simple JSON responses
-func WriteJSONResponse(w http.ResponseWriter, data interface{}) error {
+func WriteJSONResponse(w http.ResponseWriter, data any) error {
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(data)
 }

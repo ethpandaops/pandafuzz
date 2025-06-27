@@ -61,7 +61,7 @@ func TestBotReceiveJob(t *testing.T) {
 
 		case fmt.Sprintf("/api/v1/jobs/%s/status", jobID):
 			// Update job status
-			var req map[string]interface{}
+			var req map[string]any
 			json.NewDecoder(r.Body).Decode(&req)
 			
 			status, ok := req["status"].(string)
@@ -158,7 +158,7 @@ func TestBotReceiveJob(t *testing.T) {
 			},
 			CrashesFound: 3,
 			TimeoutsFound: 1,
-			Metrics: map[string]interface{}{
+			Metrics: map[string]any{
 				"peak_memory_mb": 512,
 				"cpu_usage_avg":  85.5,
 			},
@@ -223,7 +223,7 @@ func TestBotJobExecutionFlow(t *testing.T) {
 			}
 
 		case fmt.Sprintf("/api/v1/jobs/%s/status", jobID):
-			var req map[string]interface{}
+			var req map[string]any
 			json.NewDecoder(r.Body).Decode(&req)
 			
 			stateMu.Lock()
@@ -380,7 +380,7 @@ func TestBotJobTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case fmt.Sprintf("/api/v1/jobs/%s/status", jobID):
-			var req map[string]interface{}
+			var req map[string]any
 			json.NewDecoder(r.Body).Decode(&req)
 			
 			mu.Lock()

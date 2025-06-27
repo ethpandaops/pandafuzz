@@ -17,7 +17,14 @@ type jobService struct {
 	timeoutManager TimeoutManager
 	config         *common.MasterConfig
 	logger         *logrus.Logger
+	
+	// Lifecycle management
+	ctx    context.Context
+	cancel context.CancelFunc
 }
+
+// Compile-time interface compliance check
+var _ JobService = (*jobService)(nil)
 
 // NewJobService creates a new job service
 func NewJobService(
@@ -278,4 +285,28 @@ func (s *jobService) GetJobLogs(ctx context.Context, jobID string) ([]string, er
 	}
 
 	return logs, nil
+}
+
+// Start starts the job service
+func (s *jobService) Start(ctx context.Context) error {
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	
+	// Start any background goroutines here
+	// Currently job service doesn't have background tasks
+	
+	s.logger.Info("Job service started")
+	return nil
+}
+
+// Stop stops the job service
+func (s *jobService) Stop() error {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	
+	// Clean up any resources
+	// Currently job service doesn't have resources to clean up
+	
+	s.logger.Info("Job service stopped")
+	return nil
 }

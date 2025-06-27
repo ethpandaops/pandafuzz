@@ -7,6 +7,7 @@ name: "pandafuzz-bot"     # Human-readable bot name
 
 # Master server configuration
 master_url: "http://localhost:8080"  # URL of the master server
+api_port: 9049                       # Port for bot's API server
 
 # Bot capabilities
 capabilities:

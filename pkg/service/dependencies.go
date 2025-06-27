@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
@@ -27,8 +28,8 @@ type StateStore interface {
 	ProcessCorpusUpdateWithRetry(corpus *common.CorpusUpdate) error
 	
 	// Stats and health
-	GetStats() interface{}
-	GetDatabaseStats() interface{}
+	GetStats() any
+	GetDatabaseStats() any
 	HealthCheck() error
 }
 
@@ -47,11 +48,11 @@ type TimeoutManager interface {
 	ListJobTimeouts() map[string]time.Time
 	
 	// General operations
-	GetStats() interface{}
+	GetStats() any
 	ForceTimeout(timeoutType string, entityID string) error
 }
 
 // RecoveryManager defines the interface for recovery operations
 type RecoveryManager interface {
-	RecoverOnStartup() error
+	RecoverOnStartup(ctx context.Context) error
 }

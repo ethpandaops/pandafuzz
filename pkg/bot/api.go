@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
@@ -24,15 +27,16 @@ type APIServer struct {
 
 // JobStatus represents the status of a job on the bot
 type JobStatus struct {
-	JobID      string    `json:"job_id"`
-	Status     string    `json:"status"` // running, completed, failed
-	StartTime  time.Time `json:"start_time"`
-	EndTime    time.Time `json:"end_time,omitempty"`
-	Success    bool      `json:"success,omitempty"`
-	Message    string    `json:"message,omitempty"`
-	Output     string    `json:"output,omitempty"`
-	CrashCount int       `json:"crash_count,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	JobID      string              `json:"job_id"`
+	Status     string              `json:"status"` // running, completed, failed, pending_ack
+	StartTime  time.Time           `json:"start_time"`
+	EndTime    time.Time           `json:"end_time,omitempty"`
+	Success    bool                `json:"success,omitempty"`
+	Message    string              `json:"message,omitempty"`
+	Output     string              `json:"output,omitempty"`
+	CrashCount int                 `json:"crash_count,omitempty"`
+	Crashes    []common.CrashResult `json:"crashes,omitempty"` // Store actual crash data
+	UpdatedAt  time.Time           `json:"updated_at"`
 }
 
 // HealthResponse represents the bot's health status
@@ -47,10 +51,7 @@ type HealthResponse struct {
 }
 
 // NewAPIServer creates a new API server for the bot
-func NewAPIServer(agent *Agent, port int) *APIServer {
-	logger := logrus.New()
-	logger.SetLevel(logrus.InfoLevel)
-	
+func NewAPIServer(agent *Agent, port int, logger *logrus.Logger) *APIServer {
 	s := &APIServer{
 		agent:    agent,
 		port:     port,
@@ -70,6 +71,7 @@ func (s *APIServer) setupRoutes() {
 	api.HandleFunc("/health", s.handleHealth).Methods("GET")
 	api.HandleFunc("/job/{jobID}/status", s.handleJobStatus).Methods("GET")
 	api.HandleFunc("/jobs", s.handleListJobs).Methods("GET")
+	api.HandleFunc("/jobs/{jobID}/crashes", s.handleJobCrashes).Methods("GET")
 	api.HandleFunc("/metrics", s.handleMetrics).Methods("GET")
 }
 
@@ -179,7 +181,7 @@ func (s *APIServer) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		jobs = append(jobs, status)
 	}
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"jobs": jobs,
 	}
 	s.writeJSONResponse(w, response)
@@ -190,7 +192,7 @@ func (s *APIServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	metrics := map[string]interface{}{
+	metrics := map[string]any{
 		"bot_id":          s.agent.ID,
 		"jobs_completed":  s.agent.jobsCompleted,
 		"jobs_failed":     s.agent.jobsFailed,
@@ -244,6 +246,18 @@ func (s *APIServer) MarkJobCompleted(jobID string, success bool, message string,
 	
 	if s.agent.currentJob != nil {
 		status.CrashCount = s.agent.currentJobCrashes
+		
+		// Store crash data if available
+		if status.CrashCount > 0 {
+			crashes := s.getJobCrashes(jobID)
+			if len(crashes) > 0 {
+				status.Crashes = crashes
+				s.logger.WithFields(logrus.Fields{
+					"job_id":     jobID,
+					"crash_count": len(crashes),
+				}).Debug("Cached crash data for completed job")
+			}
+		}
 	}
 	
 	s.UpdateJobStatus(jobID, status)
@@ -263,8 +277,45 @@ func (s *APIServer) MarkJobFailed(jobID string, err error) {
 	s.UpdateJobStatus(jobID, status)
 }
 
+// MarkJobPendingCompletion marks a job as pending acknowledgment in the cache
+func (s *APIServer) MarkJobPendingCompletion(jobID string, success bool, message string, output string) {
+	status := &JobStatus{
+		JobID:     jobID,
+		Status:    "pending_ack",
+		StartTime: s.agent.jobStartTime,
+		EndTime:   time.Now(),
+		Success:   success,
+		Message:   message,
+		Output:    output,
+	}
+	
+	if s.agent.currentJob != nil {
+		status.CrashCount = s.agent.currentJobCrashes
+		
+		// Store crash data if available
+		if status.CrashCount > 0 {
+			crashes := s.getJobCrashes(jobID)
+			if len(crashes) > 0 {
+				status.Crashes = crashes
+				s.logger.WithFields(logrus.Fields{
+					"job_id":     jobID,
+					"crash_count": len(crashes),
+				}).Debug("Cached crash data for job pending acknowledgment")
+			}
+		}
+	}
+	
+	s.UpdateJobStatus(jobID, status)
+	
+	s.logger.WithFields(logrus.Fields{
+		"job_id":  jobID,
+		"success": success,
+		"message": message,
+	}).Info("Job marked as pending acknowledgment")
+}
+
 // writeJSONResponse writes a JSON response
-func (s *APIServer) writeJSONResponse(w http.ResponseWriter, data interface{}) {
+func (s *APIServer) writeJSONResponse(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	
@@ -272,6 +323,75 @@ func (s *APIServer) writeJSONResponse(w http.ResponseWriter, data interface{}) {
 		s.logger.WithError(err).Error("Failed to encode JSON response")
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 	}
+}
+
+// handleJobCrashes returns crashes found for a specific job
+func (s *APIServer) handleJobCrashes(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	jobID := vars["jobID"]
+	
+	s.logger.WithField("job_id", jobID).Debug("Handling job crashes request")
+	
+	// Get crashes from cache or current job
+	crashes := s.getJobCrashes(jobID)
+	
+	s.logger.WithFields(logrus.Fields{
+		"job_id": jobID,
+		"count":  len(crashes),
+	}).Debug("Returning job crashes")
+	
+	// Return crashes array directly (not wrapped)
+	s.writeJSONResponse(w, crashes)
+}
+
+// getJobCrashes retrieves crashes for a job from cache or current job
+func (s *APIServer) getJobCrashes(jobID string) []common.CrashResult {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	crashes := []common.CrashResult{}
+	
+	// Check if this is the current job
+	if s.agent.currentJob != nil && s.agent.currentJob.ID == jobID {
+		// Get crashes from the working directory
+		if crashFiles, err := s.agent.findCrashFiles(s.agent.currentJob.WorkDir); err == nil {
+			for _, crashPath := range crashFiles {
+				if crashData, err := os.ReadFile(crashPath); err == nil {
+					crash := common.CrashResult{
+						ID:        fmt.Sprintf("%s_%s", jobID, filepath.Base(crashPath)),
+						JobID:     jobID,
+						BotID:     s.agent.ID,
+						Hash:      s.agent.hashCrashInput(crashData),
+						FilePath:  crashPath,
+						Type:      "libfuzzer",
+						Size:      int64(len(crashData)),
+						Input:     crashData,
+						Timestamp: time.Now(),
+					}
+					crashes = append(crashes, crash)
+				}
+			}
+		}
+	}
+	
+	// Check cache for completed jobs
+	if jobStatus, ok := s.jobCache[jobID]; ok && jobStatus.Status == "completed" {
+		// Return cached crashes if available
+		if len(jobStatus.Crashes) > 0 {
+			s.logger.WithFields(logrus.Fields{
+				"job_id":     jobID,
+				"crash_count": len(jobStatus.Crashes),
+			}).Debug("Returning cached crashes")
+			return jobStatus.Crashes
+		}
+		
+		s.logger.WithFields(logrus.Fields{
+			"job_id":     jobID,
+			"crash_count": jobStatus.CrashCount,
+		}).Debug("Job is in cache but crash data not available")
+	}
+	
+	return crashes
 }
 
 // writeErrorResponse writes an error response

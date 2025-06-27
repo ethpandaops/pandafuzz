@@ -48,9 +48,7 @@ type LogPushResponse struct {
 }
 
 // NewRetryClient creates a new retry client for bot communication
-func NewRetryClient(config *common.BotConfig) (*RetryClient, error) {
-	logger := logrus.New()
-	logger.SetLevel(logrus.InfoLevel)
+func NewRetryClient(config *common.BotConfig, logger *logrus.Logger) (*RetryClient, error) {
 	
 	// Configure HTTP client with timeouts
 	httpClient := &http.Client{
@@ -89,12 +87,19 @@ func NewRetryClient(config *common.BotConfig) (*RetryClient, error) {
 
 // RegisterBot registers the bot with the master
 func (rc *RetryClient) RegisterBot(botID string, capabilities []string, apiEndpoint string) (*BotRegisterResponse, error) {
-	request := map[string]interface{}{
+	request := map[string]any{
 		"hostname":     rc.getHostname(),
 		"name":         rc.config.Name,
 		"capabilities": capabilities,
 		"api_endpoint": apiEndpoint,
 	}
+	
+	rc.logger.WithFields(logrus.Fields{
+		"hostname":     rc.getHostname(),
+		"name":         rc.config.Name,
+		"capabilities": capabilities,
+		"api_endpoint": apiEndpoint,
+	}).Debug("Sending bot registration request")
 	
 	var response BotRegisterResponse
 	err := rc.retryManager.Execute(func() error {
@@ -134,7 +139,7 @@ func (rc *RetryClient) DeregisterBot(botID string) error {
 
 // SendHeartbeat sends a heartbeat to the master
 func (rc *RetryClient) SendHeartbeat(botID string, status common.BotStatus, currentJob *string) error {
-	request := map[string]interface{}{
+	request := map[string]any{
 		"status":        status,
 		"current_job":   currentJob,
 		"last_activity": time.Now(),
@@ -174,7 +179,7 @@ func (rc *RetryClient) GetJob(botID string) (*common.Job, error) {
 	}
 	
 	// Parse response to check if it's a job or a status message
-	var statusResponse map[string]interface{}
+	var statusResponse map[string]any
 	if err := json.Unmarshal(response, &statusResponse); err == nil {
 		if status, exists := statusResponse["status"]; exists && status == "no_jobs_available" {
 			rc.logger.Debug("No jobs available from master")
@@ -198,17 +203,24 @@ func (rc *RetryClient) GetJob(botID string) (*common.Job, error) {
 	return &job, nil
 }
 
-// CompleteJob notifies the master of job completion
+// CompleteJob notifies the master of job completion and waits for acknowledgment
 func (rc *RetryClient) CompleteJob(botID string, success bool, message string) error {
-	request := map[string]interface{}{
+	request := map[string]any{
 		"success":   success,
 		"timestamp": time.Now(),
 		"message":   message,
 	}
 	
+	// Create a response object to capture the acknowledgment
+	var response struct {
+		Acknowledged bool   `json:"acknowledged"`
+		JobID        string `json:"job_id"`
+		Message      string `json:"message"`
+	}
+	
 	err := rc.retryManager.Execute(func() error {
 		return rc.circuitBreaker.Execute(func() error {
-			return rc.doRequest("POST", fmt.Sprintf("/api/v1/bots/%s/job/complete", botID), request, nil)
+			return rc.doRequest("POST", fmt.Sprintf("/api/v1/bots/%s/job/complete", botID), request, &response)
 		})
 	})
 	
@@ -216,11 +228,22 @@ func (rc *RetryClient) CompleteJob(botID string, success bool, message string) e
 		return common.NewNetworkError("complete_job", err)
 	}
 	
+	// Check if master acknowledged the completion
+	if !response.Acknowledged {
+		rc.logger.WithFields(logrus.Fields{
+			"bot_id":  botID,
+			"success": success,
+			"message": response.Message,
+		}).Error("Master did not acknowledge job completion")
+		return common.NewNetworkError("complete_job", fmt.Errorf("master did not acknowledge completion: %s", response.Message))
+	}
+	
 	rc.logger.WithFields(logrus.Fields{
 		"bot_id":  botID,
+		"job_id":  response.JobID,
 		"success": success,
 		"message": message,
-	}).Info("Job completion reported to master")
+	}).Info("Job completion acknowledged by master")
 	
 	return nil
 }
@@ -292,7 +315,7 @@ func (rc *RetryClient) ReportCorpusUpdate(corpus *common.CorpusUpdate) error {
 }
 
 // ReportStatus reports general status to the master
-func (rc *RetryClient) ReportStatus(status map[string]interface{}) error {
+func (rc *RetryClient) ReportStatus(status map[string]any) error {
 	err := rc.retryManager.Execute(func() error {
 		return rc.circuitBreaker.Execute(func() error {
 			return rc.doRequest("POST", "/api/v1/results/status", status, nil)
@@ -330,8 +353,8 @@ func (rc *RetryClient) Ping() error {
 }
 
 // GetStats returns client statistics
-func (rc *RetryClient) GetStats() map[string]interface{} {
-	return map[string]interface{}{
+func (rc *RetryClient) GetStats() map[string]any {
+	return map[string]any{
 		"circuit_breaker": rc.circuitBreaker.GetStats(),
 		"master_url":      rc.masterURL,
 		"client_timeout":  rc.httpClient.Timeout,
@@ -339,7 +362,7 @@ func (rc *RetryClient) GetStats() map[string]interface{} {
 }
 
 // doRequest performs an HTTP request with proper error handling
-func (rc *RetryClient) doRequest(method, path string, requestBody interface{}, responseBody interface{}) error {
+func (rc *RetryClient) doRequest(method, path string, requestBody any, responseBody any) error {
 	url := rc.masterURL + path
 	
 	// Prepare request body
@@ -350,6 +373,16 @@ func (rc *RetryClient) doRequest(method, path string, requestBody interface{}, r
 			return fmt.Errorf("failed to marshal request: %w", err)
 		}
 		body = bytes.NewBuffer(jsonData)
+		
+		// Debug log registration requests
+		if method == "POST" && path == "/api/v1/bots/register" {
+			rc.logger.WithFields(logrus.Fields{
+				"method": method,
+				"path":   path,
+				"url":    url,
+				"body":   string(jsonData),
+			}).Debug("Sending registration request")
+		}
 	}
 	
 	// Create request
@@ -378,7 +411,7 @@ func (rc *RetryClient) doRequest(method, path string, requestBody interface{}, r
 	// Check status code
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Try to parse error response
-		var errorResp map[string]interface{}
+		var errorResp map[string]any
 		if json.Unmarshal(respData, &errorResp) == nil {
 			if errorMsg, exists := errorResp["error"]; exists {
 				return fmt.Errorf("server error (%d): %v", resp.StatusCode, errorMsg)
@@ -405,10 +438,6 @@ func (rc *RetryClient) getHostname() string {
 	return "unknown"
 }
 
-// SetLogLevel sets the logging level
-func (rc *RetryClient) SetLogLevel(level logrus.Level) {
-	rc.logger.SetLevel(level)
-}
 
 // PushJobLogs pushes job logs to the master
 func (rc *RetryClient) PushJobLogs(jobID, botID string, logFilePath string) error {

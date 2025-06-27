@@ -277,7 +277,7 @@ func TestAPIEndpoints(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	
-	var status map[string]interface{}
+	var status map[string]any
 	err = json.NewDecoder(resp.Body).Decode(&status)
 	resp.Body.Close()
 	require.NoError(t, err)
@@ -394,7 +394,7 @@ func TestInvalidBotRequests(t *testing.T) {
 
 	// Test heartbeat from unregistered bot
 	url := env.masterURL + "/api/v1/bots/unknown-bot/heartbeat"
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"status": "idle",
 	}
 	
@@ -408,7 +408,7 @@ func TestInvalidBotRequests(t *testing.T) {
 
 	// Test invalid registration (empty capabilities)
 	url = env.masterURL + "/api/v1/bots/register"
-	payload = map[string]interface{}{
+	payload = map[string]any{
 		"hostname":     "test",
 		"capabilities": []string{},
 	}

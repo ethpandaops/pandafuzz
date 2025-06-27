@@ -81,6 +81,14 @@ func main() {
 		config.ID = fmt.Sprintf("bot-%s-%s", hostname, uuid.New().String()[:8])
 	}
 	
+	// Log loaded configuration for debugging
+	logger.WithFields(logrus.Fields{
+		"id":           config.ID,
+		"name":         config.Name,
+		"master_url":   config.MasterURL,
+		"capabilities": config.Capabilities,
+	}).Info("Loaded bot configuration")
+	
 	// Validate configuration
 	if err := validateConfig(config); err != nil {
 		logger.WithError(err).Fatal("Invalid configuration")
@@ -104,7 +112,7 @@ func main() {
 		"work_dir":     config.Fuzzing.WorkDir,
 	}).Info("Initializing PandaFuzz Bot")
 	
-	agent, err := bot.NewAgent(config)
+	agent, err := bot.NewAgent(config, logger)
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to create bot agent")
 	}
@@ -177,10 +185,8 @@ func setupLogging(level string) *logrus.Logger {
 	logger.SetLevel(logLevel)
 	
 	// Set formatter
-	logger.SetFormatter(&logrus.TextFormatter{
-		FullTimestamp:   true,
+	logger.SetFormatter(&logrus.JSONFormatter{
 		TimestampFormat: "2006-01-02T15:04:05.000Z07:00",
-		DisableColors:   false,
 	})
 	
 	// Set output
@@ -234,9 +240,22 @@ func loadConfig(configFile string) (*common.BotConfig, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 	
-	// Parse YAML
-	if err := yaml.Unmarshal(data, config); err != nil {
+	// Parse YAML - handle both direct and wrapped config formats
+	var wrapper struct {
+		Bot *common.BotConfig `yaml:"bot"`
+	}
+	if err := yaml.Unmarshal(data, &wrapper); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	
+	// If the config is wrapped under "bot:" key, use that
+	if wrapper.Bot != nil {
+		config = wrapper.Bot
+	} else {
+		// Otherwise try parsing directly
+		if err := yaml.Unmarshal(data, config); err != nil {
+			return nil, fmt.Errorf("failed to parse config file: %w", err)
+		}
 	}
 	
 	// Set additional retry configurations if not already set

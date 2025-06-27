@@ -37,7 +37,7 @@ type Error struct {
 	Type      ErrorType              `json:"type"`
 	Operation string                 `json:"operation"`
 	Message   string                 `json:"message"`
-	Details   map[string]interface{} `json:"details,omitempty"`
+	Details   map[string]any `json:"details,omitempty"`
 	Cause     error                  `json:"-"`
 	Stack     []string               `json:"stack,omitempty"`
 	Timestamp time.Time              `json:"timestamp"`
@@ -57,18 +57,18 @@ func (e *Error) Unwrap() error {
 }
 
 // WithDetail adds a detail to the error
-func (e *Error) WithDetail(key string, value interface{}) *Error {
+func (e *Error) WithDetail(key string, value any) *Error {
 	if e.Details == nil {
-		e.Details = make(map[string]interface{})
+		e.Details = make(map[string]any)
 	}
 	e.Details[key] = value
 	return e
 }
 
 // WithDetails adds multiple details to the error
-func (e *Error) WithDetails(details map[string]interface{}) *Error {
+func (e *Error) WithDetails(details map[string]any) *Error {
 	if e.Details == nil {
-		e.Details = make(map[string]interface{})
+		e.Details = make(map[string]any)
 	}
 	for k, v := range details {
 		e.Details[k] = v

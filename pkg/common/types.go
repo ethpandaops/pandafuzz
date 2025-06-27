@@ -183,7 +183,7 @@ type PandaFuzzError struct {
 	Type    ErrorType              `json:"type"`
 	Op      string                 `json:"operation"`
 	Err     error                  `json:"error"`
-	Context map[string]interface{} `json:"context"`
+	Context map[string]any `json:"context"`
 }
 
 func (e *PandaFuzzError) Error() string {

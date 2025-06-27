@@ -9,7 +9,7 @@ import (
 
 // handleHealth provides health check endpoint
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	health := map[string]interface{}{
+	health := map[string]any{
 		"status":    "healthy",
 		"timestamp": time.Now(),
 		"uptime":    time.Since(s.stats.StartTime),
@@ -19,7 +19,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Check component health
-	if err := s.state.HealthCheck(); err != nil {
+	if err := s.state.HealthCheck(r.Context()); err != nil {
 		health["status"] = "unhealthy"
 		health["database_error"] = err.Error()
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -36,11 +36,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // handleMetrics provides metrics endpoint
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	metrics := map[string]interface{}{
+	metrics := map[string]any{
 		"server":          s.GetStats(),
 		"state":           s.state.GetStats(),
 		"timeouts":        s.timeoutManager.GetStats(),
-		"database":        s.state.GetDatabaseStats(),
+		"database":        s.state.GetDatabaseStats(r.Context()),
 		"circuit_breaker": s.circuitBreaker.GetStats(),
 	}
 	
@@ -51,21 +51,21 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	botTimeouts, jobTimeouts := s.timeoutManager.GetActiveTimeouts()
 	
-	status := map[string]interface{}{
-		"server": map[string]interface{}{
+	status := map[string]any{
+		"server": map[string]any{
 			"running":    s.running,
 			"start_time": s.stats.StartTime,
 			"uptime":     time.Since(s.stats.StartTime),
 		},
-		"bots": map[string]interface{}{
+		"bots": map[string]any{
 			"total":         len(s.state.bots),
 			"active_timeouts": botTimeouts,
 		},
-		"jobs": map[string]interface{}{
+		"jobs": map[string]any{
 			"total":         len(s.state.jobs),
 			"active_timeouts": jobTimeouts,
 		},
-		"database": s.state.GetDatabaseStats(),
+		"database": s.state.GetDatabaseStats(r.Context()),
 	}
 	
 	s.writeJSONResponse(w, status)
@@ -91,7 +91,7 @@ func (s *Server) updateRequestMetrics(duration time.Duration, isError bool) {
 }
 
 // writeJSONResponse writes a JSON response
-func (s *Server) writeJSONResponse(w http.ResponseWriter, data interface{}) {
+func (s *Server) writeJSONResponse(w http.ResponseWriter, data any) {
 	s.responseWriter.WriteJSONOK(w, data)
 }
 

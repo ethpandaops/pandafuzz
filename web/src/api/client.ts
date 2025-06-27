@@ -142,13 +142,18 @@ export class PandaFuzzAPI {
     offset?: number;
   }): Promise<CrashResult[]> {
     try {
-      const response = await this.client.get<CrashResult[]>('/results/crashes', {
+      const response = await this.client.get<{
+        crashes: CrashResult[];
+        count: number;
+        limit: number;
+        offset: number;
+      }>('/results/crashes', {
         params,
       });
-      return response.data;
+      return response.data.crashes || [];
     } catch (error) {
       // Return empty array if endpoint doesn't exist
-      console.warn('Crashes endpoint not implemented, returning empty array');
+      console.warn('Crashes endpoint error:', error);
       return [];
     }
   }

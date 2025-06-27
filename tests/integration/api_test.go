@@ -29,7 +29,7 @@ func TestHealthEndpoint(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	
-	var health map[string]interface{}
+	var health map[string]any
 	err = json.NewDecoder(resp.Body).Decode(&health)
 	require.NoError(t, err)
 	
@@ -60,7 +60,7 @@ func TestSystemStatusEndpoint(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	
-	var status map[string]interface{}
+	var status map[string]any
 	err = json.NewDecoder(resp.Body).Decode(&status)
 	require.NoError(t, err)
 	
@@ -70,10 +70,10 @@ func TestSystemStatusEndpoint(t *testing.T) {
 	assert.Contains(t, status, "uptime")
 	
 	// Check counts
-	bots := status["bots"].(map[string]interface{})
+	bots := status["bots"].(map[string]any)
 	assert.Equal(t, float64(1), bots["total"])
 	
-	jobs := status["jobs"].(map[string]interface{})
+	jobs := status["jobs"].(map[string]any)
 	assert.Equal(t, float64(1), jobs["total"])
 }
 
@@ -153,7 +153,7 @@ func TestJobEndpoints(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test creating job via API
-	jobRequest := map[string]interface{}{
+	jobRequest := map[string]any{
 		"name":         "api-test-job",
 		"priority":     "normal",
 		"fuzzer":       "afl++",
@@ -249,7 +249,7 @@ func TestResultsEndpoints(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test crash reporting endpoint
-	crashRequest := map[string]interface{}{
+	crashRequest := map[string]any{
 		"id":        "crash-123",
 		"job_id":    job.ID,
 		"bot_id":    "test-bot",
@@ -273,7 +273,7 @@ func TestResultsEndpoints(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
 	// Test coverage reporting endpoint
-	coverageRequest := map[string]interface{}{
+	coverageRequest := map[string]any{
 		"id":               "coverage-123",
 		"job_id":           job.ID,
 		"bot_id":           "test-bot",
@@ -380,13 +380,13 @@ func TestErrorHandling(t *testing.T) {
 	
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	
-	var errorResp map[string]interface{}
+	var errorResp map[string]any
 	err = json.NewDecoder(resp.Body).Decode(&errorResp)
 	require.NoError(t, err)
 	assert.Contains(t, errorResp, "error")
 
 	// Test missing required fields
-	invalidJob := map[string]interface{}{
+	invalidJob := map[string]any{
 		"name": "missing-fields",
 		// Missing required fields
 	}
@@ -456,7 +456,7 @@ func TestConcurrentAPIRequests(t *testing.T) {
 				
 			case 3:
 				// Create job
-				jobReq := map[string]interface{}{
+				jobReq := map[string]any{
 					"name":        fmt.Sprintf("concurrent-job-%d", index),
 					"fuzzer":      "afl++",
 					"target":      "/bin/test",

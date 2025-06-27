@@ -25,16 +25,25 @@ type SQLiteStorage struct {
 	config common.DatabaseConfig
 }
 
+// Compile-time interface compliance check
+var _ common.AdvancedDatabase = (*SQLiteStorage)(nil)
+
 // SQLiteTransaction implements the Transaction interface
 type SQLiteTransaction struct {
 	tx     *sql.Tx
 	logger *logrus.Logger
+	ctx    context.Context
 }
 
+// Compile-time interface compliance check
+var _ common.Transaction = (*SQLiteTransaction)(nil)
+
 // NewSQLiteStorage creates a new SQLite storage instance
-func NewSQLiteStorage(config common.DatabaseConfig) (common.AdvancedDatabase, error) {
-	logger := logrus.New()
-	logger.SetLevel(logrus.InfoLevel)
+func NewSQLiteStorage(config common.DatabaseConfig, logger *logrus.Logger) (common.AdvancedDatabase, error) {
+	if logger == nil {
+		logger = logrus.New()
+		logger.SetLevel(logrus.InfoLevel)
+	}
 
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(config.Path), 0755); err != nil {
@@ -67,13 +76,13 @@ func NewSQLiteStorage(config common.DatabaseConfig) (common.AdvancedDatabase, er
 	}
 
 	// Initialize database schema
-	if err := storage.createTables(); err != nil {
+	if err := storage.createTablesContext(context.Background()); err != nil {
 		db.Close()
 		return nil, common.NewDatabaseError("create_tables", err)
 	}
 
 	// Apply migrations for normalized schema
-	if err := MigrateExistingData(db); err != nil {
+	if err := MigrateExistingData(context.Background(), db); err != nil {
 		db.Close()
 		return nil, common.NewDatabaseError("apply_migrations", err)
 	}
@@ -82,8 +91,8 @@ func NewSQLiteStorage(config common.DatabaseConfig) (common.AdvancedDatabase, er
 	return storage, nil
 }
 
-// createTables initializes the database schema
-func (s *SQLiteStorage) createTables() error {
+// createTablesContext initializes the database schema with context
+func (s *SQLiteStorage) createTablesContext(ctx context.Context) error {
 	schema := `
 	-- Bots table
 	CREATE TABLE IF NOT EXISTS bots (
@@ -134,6 +143,8 @@ func (s *SQLiteStorage) createTables() error {
 		timestamp DATETIME NOT NULL,
 		size INTEGER,
 		is_unique BOOLEAN DEFAULT TRUE,
+		output TEXT,
+		stack_trace TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(job_id) REFERENCES jobs(id),
 		FOREIGN KEY(bot_id) REFERENCES bots(id)
@@ -183,6 +194,14 @@ func (s *SQLiteStorage) createTables() error {
 		value TEXT NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
+	
+	-- crash input storage (separate table for binary data)
+	CREATE TABLE IF NOT EXISTS crash_inputs (
+		crash_id TEXT PRIMARY KEY,
+		input BLOB NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(crash_id) REFERENCES crashes(id) ON DELETE CASCADE
+	);
 
 	-- Create indexes for performance
 	CREATE INDEX IF NOT EXISTS idx_bots_status ON bots(status);
@@ -196,7 +215,7 @@ func (s *SQLiteStorage) createTables() error {
 	CREATE INDEX IF NOT EXISTS idx_corpus_job_id ON corpus_updates(job_id);
 	`
 
-	_, err := s.db.Exec(schema)
+	_, err := s.db.ExecContext(ctx, schema)
 	if err != nil {
 		return common.NewDatabaseError("create_schema", err)
 	}
@@ -205,9 +224,16 @@ func (s *SQLiteStorage) createTables() error {
 }
 
 // Store implements the Database interface
-func (s *SQLiteStorage) Store(key string, value interface{}) error {
+func (s *SQLiteStorage) Store(ctx context.Context, key string, value any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Check context before proceeding
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 
 	// Convert value to JSON
 	data, err := json.Marshal(value)
@@ -216,15 +242,22 @@ func (s *SQLiteStorage) Store(key string, value interface{}) error {
 	}
 
 	// Determine table and perform operation based on key prefix
-	return s.storeByKey(key, string(data))
+	return s.storeByKeyContext(ctx, key, string(data))
 }
 
 // Get implements the Database interface
-func (s *SQLiteStorage) Get(key string, dest interface{}) error {
+func (s *SQLiteStorage) Get(ctx context.Context, key string, dest any) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	data, err := s.getByKey(key)
+	// Check context before proceeding
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	data, err := s.getByKeyContext(ctx, key)
 	if err != nil {
 		return err
 	}
@@ -238,19 +271,33 @@ func (s *SQLiteStorage) Get(key string, dest interface{}) error {
 }
 
 // Delete implements the Database interface
-func (s *SQLiteStorage) Delete(key string) error {
+func (s *SQLiteStorage) Delete(ctx context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.deleteByKey(key)
+	// Check context before proceeding
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	return s.deleteByKeyContext(ctx, key)
 }
 
 // Transaction implements the Database interface
-func (s *SQLiteStorage) Transaction(fn func(tx common.Transaction) error) error {
+func (s *SQLiteStorage) Transaction(ctx context.Context, fn func(tx common.Transaction) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	sqlTx, err := s.db.Begin()
+	// Check context before proceeding
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	sqlTx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return common.NewDatabaseError("begin_transaction", err)
 	}
@@ -258,6 +305,7 @@ func (s *SQLiteStorage) Transaction(fn func(tx common.Transaction) error) error 
 	tx := &SQLiteTransaction{
 		tx:     sqlTx,
 		logger: s.logger,
+		ctx:    ctx,
 	}
 
 	defer func() {
@@ -282,9 +330,16 @@ func (s *SQLiteStorage) Transaction(fn func(tx common.Transaction) error) error 
 }
 
 // Close implements the Database interface
-func (s *SQLiteStorage) Close() error {
+func (s *SQLiteStorage) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Check context before proceeding
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 
 	if s.db != nil {
 		err := s.db.Close()
@@ -297,7 +352,7 @@ func (s *SQLiteStorage) Close() error {
 }
 
 // Ping implements the Database interface
-func (s *SQLiteStorage) Ping() error {
+func (s *SQLiteStorage) Ping(ctx context.Context) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -305,8 +360,12 @@ func (s *SQLiteStorage) Ping() error {
 		return common.ErrDatabaseClosed
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Create a timeout context if none exists
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
 
 	if err := s.db.PingContext(ctx); err != nil {
 		return common.NewDatabaseError("ping", err)
@@ -316,7 +375,7 @@ func (s *SQLiteStorage) Ping() error {
 }
 
 // Stats implements the Database interface
-func (s *SQLiteStorage) Stats() common.DatabaseStats {
+func (s *SQLiteStorage) Stats(ctx context.Context) common.DatabaseStats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -338,18 +397,18 @@ func (s *SQLiteStorage) Stats() common.DatabaseStats {
 	}
 
 	// Count total keys (tables)
-	if keyCount, err := s.getTotalKeys(); err == nil {
+	if keyCount, err := s.getTotalKeysContext(ctx); err == nil {
 		stats.Keys = keyCount
 	}
 
 	return stats
 }
 
-// storeByKey stores data based on key prefix
-func (s *SQLiteStorage) storeByKey(key, data string) error {
+// storeByKeyContext stores data based on key prefix with context
+func (s *SQLiteStorage) storeByKeyContext(ctx context.Context, key, data string) error {
 	parts := strings.SplitN(key, ":", 2)
 	if len(parts) != 2 {
-		return s.storeMetadata(key, data)
+		return s.storeMetadataContext(context.Background(), key, data)
 	}
 
 	table := parts[0]
@@ -357,27 +416,27 @@ func (s *SQLiteStorage) storeByKey(key, data string) error {
 
 	switch table {
 	case "bot":
-		return s.storeBot(id, data)
+		return s.storeBotContext(ctx, id, data)
 	case "job":
-		return s.storeJob(id, data)
+		return s.storeJobContext(ctx, id, data)
 	case "crash":
-		return s.storeCrash(id, data)
+		return s.storeCrashContext(ctx, id, data)
 	case "coverage":
-		return s.storeCoverage(id, data)
+		return s.storeCoverageContext(ctx, id, data)
 	case "corpus":
-		return s.storeCorpus(id, data)
+		return s.storeCorpusContext(ctx, id, data)
 	case "assignment":
-		return s.storeAssignment(id, data)
+		return s.storeAssignmentContext(ctx, id, data)
 	default:
-		return s.storeMetadata(key, data)
+		return s.storeMetadataContext(ctx, key, data)
 	}
 }
 
-// getByKey retrieves data based on key prefix
-func (s *SQLiteStorage) getByKey(key string) (string, error) {
+// getByKeyContext retrieves data based on key prefix with context
+func (s *SQLiteStorage) getByKeyContext(ctx context.Context, key string) (string, error) {
 	parts := strings.SplitN(key, ":", 2)
 	if len(parts) != 2 {
-		return s.getMetadata(key)
+		return s.getMetadataContext(context.Background(), key)
 	}
 
 	table := parts[0]
@@ -385,27 +444,27 @@ func (s *SQLiteStorage) getByKey(key string) (string, error) {
 
 	switch table {
 	case "bot":
-		return s.getBot(id)
+		return s.getBotContext(ctx, id)
 	case "job":
-		return s.getJob(id)
+		return s.getJobContext(ctx, id)
 	case "crash":
-		return s.getCrash(id)
+		return s.getCrashContext(ctx, id)
 	case "coverage":
-		return s.getCoverage(id)
+		return s.getCoverageContext(ctx, id)
 	case "corpus":
-		return s.getCorpus(id)
+		return s.getCorpusContext(ctx, id)
 	case "assignment":
-		return s.getAssignment(id)
+		return s.getAssignmentContext(ctx, id)
 	default:
-		return s.getMetadata(key)
+		return s.getMetadataContext(ctx, key)
 	}
 }
 
-// deleteByKey deletes data based on key prefix
-func (s *SQLiteStorage) deleteByKey(key string) error {
+// deleteByKeyContext deletes data based on key prefix with context
+func (s *SQLiteStorage) deleteByKeyContext(ctx context.Context, key string) error {
 	parts := strings.SplitN(key, ":", 2)
 	if len(parts) != 2 {
-		return s.deleteMetadata(key)
+		return s.deleteMetadataContext(context.Background(), key)
 	}
 
 	table := parts[0]
@@ -413,213 +472,213 @@ func (s *SQLiteStorage) deleteByKey(key string) error {
 
 	switch table {
 	case "bot":
-		return s.deleteBot(id)
+		return s.deleteBotContext(ctx, id)
 	case "job":
-		return s.deleteJob(id)
+		return s.deleteJobContext(ctx, id)
 	case "crash":
-		return s.deleteCrash(id)
+		return s.deleteCrashContext(ctx, id)
 	case "coverage":
-		return s.deleteCoverage(id)
+		return s.deleteCoverageContext(ctx, id)
 	case "corpus":
-		return s.deleteCorpus(id)
+		return s.deleteCorpusContext(ctx, id)
 	case "assignment":
-		return s.deleteAssignment(id)
+		return s.deleteAssignmentContext(ctx, id)
 	default:
-		return s.deleteMetadata(key)
+		return s.deleteMetadataContext(ctx, key)
 	}
 }
 
 // Table-specific operations
-func (s *SQLiteStorage) storeBot(id, data string) error {
-	query := `INSERT OR REPLACE INTO bots (id, hostname, status, last_seen, registered_at, current_job, capabilities, timeout_at, is_online, failure_count, updated_at) 
-			  SELECT ?, json_extract(?, '$.hostname'), json_extract(?, '$.status'), json_extract(?, '$.last_seen'), 
+func (s *SQLiteStorage) storeBotContext(ctx context.Context, id, data string) error {
+	query := `INSERT OR REPLACE INTO bots (id, name, hostname, status, last_seen, registered_at, current_job, capabilities, timeout_at, is_online, failure_count, api_endpoint, updated_at) 
+			  SELECT ?, json_extract(?, '$.name'), json_extract(?, '$.hostname'), json_extract(?, '$.status'), json_extract(?, '$.last_seen'), 
 			         json_extract(?, '$.registered_at'), json_extract(?, '$.current_job'), json_extract(?, '$.capabilities'),
-			         json_extract(?, '$.timeout_at'), json_extract(?, '$.is_online'), json_extract(?, '$.failure_count'), CURRENT_TIMESTAMP`
+			         json_extract(?, '$.timeout_at'), json_extract(?, '$.is_online'), json_extract(?, '$.failure_count'), json_extract(?, '$.api_endpoint'), CURRENT_TIMESTAMP`
 	
-	_, err := s.db.Exec(query, id, data, data, data, data, data, data, data, data, data)
+	_, err := s.db.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data)
 	return err
 }
 
-func (s *SQLiteStorage) getBot(id string) (string, error) {
-	query := `SELECT json_object('id', id, 'hostname', hostname, 'status', status, 'last_seen', last_seen,
+func (s *SQLiteStorage) getBotContext(ctx context.Context, id string) (string, error) {
+	query := `SELECT json_object('id', id, 'name', name, 'hostname', hostname, 'status', status, 'last_seen', last_seen,
 			         'registered_at', registered_at, 'current_job', current_job, 'capabilities', json(capabilities),
-			         'timeout_at', timeout_at, 'is_online', is_online, 'failure_count', failure_count) FROM bots WHERE id = ?`
+			         'timeout_at', timeout_at, 'is_online', CAST(is_online AS INTEGER) != 0, 'failure_count', failure_count, 'api_endpoint', api_endpoint) FROM bots WHERE id = ?`
 	
 	var data string
-	err := s.db.QueryRow(query, id).Scan(&data)
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&data)
 	if err == sql.ErrNoRows {
 		return "", common.ErrKeyNotFound
 	}
 	return data, err
 }
 
-func (s *SQLiteStorage) deleteBot(id string) error {
-	_, err := s.db.Exec("DELETE FROM bots WHERE id = ?", id)
+func (s *SQLiteStorage) deleteBotContext(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM bots WHERE id = ?", id)
 	return err
 }
 
-func (s *SQLiteStorage) storeJob(id, data string) error {
+func (s *SQLiteStorage) storeJobContext(ctx context.Context, id, data string) error {
 	query := `INSERT OR REPLACE INTO jobs (id, name, target, fuzzer, status, assigned_bot, created_at, started_at, completed_at, timeout_at, work_dir, config, updated_at)
 			  SELECT ?, json_extract(?, '$.name'), json_extract(?, '$.target'), json_extract(?, '$.fuzzer'),
 			         json_extract(?, '$.status'), json_extract(?, '$.assigned_bot'), json_extract(?, '$.created_at'),
 			         json_extract(?, '$.started_at'), json_extract(?, '$.completed_at'), json_extract(?, '$.timeout_at'),
 			         json_extract(?, '$.work_dir'), json_extract(?, '$.config'), CURRENT_TIMESTAMP`
 	
-	_, err := s.db.Exec(query, id, data, data, data, data, data, data, data, data, data, data, data)
+	_, err := s.db.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data)
 	return err
 }
 
-func (s *SQLiteStorage) getJob(id string) (string, error) {
+func (s *SQLiteStorage) getJobContext(ctx context.Context, id string) (string, error) {
 	query := `SELECT json_object('id', id, 'name', name, 'target', target, 'fuzzer', fuzzer, 'status', status,
 			         'assigned_bot', assigned_bot, 'created_at', created_at, 'started_at', started_at,
 			         'completed_at', completed_at, 'timeout_at', timeout_at, 'work_dir', work_dir,
 			         'config', json(config)) FROM jobs WHERE id = ?`
 	
 	var data string
-	err := s.db.QueryRow(query, id).Scan(&data)
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&data)
 	if err == sql.ErrNoRows {
 		return "", common.ErrKeyNotFound
 	}
 	return data, err
 }
 
-func (s *SQLiteStorage) deleteJob(id string) error {
-	_, err := s.db.Exec("DELETE FROM jobs WHERE id = ?", id)
+func (s *SQLiteStorage) deleteJobContext(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", id)
 	return err
 }
 
-func (s *SQLiteStorage) storeCrash(id, data string) error {
-	query := `INSERT OR REPLACE INTO crashes (id, job_id, bot_id, hash, file_path, type, signal, exit_code, timestamp, size, is_unique)
+func (s *SQLiteStorage) storeCrashContext(ctx context.Context, id, data string) error {
+	query := `INSERT OR REPLACE INTO crashes (id, job_id, bot_id, hash, file_path, type, signal, exit_code, timestamp, size, is_unique, output, stack_trace)
 			  SELECT ?, json_extract(?, '$.job_id'), json_extract(?, '$.bot_id'), json_extract(?, '$.hash'),
 			         json_extract(?, '$.file_path'), json_extract(?, '$.type'), json_extract(?, '$.signal'),
 			         json_extract(?, '$.exit_code'), json_extract(?, '$.timestamp'), json_extract(?, '$.size'),
-			         json_extract(?, '$.is_unique')`
+			         json_extract(?, '$.is_unique'), json_extract(?, '$.output'), json_extract(?, '$.stack_trace')`
 	
-	_, err := s.db.Exec(query, id, data, data, data, data, data, data, data, data, data, data)
+	_, err := s.db.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data, data)
 	return err
 }
 
-func (s *SQLiteStorage) getCrash(id string) (string, error) {
+func (s *SQLiteStorage) getCrashContext(ctx context.Context, id string) (string, error) {
 	query := `SELECT json_object('id', id, 'job_id', job_id, 'bot_id', bot_id, 'hash', hash, 'file_path', file_path,
 			         'type', type, 'signal', signal, 'exit_code', exit_code, 'timestamp', timestamp,
-			         'size', size, 'is_unique', is_unique) FROM crashes WHERE id = ?`
+			         'size', size, 'is_unique', is_unique, 'output', output, 'stack_trace', stack_trace) FROM crashes WHERE id = ?`
 	
 	var data string
-	err := s.db.QueryRow(query, id).Scan(&data)
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&data)
 	if err == sql.ErrNoRows {
 		return "", common.ErrKeyNotFound
 	}
 	return data, err
 }
 
-func (s *SQLiteStorage) deleteCrash(id string) error {
-	_, err := s.db.Exec("DELETE FROM crashes WHERE id = ?", id)
+func (s *SQLiteStorage) deleteCrashContext(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM crashes WHERE id = ?", id)
 	return err
 }
 
-func (s *SQLiteStorage) storeCoverage(id, data string) error {
+func (s *SQLiteStorage) storeCoverageContext(ctx context.Context, id, data string) error {
 	query := `INSERT OR REPLACE INTO coverage (id, job_id, bot_id, edges, new_edges, timestamp, exec_count)
 			  SELECT ?, json_extract(?, '$.job_id'), json_extract(?, '$.bot_id'), json_extract(?, '$.edges'),
 			         json_extract(?, '$.new_edges'), json_extract(?, '$.timestamp'), json_extract(?, '$.exec_count')`
 	
-	_, err := s.db.Exec(query, id, data, data, data, data, data, data)
+	_, err := s.db.ExecContext(ctx, query, id, data, data, data, data, data, data)
 	return err
 }
 
-func (s *SQLiteStorage) getCoverage(id string) (string, error) {
+func (s *SQLiteStorage) getCoverageContext(ctx context.Context, id string) (string, error) {
 	query := `SELECT json_object('id', id, 'job_id', job_id, 'bot_id', bot_id, 'edges', edges,
 			         'new_edges', new_edges, 'timestamp', timestamp, 'exec_count', exec_count) FROM coverage WHERE id = ?`
 	
 	var data string
-	err := s.db.QueryRow(query, id).Scan(&data)
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&data)
 	if err == sql.ErrNoRows {
 		return "", common.ErrKeyNotFound
 	}
 	return data, err
 }
 
-func (s *SQLiteStorage) deleteCoverage(id string) error {
-	_, err := s.db.Exec("DELETE FROM coverage WHERE id = ?", id)
+func (s *SQLiteStorage) deleteCoverageContext(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM coverage WHERE id = ?", id)
 	return err
 }
 
-func (s *SQLiteStorage) storeCorpus(id, data string) error {
+func (s *SQLiteStorage) storeCorpusContext(ctx context.Context, id, data string) error {
 	query := `INSERT OR REPLACE INTO corpus_updates (id, job_id, bot_id, files, timestamp, total_size)
 			  SELECT ?, json_extract(?, '$.job_id'), json_extract(?, '$.bot_id'), json_extract(?, '$.files'),
 			         json_extract(?, '$.timestamp'), json_extract(?, '$.total_size')`
 	
-	_, err := s.db.Exec(query, id, data, data, data, data, data)
+	_, err := s.db.ExecContext(ctx, query, id, data, data, data, data, data)
 	return err
 }
 
-func (s *SQLiteStorage) getCorpus(id string) (string, error) {
+func (s *SQLiteStorage) getCorpusContext(ctx context.Context, id string) (string, error) {
 	query := `SELECT json_object('id', id, 'job_id', job_id, 'bot_id', bot_id, 'files', json(files),
 			         'timestamp', timestamp, 'total_size', total_size) FROM corpus_updates WHERE id = ?`
 	
 	var data string
-	err := s.db.QueryRow(query, id).Scan(&data)
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&data)
 	if err == sql.ErrNoRows {
 		return "", common.ErrKeyNotFound
 	}
 	return data, err
 }
 
-func (s *SQLiteStorage) deleteCorpus(id string) error {
-	_, err := s.db.Exec("DELETE FROM corpus_updates WHERE id = ?", id)
+func (s *SQLiteStorage) deleteCorpusContext(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM corpus_updates WHERE id = ?", id)
 	return err
 }
 
-func (s *SQLiteStorage) storeAssignment(id, data string) error {
+func (s *SQLiteStorage) storeAssignmentContext(ctx context.Context, id, data string) error {
 	query := `INSERT OR REPLACE INTO job_assignments (job_id, bot_id, timestamp, status)
 			  SELECT ?, json_extract(?, '$.bot_id'), json_extract(?, '$.timestamp'), json_extract(?, '$.status')`
 	
-	_, err := s.db.Exec(query, id, data, data, data)
+	_, err := s.db.ExecContext(ctx, query, id, data, data, data)
 	return err
 }
 
-func (s *SQLiteStorage) getAssignment(id string) (string, error) {
+func (s *SQLiteStorage) getAssignmentContext(ctx context.Context, id string) (string, error) {
 	query := `SELECT json_object('job_id', job_id, 'bot_id', bot_id, 'timestamp', timestamp, 'status', status) 
 			  FROM job_assignments WHERE job_id = ?`
 	
 	var data string
-	err := s.db.QueryRow(query, id).Scan(&data)
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&data)
 	if err == sql.ErrNoRows {
 		return "", common.ErrKeyNotFound
 	}
 	return data, err
 }
 
-func (s *SQLiteStorage) deleteAssignment(id string) error {
-	_, err := s.db.Exec("DELETE FROM job_assignments WHERE job_id = ?", id)
+func (s *SQLiteStorage) deleteAssignmentContext(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM job_assignments WHERE job_id = ?", id)
 	return err
 }
 
-func (s *SQLiteStorage) storeMetadata(key, data string) error {
-	_, err := s.db.Exec("INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)", key, data)
+func (s *SQLiteStorage) storeMetadataContext(ctx context.Context, key, data string) error {
+	_, err := s.db.ExecContext(ctx, "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)", key, data)
 	return err
 }
 
-func (s *SQLiteStorage) getMetadata(key string) (string, error) {
+func (s *SQLiteStorage) getMetadataContext(ctx context.Context, key string) (string, error) {
 	var data string
-	err := s.db.QueryRow("SELECT value FROM metadata WHERE key = ?", key).Scan(&data)
+	err := s.db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key = ?", key).Scan(&data)
 	if err == sql.ErrNoRows {
 		return "", common.ErrKeyNotFound
 	}
 	return data, err
 }
 
-func (s *SQLiteStorage) deleteMetadata(key string) error {
-	_, err := s.db.Exec("DELETE FROM metadata WHERE key = ?", key)
+func (s *SQLiteStorage) deleteMetadataContext(ctx context.Context, key string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM metadata WHERE key = ?", key)
 	return err
 }
 
-func (s *SQLiteStorage) getTotalKeys() (int64, error) {
+func (s *SQLiteStorage) getTotalKeysContext(ctx context.Context) (int64, error) {
 	var total int64
 	
 	tables := []string{"bots", "jobs", "crashes", "coverage", "corpus_updates", "job_assignments", "metadata"}
 	for _, table := range tables {
 		var count int64
-		err := s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count)
+		err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count)
 		if err != nil {
 			return 0, err
 		}
@@ -629,22 +688,63 @@ func (s *SQLiteStorage) getTotalKeys() (int64, error) {
 	return total, nil
 }
 
+// parseKey extracts the table name and ID from a key
+// Expected format: "table:id" (e.g., "crash:abc123", "bot:bot-1")
+func parseKey(key string) (table, id string) {
+	parts := strings.SplitN(key, ":", 2)
+	if len(parts) != 2 {
+		return "", ""
+	}
+	return parts[0], parts[1]
+}
+
 // SQLiteTransaction methods
-func (tx *SQLiteTransaction) Store(key string, value interface{}) error {
-	// For transactions, we use a simplified approach
+func (tx *SQLiteTransaction) Store(ctx context.Context, key string, value any) error {
+	// Marshal the value to JSON
 	data, err := json.Marshal(value)
 	if err != nil {
 		return common.NewDatabaseError("marshal_value", err)
 	}
 
-	// Store in metadata table for simplicity in transactions
-	_, err = tx.tx.Exec("INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)", key, string(data))
-	return err
+	// Parse key to determine table and ID
+	table, id := parseKey(key)
+	if table == "" || id == "" {
+		// Fallback to metadata table for unstructured keys
+		_, err = tx.tx.ExecContext(ctx, "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)", key, string(data))
+		return err
+	}
+
+	// Route to appropriate table based on key prefix
+	switch table {
+	case "bot":
+		return tx.storeBotInTx(ctx, id, string(data))
+	case "job":
+		return tx.storeJobInTx(ctx, id, string(data))
+	case "crash":
+		return tx.storeCrashInTx(ctx, id, string(data))
+	case "coverage":
+		return tx.storeCoverageInTx(ctx, id, string(data))
+	case "corpus":
+		return tx.storeCorpusInTx(ctx, id, string(data))
+	case "assignment":
+		return tx.storeAssignmentInTx(ctx, id, string(data))
+	case "crash_input":
+		// Store crash input as binary data
+		if binaryData, ok := value.([]byte); ok {
+			_, err = tx.tx.ExecContext(ctx, "INSERT OR REPLACE INTO crash_inputs (crash_id, input) VALUES (?, ?)", id, binaryData)
+			return err
+		}
+		return fmt.Errorf("crash_input value must be []byte")
+	default:
+		// Store in metadata table for unknown types
+		_, err = tx.tx.ExecContext(ctx, "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)", key, string(data))
+		return err
+	}
 }
 
-func (tx *SQLiteTransaction) Get(key string, dest interface{}) error {
+func (tx *SQLiteTransaction) Get(ctx context.Context, key string, dest any) error {
 	var data string
-	err := tx.tx.QueryRow("SELECT value FROM metadata WHERE key = ?", key).Scan(&data)
+	err := tx.tx.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key = ?", key).Scan(&data)
 	if err == sql.ErrNoRows {
 		return common.ErrKeyNotFound
 	}
@@ -655,21 +755,80 @@ func (tx *SQLiteTransaction) Get(key string, dest interface{}) error {
 	return json.Unmarshal([]byte(data), dest)
 }
 
-func (tx *SQLiteTransaction) Delete(key string) error {
-	_, err := tx.tx.Exec("DELETE FROM metadata WHERE key = ?", key)
+func (tx *SQLiteTransaction) Delete(ctx context.Context, key string) error {
+	_, err := tx.tx.ExecContext(ctx, "DELETE FROM metadata WHERE key = ?", key)
 	return err
 }
 
-func (tx *SQLiteTransaction) Commit() error {
+func (tx *SQLiteTransaction) Commit(ctx context.Context) error {
 	return tx.tx.Commit()
 }
 
-func (tx *SQLiteTransaction) Rollback() error {
+func (tx *SQLiteTransaction) Rollback(ctx context.Context) error {
 	return tx.tx.Rollback()
 }
 
+// Transaction helper methods for storing data in proper tables
+func (tx *SQLiteTransaction) storeBotInTx(ctx context.Context, id, data string) error {
+	query := `INSERT OR REPLACE INTO bots (id, name, hostname, status, last_seen, registered_at, current_job, capabilities, timeout_at, is_online, failure_count, api_endpoint)
+			  SELECT ?, json_extract(?, '$.name'), json_extract(?, '$.hostname'), json_extract(?, '$.status'), json_extract(?, '$.last_seen'),
+			         json_extract(?, '$.registered_at'), json_extract(?, '$.current_job'), json_extract(?, '$.capabilities'),
+			         json_extract(?, '$.timeout_at'), json_extract(?, '$.is_online'), json_extract(?, '$.failure_count'), json_extract(?, '$.api_endpoint')`
+	
+	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data)
+	return err
+}
+
+func (tx *SQLiteTransaction) storeJobInTx(ctx context.Context, id, data string) error {
+	query := `INSERT OR REPLACE INTO jobs (id, name, target, fuzzer, status, assigned_bot, created_at, started_at, completed_at, timeout_at, work_dir, config, updated_at)
+			  SELECT ?, json_extract(?, '$.name'), json_extract(?, '$.target'), json_extract(?, '$.fuzzer'),
+			         json_extract(?, '$.status'), json_extract(?, '$.assigned_bot'), json_extract(?, '$.created_at'),
+			         json_extract(?, '$.started_at'), json_extract(?, '$.completed_at'), json_extract(?, '$.timeout_at'),
+			         json_extract(?, '$.work_dir'), json_extract(?, '$.config'), CURRENT_TIMESTAMP`
+	
+	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data)
+	return err
+}
+
+func (tx *SQLiteTransaction) storeCrashInTx(ctx context.Context, id, data string) error {
+	query := `INSERT OR REPLACE INTO crashes (id, job_id, bot_id, hash, file_path, type, signal, exit_code, timestamp, size, is_unique, output, stack_trace)
+			  SELECT ?, json_extract(?, '$.job_id'), json_extract(?, '$.bot_id'), json_extract(?, '$.hash'),
+			         json_extract(?, '$.file_path'), json_extract(?, '$.type'), json_extract(?, '$.signal'),
+			         json_extract(?, '$.exit_code'), json_extract(?, '$.timestamp'), json_extract(?, '$.size'),
+			         json_extract(?, '$.is_unique'), json_extract(?, '$.output'), json_extract(?, '$.stack_trace')`
+	
+	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data, data)
+	return err
+}
+
+func (tx *SQLiteTransaction) storeCoverageInTx(ctx context.Context, id, data string) error {
+	query := `INSERT OR REPLACE INTO coverage (id, job_id, bot_id, edges, new_edges, timestamp, exec_count)
+			  SELECT ?, json_extract(?, '$.job_id'), json_extract(?, '$.bot_id'), json_extract(?, '$.edges'),
+			         json_extract(?, '$.new_edges'), json_extract(?, '$.timestamp'), json_extract(?, '$.exec_count')`
+	
+	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data, data, data, data)
+	return err
+}
+
+func (tx *SQLiteTransaction) storeCorpusInTx(ctx context.Context, id, data string) error {
+	query := `INSERT OR REPLACE INTO corpus_updates (id, job_id, bot_id, files, timestamp, total_size)
+			  SELECT ?, json_extract(?, '$.job_id'), json_extract(?, '$.bot_id'), json_extract(?, '$.files'),
+			         json_extract(?, '$.timestamp'), json_extract(?, '$.total_size')`
+	
+	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data, data, data)
+	return err
+}
+
+func (tx *SQLiteTransaction) storeAssignmentInTx(ctx context.Context, id, data string) error {
+	query := `INSERT OR REPLACE INTO job_assignments (job_id, bot_id, timestamp, status)
+			  SELECT ?, json_extract(?, '$.bot_id'), json_extract(?, '$.timestamp'), json_extract(?, '$.status')`
+	
+	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data)
+	return err
+}
+
 // GetAllJobs retrieves all jobs from the database
-func (s *SQLiteStorage) GetAllJobs() ([]map[string]interface{}, error) {
+func (s *SQLiteStorage) GetAllJobs(ctx context.Context) ([]map[string]any, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -677,13 +836,13 @@ func (s *SQLiteStorage) GetAllJobs() ([]map[string]interface{}, error) {
 	          started_at, completed_at, timeout_at, work_dir, config 
 	          FROM jobs`
 
-	rows, err := s.db.Query(query)
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, common.NewDatabaseError("query_jobs", err)
 	}
 	defer rows.Close()
 
-	var jobs []map[string]interface{}
+	var jobs []map[string]any
 	for rows.Next() {
 		var id, name, target, fuzzer, status, workDir string
 		var assignedBot, config sql.NullString
@@ -697,7 +856,7 @@ func (s *SQLiteStorage) GetAllJobs() ([]map[string]interface{}, error) {
 			continue
 		}
 
-		job := map[string]interface{}{
+		job := map[string]any{
 			"id":         id,
 			"name":       name,
 			"target":     target,
@@ -728,7 +887,7 @@ func (s *SQLiteStorage) GetAllJobs() ([]map[string]interface{}, error) {
 }
 
 // Iterate implements iteration over keys with a given prefix
-func (s *SQLiteStorage) Iterate(prefix string, fn func(key string, value []byte) error) error {
+func (s *SQLiteStorage) Iterate(ctx context.Context, prefix string, fn func(key string, value []byte) error) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -751,7 +910,7 @@ func (s *SQLiteStorage) Iterate(prefix string, fn func(key string, value []byte)
 	}
 
 	if prefix == "job:" || prefix == "bot:" {
-		rows, err := s.db.Query(query)
+		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {
 			return common.NewDatabaseError("iterate_query", err)
 		}
@@ -772,7 +931,7 @@ func (s *SQLiteStorage) Iterate(prefix string, fn func(key string, value []byte)
 		return rows.Err()
 	} else {
 		// Query metadata table
-		rows, err := s.db.Query(query, prefix)
+		rows, err := s.db.QueryContext(ctx, query, prefix)
 		if err != nil {
 			return common.NewDatabaseError("iterate_metadata", err)
 		}
@@ -796,66 +955,7 @@ func (s *SQLiteStorage) Iterate(prefix string, fn func(key string, value []byte)
 // AdvancedDatabase interface implementation
 
 // Select implements Query interface
-func (s *SQLiteStorage) Select(query string, args ...interface{}) ([]map[string]interface{}, error) {
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	// Get column names
-	cols, err := rows.Columns()
-	if err != nil {
-		return nil, err
-	}
-
-	var results []map[string]interface{}
-	for rows.Next() {
-		// Create a slice of interface{} to hold column values
-		values := make([]interface{}, len(cols))
-		valuePtrs := make([]interface{}, len(cols))
-		for i := range values {
-			valuePtrs[i] = &values[i]
-		}
-
-		if err := rows.Scan(valuePtrs...); err != nil {
-			return nil, err
-		}
-
-		// Create map for this row
-		row := make(map[string]interface{})
-		for i, col := range cols {
-			row[col] = values[i]
-		}
-		results = append(results, row)
-	}
-
-	return results, rows.Err()
-}
-
-// SelectOne implements Query interface
-func (s *SQLiteStorage) SelectOne(query string, args ...interface{}) (map[string]interface{}, error) {
-	results, err := s.Select(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	if len(results) == 0 {
-		return nil, sql.ErrNoRows
-	}
-	return results[0], nil
-}
-
-// Execute implements Query interface
-func (s *SQLiteStorage) Execute(query string, args ...interface{}) (int64, error) {
-	result, err := s.db.Exec(query, args...)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-// SelectContext implements Query interface
-func (s *SQLiteStorage) SelectContext(ctx context.Context, query string, args ...interface{}) ([]map[string]interface{}, error) {
+func (s *SQLiteStorage) Select(ctx context.Context, query string, args ...any) ([]map[string]any, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -868,10 +968,11 @@ func (s *SQLiteStorage) SelectContext(ctx context.Context, query string, args ..
 		return nil, err
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	for rows.Next() {
-		values := make([]interface{}, len(cols))
-		valuePtrs := make([]interface{}, len(cols))
+		// Create a slice of any to hold column values
+		values := make([]any, len(cols))
+		valuePtrs := make([]any, len(cols))
 		for i := range values {
 			valuePtrs[i] = &values[i]
 		}
@@ -880,7 +981,8 @@ func (s *SQLiteStorage) SelectContext(ctx context.Context, query string, args ..
 			return nil, err
 		}
 
-		row := make(map[string]interface{})
+		// Create map for this row
+		row := make(map[string]any)
 		for i, col := range cols {
 			row[col] = values[i]
 		}
@@ -890,8 +992,20 @@ func (s *SQLiteStorage) SelectContext(ctx context.Context, query string, args ..
 	return results, rows.Err()
 }
 
-// ExecuteContext implements Query interface
-func (s *SQLiteStorage) ExecuteContext(ctx context.Context, query string, args ...interface{}) (int64, error) {
+// SelectOne implements Query interface
+func (s *SQLiteStorage) SelectOne(ctx context.Context, query string, args ...any) (map[string]any, error) {
+	results, err := s.Select(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return results[0], nil
+}
+
+// Execute implements Query interface
+func (s *SQLiteStorage) Execute(ctx context.Context, query string, args ...any) (int64, error) {
 	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
@@ -899,11 +1013,156 @@ func (s *SQLiteStorage) ExecuteContext(ctx context.Context, query string, args .
 	return result.RowsAffected()
 }
 
+// Note: SelectContext and ExecuteContext methods are no longer needed
+// as the main Select and Execute methods now accept context
+
+// GetCrashes retrieves crashes with pagination
+func (s *SQLiteStorage) GetCrashes(ctx context.Context, limit, offset int) ([]*common.CrashResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `SELECT id, job_id, bot_id, hash, file_path, type, signal, exit_code, timestamp, size, is_unique, output, stack_trace 
+	          FROM crashes 
+	          ORDER BY timestamp DESC 
+	          LIMIT ? OFFSET ?`
+	
+	rows, err := s.db.QueryContext(ctx, query, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var crashes []*common.CrashResult
+	for rows.Next() {
+		crash := &common.CrashResult{}
+		var output, stackTrace sql.NullString
+		err := rows.Scan(&crash.ID, &crash.JobID, &crash.BotID, &crash.Hash, &crash.FilePath,
+			&crash.Type, &crash.Signal, &crash.ExitCode, &crash.Timestamp, &crash.Size, &crash.IsUnique,
+			&output, &stackTrace)
+		if err != nil {
+			return nil, err
+		}
+		crash.Output = output.String
+		crash.StackTrace = stackTrace.String
+		
+		// Load crash input data from separate table
+		if input, err := s.GetCrashInput(ctx, crash.ID); err == nil && input != nil {
+			crash.Input = input
+		}
+		
+		crashes = append(crashes, crash)
+	}
+
+	return crashes, rows.Err()
+}
+
+// GetCrash retrieves a specific crash by ID
+func (s *SQLiteStorage) GetCrash(ctx context.Context, crashID string) (*common.CrashResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `SELECT id, job_id, bot_id, hash, file_path, type, signal, exit_code, timestamp, size, is_unique, output, stack_trace 
+	          FROM crashes 
+	          WHERE id = ?`
+	
+	crash := &common.CrashResult{}
+	var output, stackTrace sql.NullString
+	err := s.db.QueryRowContext(ctx, query, crashID).Scan(&crash.ID, &crash.JobID, &crash.BotID, &crash.Hash, &crash.FilePath,
+		&crash.Type, &crash.Signal, &crash.ExitCode, &crash.Timestamp, &crash.Size, &crash.IsUnique,
+		&output, &stackTrace)
+	
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	
+	crash.Output = output.String
+	crash.StackTrace = stackTrace.String
+	
+	// Load crash input data from separate table
+	if input, err := s.GetCrashInput(ctx, crash.ID); err == nil && input != nil {
+		crash.Input = input
+	}
+
+	return crash, nil
+}
+
+// GetJobCrashes retrieves all crashes for a specific job
+func (s *SQLiteStorage) GetJobCrashes(ctx context.Context, jobID string) ([]*common.CrashResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `SELECT id, job_id, bot_id, hash, file_path, type, signal, exit_code, timestamp, size, is_unique, output, stack_trace 
+	          FROM crashes 
+	          WHERE job_id = ?
+	          ORDER BY timestamp DESC`
+	
+	rows, err := s.db.QueryContext(ctx, query, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var crashes []*common.CrashResult
+	for rows.Next() {
+		crash := &common.CrashResult{}
+		var output, stackTrace sql.NullString
+		err := rows.Scan(&crash.ID, &crash.JobID, &crash.BotID, &crash.Hash, &crash.FilePath,
+			&crash.Type, &crash.Signal, &crash.ExitCode, &crash.Timestamp, &crash.Size, &crash.IsUnique,
+			&output, &stackTrace)
+		if err != nil {
+			return nil, err
+		}
+		crash.Output = output.String
+		crash.StackTrace = stackTrace.String
+		
+		// Load crash input data from separate table
+		if input, err := s.GetCrashInput(ctx, crash.ID); err == nil && input != nil {
+			crash.Input = input
+		}
+		
+		crashes = append(crashes, crash)
+	}
+
+	return crashes, rows.Err()
+}
+
+// StoreCrashInput stores crash input data separately
+func (s *SQLiteStorage) StoreCrashInput(ctx context.Context, crashID string, input []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	query := `INSERT OR REPLACE INTO crash_inputs (crash_id, input) VALUES (?, ?)`
+	_, err := s.db.ExecContext(ctx, query, crashID, input)
+	return err
+}
+
+// GetCrashInput retrieves crash input data
+func (s *SQLiteStorage) GetCrashInput(ctx context.Context, crashID string) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	query := `SELECT input FROM crash_inputs WHERE crash_id = ?`
+	var input []byte
+	err := s.db.QueryRowContext(ctx, query, crashID).Scan(&input)
+	
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	
+	return input, nil
+}
+
 // BatchStore implements batch storage operations
-func (s *SQLiteStorage) BatchStore(items map[string]interface{}) error {
-	return s.Transaction(func(tx common.Transaction) error {
+func (s *SQLiteStorage) BatchStore(ctx context.Context, items map[string]any) error {
+	return s.Transaction(ctx, func(tx common.Transaction) error {
 		for key, value := range items {
-			if err := tx.Store(key, value); err != nil {
+			if err := tx.Store(ctx, key, value); err != nil {
 				return err
 			}
 		}
@@ -912,10 +1171,10 @@ func (s *SQLiteStorage) BatchStore(items map[string]interface{}) error {
 }
 
 // BatchDelete implements batch delete operations
-func (s *SQLiteStorage) BatchDelete(keys []string) error {
-	return s.Transaction(func(tx common.Transaction) error {
+func (s *SQLiteStorage) BatchDelete(ctx context.Context, keys []string) error {
+	return s.Transaction(ctx, func(tx common.Transaction) error {
 		for _, key := range keys {
-			if err := tx.Delete(key); err != nil {
+			if err := tx.Delete(ctx, key); err != nil {
 				return err
 			}
 		}
@@ -924,18 +1183,18 @@ func (s *SQLiteStorage) BatchDelete(keys []string) error {
 }
 
 // CreateTables is already implemented in createTables
-func (s *SQLiteStorage) CreateTables() error {
-	return s.createTables()
+func (s *SQLiteStorage) CreateTables(ctx context.Context) error {
+	return s.createTablesContext(ctx)
 }
 
 // Migrate implements database migrations
-func (s *SQLiteStorage) Migrate(version int) error {
+func (s *SQLiteStorage) Migrate(ctx context.Context, version int) error {
 	// For now, just ensure tables exist
-	return s.createTables()
+	return s.createTablesContext(ctx)
 }
 
 // Backup creates a backup of the database
-func (s *SQLiteStorage) Backup(path string) error {
+func (s *SQLiteStorage) Backup(ctx context.Context, path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -946,7 +1205,7 @@ func (s *SQLiteStorage) Backup(path string) error {
 
 	// Use SQLite backup API
 	query := fmt.Sprintf("VACUUM INTO '%s'", path)
-	_, err := s.db.Exec(query)
+	_, err := s.db.ExecContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("backup failed: %w", err)
 	}
@@ -956,7 +1215,7 @@ func (s *SQLiteStorage) Backup(path string) error {
 }
 
 // Restore restores database from a backup
-func (s *SQLiteStorage) Restore(path string) error {
+func (s *SQLiteStorage) Restore(ctx context.Context, path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -993,15 +1252,15 @@ func (s *SQLiteStorage) Restore(path string) error {
 }
 
 // Vacuum optimizes the database
-func (s *SQLiteStorage) Vacuum() error {
+func (s *SQLiteStorage) Vacuum(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.Exec("VACUUM")
+	_, err := s.db.ExecContext(ctx, "VACUUM")
 	return err
 }
 
 // Compact is an alias for Vacuum in SQLite
-func (s *SQLiteStorage) Compact() error {
-	return s.Vacuum()
+func (s *SQLiteStorage) Compact(ctx context.Context) error {
+	return s.Vacuum(ctx)
 }

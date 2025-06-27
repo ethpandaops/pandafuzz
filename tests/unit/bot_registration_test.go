@@ -15,6 +15,7 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/bot"
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/sirupsen/logrus"
 )
 
 // TestBotRegistration tests the bot registration workflow
@@ -126,7 +127,9 @@ func TestBotRegistration(t *testing.T) {
 			}
 
 			// Create client
-			client, err := bot.NewRetryClient(cfg)
+			logger := logrus.New()
+			logger.SetLevel(logrus.InfoLevel)
+			client, err := bot.NewRetryClient(cfg, logger)
 			if err != nil {
 				t.Fatalf("Failed to create client: %v", err)
 			}
@@ -161,7 +164,7 @@ func TestBotHeartbeat(t *testing.T) {
 		assert.Equal(t, "POST", r.Method)
 
 		// Parse heartbeat request body
-		var req map[string]interface{}
+		var req map[string]any
 		err := json.NewDecoder(r.Body).Decode(&req)
 		require.NoError(t, err)
 		assert.NotEmpty(t, req["status"])
@@ -169,7 +172,7 @@ func TestBotHeartbeat(t *testing.T) {
 
 		heartbeatCount++
 		
-		resp := map[string]interface{}{
+		resp := map[string]any{
 			"status":    "acknowledged",
 			"timestamp": time.Now(),
 		}
@@ -187,7 +190,9 @@ func TestBotHeartbeat(t *testing.T) {
 		},
 	}
 
-	client, err := bot.NewRetryClient(cfg)
+	logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+	client, err := bot.NewRetryClient(cfg, logger)
 	require.NoError(t, err)
 
 	// Send heartbeat
@@ -237,7 +242,9 @@ func TestBotReconnection(t *testing.T) {
 		},
 	}
 
-	client, err := bot.NewRetryClient(cfg)
+	logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+	client, err := bot.NewRetryClient(cfg, logger)
 	require.NoError(t, err)
 
 	// Try to register - should succeed after retries
@@ -288,7 +295,9 @@ func TestConcurrentBotRegistrations(t *testing.T) {
 				},
 			}
 
-			client, err := bot.NewRetryClient(cfg)
+			logger := logrus.New()
+			logger.SetLevel(logrus.InfoLevel)
+			client, err := bot.NewRetryClient(cfg, logger)
 			require.NoError(t, err)
 			result, err := client.RegisterBot(cfg.ID, cfg.Capabilities, "http://localhost:9000")
 			if err != nil {
@@ -371,7 +380,9 @@ func TestBotRegistrationValidation(t *testing.T) {
 				},
 			}
 
-			client, err := bot.NewRetryClient(cfg)
+			logger := logrus.New()
+			logger.SetLevel(logrus.InfoLevel)
+			client, err := bot.NewRetryClient(cfg, logger)
 			require.NoError(t, err)
 			result, err := client.RegisterBot("test-bot", tt.capabilities, "http://localhost:9000")
 
@@ -408,7 +419,9 @@ func BenchmarkBotRegistration(b *testing.B) {
 		},
 	}
 
-	client, err := bot.NewRetryClient(cfg)
+	logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+	client, err := bot.NewRetryClient(cfg, logger)
 	if err != nil {
 		b.Fatal(err)
 	}

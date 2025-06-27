@@ -54,9 +54,7 @@ type ServerStats struct {
 type Middleware func(http.Handler) http.Handler
 
 // NewServer creates a new master server instance
-func NewServer(config *common.MasterConfig, state *PersistentState, timeoutManager *TimeoutManager, versionInfo *common.VersionInfo) *Server {
-	logger := logrus.New()
-	logger.SetLevel(logrus.InfoLevel)
+func NewServer(config *common.MasterConfig, state *PersistentState, timeoutManager *TimeoutManager, versionInfo *common.VersionInfo, logger *logrus.Logger) *Server {
 	
 	// Configure retry manager for server operations
 	retryPolicy := config.Retry.Network
@@ -123,25 +121,24 @@ func (s *Server) Start() error {
 		MaxHeaderBytes: s.config.Server.MaxHeaderBytes,
 	}
 	
-	// Start monitoring service if enabled
-	if s.services != nil && s.config.Monitoring.Enabled {
+	// Start services through manager
+	if s.services != nil {
 		ctx := context.Background()
-		go func() {
-			s.logger.Info("Starting monitoring service")
-			if err := s.services.Monitoring.Start(ctx); err != nil {
-				s.logger.WithError(err).Error("Monitoring service stopped")
-			}
-		}()
+		if err := s.services.Start(ctx); err != nil {
+			return common.NewSystemError("start_services", err)
+		}
 		
 		// Start separate metrics server if configured
-		metricsAddr := s.config.Monitoring.GetMetricsAddr()
-		if metricsAddr != "" {
-			go func() {
-				collector := s.services.Monitoring.GetCollector()
-				if err := collector.StartMetricsServer(ctx, metricsAddr); err != nil {
-					s.logger.WithError(err).Error("Metrics server stopped")
-				}
-			}()
+		if s.config.Monitoring.Enabled {
+			metricsAddr := s.config.Monitoring.GetMetricsAddr()
+			if metricsAddr != "" {
+				go func() {
+					collector := s.services.Monitoring.GetCollector()
+					if err := collector.StartMetricsServer(ctx, metricsAddr); err != nil {
+						s.logger.WithError(err).Error("Metrics server stopped")
+					}
+				}()
+			}
 		}
 	}
 	
@@ -192,6 +189,14 @@ func (s *Server) Stop() error {
 	// Create shutdown context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer cancel()
+	
+	// Stop services through manager
+	if s.services != nil {
+		s.logger.Info("Stopping services")
+		if err := s.services.Stop(); err != nil {
+			s.logger.WithError(err).Error("Error stopping services")
+		}
+	}
 	
 	// Stop bot poller
 	if s.botPoller != nil {
@@ -244,7 +249,8 @@ func (s *Server) IsRunning() bool {
 func (s *Server) SetRecoveryManager(rm *RecoveryManager) {
 	s.recoveryManager = rm
 	// Initialize services after recovery manager is set
-	s.services = service.NewManager(s.state, s.timeoutManager, s.recoveryManager, s.config, s.logger)
-	// Initialize bot poller with 10 second interval
-	s.botPoller = NewBotPoller(s.state, s.services, s.logger, 10*time.Second)
+	stateAdapter := NewStateStoreAdapter(s.state)
+	s.services = service.NewManager(stateAdapter, s.timeoutManager, s.recoveryManager, s.config, s.logger)
+	// Initialize bot poller with 5 second interval for more responsive updates
+	s.botPoller = NewBotPoller(s.state, s.services, s.logger, 5*time.Second)
 }

@@ -109,7 +109,7 @@ func (s *Server) handleJobCreateWithUpload(w http.ResponseWriter, r *http.Reques
 	req.Target = absBinaryPath
 	
 	// Log the binary path for debugging
-	s.logger.WithFields(map[string]interface{}{
+	s.logger.WithFields(map[string]any{
 		"binary_path": absBinaryPath,
 		"base_path": basePath,
 		"original_filename": filename,
@@ -182,7 +182,7 @@ func (s *Server) handleJobCreateWithUpload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.logger.WithFields(map[string]interface{}{
+	s.logger.WithFields(map[string]any{
 		"job_id":      job.ID,
 		"binary_path": binaryPath,
 		"binary_size": written,

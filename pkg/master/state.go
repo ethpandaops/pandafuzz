@@ -1,12 +1,14 @@
 package master
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/storage"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
@@ -17,7 +19,7 @@ type PersistentState struct {
 	mu           sync.RWMutex
 	bots         map[string]*common.Bot
 	jobs         map[string]*common.Job
-	metadata     map[string]interface{}
+	metadata     map[string]any
 	retryManager *common.RetryManager
 	logger       *logrus.Logger
 	config       *common.MasterConfig
@@ -38,9 +40,11 @@ type StateStats struct {
 }
 
 // NewPersistentState creates a new persistent state manager
-func NewPersistentState(db common.Database, config *common.MasterConfig) *PersistentState {
-	logger := logrus.New()
-	logger.SetLevel(logrus.InfoLevel)
+func NewPersistentState(db common.Database, config *common.MasterConfig, logger *logrus.Logger) *PersistentState {
+	if logger == nil {
+		logger = logrus.New()
+		logger.SetLevel(logrus.InfoLevel)
+	}
 	
 	retryPolicy := config.Retry.Database
 	if retryPolicy.MaxRetries == 0 {
@@ -51,7 +55,7 @@ func NewPersistentState(db common.Database, config *common.MasterConfig) *Persis
 		db:           db,
 		bots:         make(map[string]*common.Bot),
 		jobs:         make(map[string]*common.Job),
-		metadata:     make(map[string]interface{}),
+		metadata:     make(map[string]any),
 		retryManager: common.NewRetryManager(retryPolicy),
 		logger:       logger,
 		config:       config,
@@ -62,9 +66,9 @@ func NewPersistentState(db common.Database, config *common.MasterConfig) *Persis
 }
 
 // Bot operations with retry logic
-func (ps *PersistentState) SaveBotWithRetry(bot *common.Bot) error {
+func (ps *PersistentState) SaveBotWithRetry(ctx context.Context, bot *common.Bot) error {
 	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(func(tx common.Transaction) error {
+		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
 			ps.mu.Lock()
 			defer ps.mu.Unlock()
 			
@@ -72,7 +76,7 @@ func (ps *PersistentState) SaveBotWithRetry(bot *common.Bot) error {
 			ps.bots[bot.ID] = bot
 			
 			// Persist to database
-			if err := tx.Store("bot:"+bot.ID, bot); err != nil {
+			if err := tx.Store(ctx, "bot:"+bot.ID, bot); err != nil {
 				return common.NewDatabaseError("save_bot", err)
 			}
 			
@@ -88,7 +92,7 @@ func (ps *PersistentState) SaveBotWithRetry(bot *common.Bot) error {
 	})
 }
 
-func (ps *PersistentState) GetBot(botID string) (*common.Bot, error) {
+func (ps *PersistentState) GetBot(ctx context.Context, botID string) (*common.Bot, error) {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	
@@ -100,7 +104,7 @@ func (ps *PersistentState) GetBot(botID string) (*common.Bot, error) {
 	// Load from database
 	var bot common.Bot
 	err := ps.retryManager.Execute(func() error {
-		return ps.db.Get("bot:"+botID, &bot)
+		return ps.db.Get(ctx, "bot:"+botID, &bot)
 	})
 	
 	if err != nil {
@@ -120,9 +124,9 @@ func (ps *PersistentState) GetBot(botID string) (*common.Bot, error) {
 	return &bot, nil
 }
 
-func (ps *PersistentState) DeleteBot(botID string) error {
+func (ps *PersistentState) DeleteBot(ctx context.Context, botID string) error {
 	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(func(tx common.Transaction) error {
+		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
 			ps.mu.Lock()
 			defer ps.mu.Unlock()
 			
@@ -130,7 +134,7 @@ func (ps *PersistentState) DeleteBot(botID string) error {
 			delete(ps.bots, botID)
 			
 			// Remove from database
-			if err := tx.Delete("bot:" + botID); err != nil {
+			if err := tx.Delete(ctx, "bot:" + botID); err != nil {
 				return common.NewDatabaseError("delete_bot", err)
 			}
 			
@@ -155,9 +159,9 @@ func (ps *PersistentState) ListBots() ([]*common.Bot, error) {
 }
 
 // Job operations with retry logic
-func (ps *PersistentState) SaveJobWithRetry(job *common.Job) error {
+func (ps *PersistentState) SaveJobWithRetry(ctx context.Context, job *common.Job) error {
 	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(func(tx common.Transaction) error {
+		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
 			ps.mu.Lock()
 			defer ps.mu.Unlock()
 			
@@ -165,7 +169,7 @@ func (ps *PersistentState) SaveJobWithRetry(job *common.Job) error {
 			ps.jobs[job.ID] = job
 			
 			// Persist to database
-			if err := tx.Store("job:"+job.ID, job); err != nil {
+			if err := tx.Store(ctx, "job:"+job.ID, job); err != nil {
 				return common.NewDatabaseError("save_job", err)
 			}
 			
@@ -183,7 +187,7 @@ func (ps *PersistentState) SaveJobWithRetry(job *common.Job) error {
 	})
 }
 
-func (ps *PersistentState) GetJob(jobID string) (*common.Job, error) {
+func (ps *PersistentState) GetJob(ctx context.Context, jobID string) (*common.Job, error) {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	
@@ -195,7 +199,7 @@ func (ps *PersistentState) GetJob(jobID string) (*common.Job, error) {
 	// Load from database
 	var job common.Job
 	err := ps.retryManager.Execute(func() error {
-		return ps.db.Get("job:"+jobID, &job)
+		return ps.db.Get(ctx, "job:"+jobID, &job)
 	})
 	
 	if err != nil {
@@ -215,9 +219,9 @@ func (ps *PersistentState) GetJob(jobID string) (*common.Job, error) {
 	return &job, nil
 }
 
-func (ps *PersistentState) DeleteJob(jobID string) error {
+func (ps *PersistentState) DeleteJob(ctx context.Context, jobID string) error {
 	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(func(tx common.Transaction) error {
+		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
 			ps.mu.Lock()
 			defer ps.mu.Unlock()
 			
@@ -225,7 +229,7 @@ func (ps *PersistentState) DeleteJob(jobID string) error {
 			delete(ps.jobs, jobID)
 			
 			// Remove from database
-			if err := tx.Delete("job:" + jobID); err != nil {
+			if err := tx.Delete(ctx, "job:" + jobID); err != nil {
 				return common.NewDatabaseError("delete_job", err)
 			}
 			
@@ -250,11 +254,11 @@ func (ps *PersistentState) ListJobs() ([]*common.Job, error) {
 }
 
 // Atomic job assignment with retry logic
-func (ps *PersistentState) AtomicJobAssignmentWithRetry(botID string) (*common.Job, error) {
+func (ps *PersistentState) AtomicJobAssignmentWithRetry(ctx context.Context, botID string) (*common.Job, error) {
 	var assignedJob *common.Job
 	
 	err := ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(func(tx common.Transaction) error {
+		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
 			ps.mu.Lock()
 			defer ps.mu.Unlock()
 			
@@ -301,13 +305,13 @@ func (ps *PersistentState) AtomicJobAssignmentWithRetry(botID string) (*common.J
 			}
 			
 			// Persist all changes atomically
-			if err := tx.Store("job:"+job.ID, job); err != nil {
+			if err := tx.Store(ctx, "job:"+job.ID, job); err != nil {
 				return common.NewDatabaseError("save_job_assignment", err)
 			}
-			if err := tx.Store("bot:"+botID, bot); err != nil {
+			if err := tx.Store(ctx, "bot:"+botID, bot); err != nil {
 				return common.NewDatabaseError("save_bot_assignment", err)
 			}
-			if err := tx.Store("assignment:"+job.ID, assignment); err != nil {
+			if err := tx.Store(ctx, "assignment:"+job.ID, assignment); err != nil {
 				return common.NewDatabaseError("save_assignment", err)
 			}
 			
@@ -346,9 +350,9 @@ func (ps *PersistentState) findAvailableJobTx() (*common.Job, error) {
 }
 
 // Job completion with retry logic
-func (ps *PersistentState) CompleteJobWithRetry(jobID, botID string, success bool) error {
+func (ps *PersistentState) CompleteJobWithRetry(ctx context.Context, jobID, botID string, success bool) error {
 	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(func(tx common.Transaction) error {
+		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
 			ps.mu.Lock()
 			defer ps.mu.Unlock()
 			
@@ -393,13 +397,13 @@ func (ps *PersistentState) CompleteJobWithRetry(jobID, botID string, success boo
 			}
 			
 			// Persist changes
-			if err := tx.Store("job:"+jobID, job); err != nil {
+			if err := tx.Store(ctx, "job:"+jobID, job); err != nil {
 				return common.NewDatabaseError("save_job_completion", err)
 			}
-			if err := tx.Store("bot:"+botID, bot); err != nil {
+			if err := tx.Store(ctx, "bot:"+botID, bot); err != nil {
 				return common.NewDatabaseError("save_bot_completion", err)
 			}
-			if err := tx.Store("assignment:"+jobID, assignment); err != nil {
+			if err := tx.Store(ctx, "assignment:"+jobID, assignment); err != nil {
 				return common.NewDatabaseError("save_assignment_completion", err)
 			}
 			
@@ -422,24 +426,43 @@ func (ps *PersistentState) CompleteJobWithRetry(jobID, botID string, success boo
 }
 
 // Result processing with retry logic
-func (ps *PersistentState) ProcessCrashResultWithRetry(crash *common.CrashResult) error {
+func (ps *PersistentState) ProcessCrashResultWithRetry(ctx context.Context, crash *common.CrashResult) error {
 	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(func(tx common.Transaction) error {
+		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
 			// Generate crash ID if not provided
 			if crash.ID == "" {
 				crash.ID = uuid.New().String()
 			}
 			
 			// Check for duplicates based on hash
-			duplicate, err := ps.checkCrashDuplicateTx(tx, crash.Hash)
+			duplicate, err := ps.checkCrashDuplicateTx(ctx, tx, crash.Hash)
 			if err != nil {
 				return err
 			}
 			
 			crash.IsUnique = !duplicate
 			
-			// Store crash result
-			if err := tx.Store("crash:"+crash.ID, crash); err != nil {
+			// Store crash input separately if provided
+			hasInput := len(crash.Input) > 0
+			if hasInput {
+				// Check if we're using SQLiteStorage
+				if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
+					// Store outside transaction for SQLite (it has its own locking)
+					if err := sqliteDB.StoreCrashInput(ctx, crash.ID, crash.Input); err != nil {
+						return common.NewDatabaseError("save_crash_input", err)
+					}
+				} else {
+					// Fallback for other databases
+					if err := tx.Store(ctx, "crash_input:"+crash.ID, crash.Input); err != nil {
+						return common.NewDatabaseError("save_crash_input", err)
+					}
+				}
+				// Clear the input from the crash object to avoid storing it twice
+				crash.Input = nil
+			}
+			
+			// Store crash result (without input data)
+			if err := tx.Store(ctx, "crash:"+crash.ID, crash); err != nil {
 				return common.NewDatabaseError("save_crash", err)
 			}
 			
@@ -453,6 +476,7 @@ func (ps *PersistentState) ProcessCrashResultWithRetry(crash *common.CrashResult
 				"hash":      crash.Hash,
 				"is_unique": crash.IsUnique,
 				"type":      crash.Type,
+				"has_input": hasInput,
 			}).Info("Crash result processed")
 			
 			return nil
@@ -460,16 +484,16 @@ func (ps *PersistentState) ProcessCrashResultWithRetry(crash *common.CrashResult
 	})
 }
 
-func (ps *PersistentState) ProcessCoverageResultWithRetry(coverage *common.CoverageResult) error {
+func (ps *PersistentState) ProcessCoverageResultWithRetry(ctx context.Context, coverage *common.CoverageResult) error {
 	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(func(tx common.Transaction) error {
+		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
 			// Generate coverage ID if not provided
 			if coverage.ID == "" {
 				coverage.ID = uuid.New().String()
 			}
 			
 			// Store coverage result
-			if err := tx.Store("coverage:"+coverage.ID, coverage); err != nil {
+			if err := tx.Store(ctx, "coverage:"+coverage.ID, coverage); err != nil {
 				return common.NewDatabaseError("save_coverage", err)
 			}
 			
@@ -490,16 +514,16 @@ func (ps *PersistentState) ProcessCoverageResultWithRetry(coverage *common.Cover
 	})
 }
 
-func (ps *PersistentState) ProcessCorpusUpdateWithRetry(corpus *common.CorpusUpdate) error {
+func (ps *PersistentState) ProcessCorpusUpdateWithRetry(ctx context.Context, corpus *common.CorpusUpdate) error {
 	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(func(tx common.Transaction) error {
+		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
 			// Generate corpus ID if not provided
 			if corpus.ID == "" {
 				corpus.ID = uuid.New().String()
 			}
 			
 			// Store corpus update
-			if err := tx.Store("corpus:"+corpus.ID, corpus); err != nil {
+			if err := tx.Store(ctx, "corpus:"+corpus.ID, corpus); err != nil {
 				return common.NewDatabaseError("save_corpus", err)
 			}
 			
@@ -520,7 +544,7 @@ func (ps *PersistentState) ProcessCorpusUpdateWithRetry(corpus *common.CorpusUpd
 }
 
 // checkCrashDuplicateTx checks if a crash with the given hash already exists
-func (ps *PersistentState) checkCrashDuplicateTx(tx common.Transaction, hash string) (bool, error) {
+func (ps *PersistentState) checkCrashDuplicateTx(ctx context.Context, tx common.Transaction, hash string) (bool, error) {
 	// This is a simplified implementation
 	// In a real implementation, you would query existing crashes by hash
 	// For now, we'll assume it's unique
@@ -528,7 +552,7 @@ func (ps *PersistentState) checkCrashDuplicateTx(tx common.Transaction, hash str
 }
 
 // Recovery operations
-func (ps *PersistentState) LoadPersistedState() error {
+func (ps *PersistentState) LoadPersistedState(ctx context.Context) error {
 	ps.logger.Info("Loading persisted state from database")
 	
 	return ps.retryManager.Execute(func() error {
@@ -541,7 +565,7 @@ func (ps *PersistentState) LoadPersistedState() error {
 			
 			// Load all jobs with "job:" prefix
 			jobsLoaded := 0
-			if err := advDB.Iterate("job:", func(key string, value []byte) error {
+			if err := advDB.Iterate(ctx, "job:", func(key string, value []byte) error {
 				var job common.Job
 				if err := json.Unmarshal(value, &job); err != nil {
 					ps.logger.WithError(err).WithField("key", key).Warn("Failed to unmarshal job")
@@ -556,7 +580,7 @@ func (ps *PersistentState) LoadPersistedState() error {
 			
 			// Load all bots with "bot:" prefix
 			botsLoaded := 0
-			if err := advDB.Iterate("bot:", func(key string, value []byte) error {
+			if err := advDB.Iterate(ctx, "bot:", func(key string, value []byte) error {
 				var bot common.Bot
 				if err := json.Unmarshal(value, &bot); err != nil {
 					ps.logger.WithError(err).WithField("key", key).Warn("Failed to unmarshal bot")
@@ -628,9 +652,9 @@ func (ps *PersistentState) FindTimedOutBots() ([]string, error) {
 	return timedOut, nil
 }
 
-func (ps *PersistentState) ResetBot(botID string) error {
+func (ps *PersistentState) ResetBot(ctx context.Context, botID string) error {
 	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(func(tx common.Transaction) error {
+		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
 			ps.mu.Lock()
 			defer ps.mu.Unlock()
 			
@@ -645,7 +669,7 @@ func (ps *PersistentState) ResetBot(botID string) error {
 			bot.FailureCount++
 			
 			// Persist changes
-			if err := tx.Store("bot:"+botID, bot); err != nil {
+			if err := tx.Store(ctx, "bot:"+botID, bot); err != nil {
 				return common.NewDatabaseError("reset_bot", err)
 			}
 			
@@ -665,9 +689,9 @@ func (ps *PersistentState) ResetBot(botID string) error {
 }
 
 // Metadata operations
-func (ps *PersistentState) SetMetadata(key string, value interface{}) error {
+func (ps *PersistentState) SetMetadata(ctx context.Context, key string, value any) error {
 	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(func(tx common.Transaction) error {
+		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
 			ps.mu.Lock()
 			defer ps.mu.Unlock()
 			
@@ -675,7 +699,7 @@ func (ps *PersistentState) SetMetadata(key string, value interface{}) error {
 			ps.metadata[key] = value
 			
 			// Persist to database
-			if err := tx.Store("metadata:"+key, value); err != nil {
+			if err := tx.Store(ctx, "metadata:"+key, value); err != nil {
 				return common.NewDatabaseError("set_metadata", err)
 			}
 			
@@ -686,7 +710,7 @@ func (ps *PersistentState) SetMetadata(key string, value interface{}) error {
 	})
 }
 
-func (ps *PersistentState) GetMetadata(key string) (interface{}, error) {
+func (ps *PersistentState) GetMetadata(ctx context.Context, key string) (any, error) {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	
@@ -696,9 +720,9 @@ func (ps *PersistentState) GetMetadata(key string) (interface{}, error) {
 	}
 	
 	// Load from database
-	var value interface{}
+	var value any
 	err := ps.retryManager.Execute(func() error {
-		return ps.db.Get("metadata:"+key, &value)
+		return ps.db.Get(ctx, "metadata:"+key, &value)
 	})
 	
 	if err != nil {
@@ -719,7 +743,7 @@ func (ps *PersistentState) GetMetadata(key string) (interface{}, error) {
 }
 
 // Statistics and monitoring
-func (ps *PersistentState) GetStats() interface{} {
+func (ps *PersistentState) GetStats() any {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	
@@ -742,26 +766,175 @@ func (ps *PersistentState) GetStatsTyped() StateStats {
 	return stats
 }
 
-func (ps *PersistentState) GetDatabaseStats() interface{} {
-	return ps.db.Stats()
+func (ps *PersistentState) GetDatabaseStats(ctx context.Context) any {
+	return ps.db.Stats(ctx)
 }
 
-func (ps *PersistentState) GetDatabaseStatsTyped() common.DatabaseStats {
-	return ps.db.Stats()
+func (ps *PersistentState) GetDatabaseStatsTyped(ctx context.Context) common.DatabaseStats {
+	return ps.db.Stats(ctx)
 }
 
 // Health check
-func (ps *PersistentState) HealthCheck() error {
-	return ps.db.Ping()
+func (ps *PersistentState) HealthCheck(ctx context.Context) error {
+	return ps.db.Ping(ctx)
 }
 
 // Close gracefully shuts down the persistent state
-func (ps *PersistentState) Close() error {
+func (ps *PersistentState) Close(ctx context.Context) error {
 	ps.logger.Info("Shutting down persistent state manager")
 	
 	if ps.db != nil {
-		return ps.db.Close()
+		return ps.db.Close(ctx)
 	}
 	
 	return nil
+}
+
+// GetCrashes retrieves crashes with pagination
+func (ps *PersistentState) GetCrashes(ctx context.Context, limit, offset int) ([]*common.CrashResult, error) {
+	// Check if the database is SQLiteStorage and use its optimized methods
+	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
+		return sqliteDB.GetCrashes(ctx, limit, offset)
+	}
+	
+	// Fallback for other database implementations
+	crashes := make([]*common.CrashResult, 0)
+	crashMap := make(map[string]*common.CrashResult)
+	
+	// First, get all crashes
+	err := ps.db.Transaction(ctx, func(tx common.Transaction) error {
+		// We need to iterate through all keys to find crashes
+		// This is inefficient but works with the current interface
+		// TODO: Add a Keys() method to Transaction interface or use a different approach
+		
+		// For now, we'll try to load up to 10000 crashes by ID
+		// This is a temporary workaround
+		for i := 0; i < 10000; i++ {
+			var crash common.CrashResult
+			key := fmt.Sprintf("crash:%d", i)
+			if err := tx.Get(ctx, key, &crash); err == nil {
+				crashMap[key] = &crash
+			}
+		}
+		
+		return nil
+	})
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	// Convert map to slice and apply pagination
+	keys := make([]string, 0, len(crashMap))
+	for k := range crashMap {
+		keys = append(keys, k)
+	}
+	
+	// Sort keys for consistent ordering
+	// Apply offset and limit
+	start := offset
+	if start > len(keys) {
+		start = len(keys)
+	}
+	end := start + limit
+	if end > len(keys) {
+		end = len(keys)
+	}
+	
+	for i := start; i < end; i++ {
+		crashes = append(crashes, crashMap[keys[i]])
+	}
+	
+	return crashes, nil
+}
+
+// GetCrash retrieves a specific crash by ID
+func (ps *PersistentState) GetCrash(ctx context.Context, crashID string) (*common.CrashResult, error) {
+	// Check if the database is SQLiteStorage and use its optimized methods
+	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
+		return sqliteDB.GetCrash(ctx, crashID)
+	}
+	
+	// Fallback for other database implementations
+	var crash common.CrashResult
+	
+	err := ps.db.Transaction(ctx, func(tx common.Transaction) error {
+		return tx.Get(ctx, "crash:"+crashID, &crash)
+	})
+	
+	if err != nil {
+		if err == common.ErrKeyNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	
+	return &crash, nil
+}
+
+// GetJobCrashes retrieves all crashes for a specific job
+func (ps *PersistentState) GetJobCrashes(ctx context.Context, jobID string) ([]*common.CrashResult, error) {
+	// Check if the database is SQLiteStorage and use its optimized methods
+	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
+		return sqliteDB.GetJobCrashes(ctx, jobID)
+	}
+	
+	// Fallback for other database implementations
+	crashes := make([]*common.CrashResult, 0)
+	
+	err := ps.db.Transaction(ctx, func(tx common.Transaction) error {
+		// We need to iterate through crashes to find ones for this job
+		// This is inefficient but works with the current interface
+		// TODO: Add job-based indexing or a better query interface
+		
+		// Check crash IDs based on UUID format
+		for i := 0; i < 10000; i++ {
+			var crash common.CrashResult
+			// Try both numeric and UUID-based keys
+			keys := []string{
+				fmt.Sprintf("crash:%d", i),
+			}
+			
+			for _, key := range keys {
+				if err := tx.Get(ctx, key, &crash); err == nil && crash.JobID == jobID {
+					crashes = append(crashes, &crash)
+				}
+			}
+		}
+		
+		// Also try to get crashes by their actual UUIDs stored in the crash result
+		// This requires knowing the UUIDs, which we don't have without an index
+		
+		return nil
+	})
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	return crashes, nil
+}
+
+// GetCrashInput retrieves the input data for a specific crash
+func (ps *PersistentState) GetCrashInput(ctx context.Context, crashID string) ([]byte, error) {
+	// Check if the database is SQLiteStorage and use its optimized methods
+	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
+		return sqliteDB.GetCrashInput(ctx, crashID)
+	}
+	
+	// Fallback for other database implementations
+	var input []byte
+	
+	err := ps.db.Transaction(ctx, func(tx common.Transaction) error {
+		return tx.Get(ctx, "crash_input:"+crashID, &input)
+	})
+	
+	if err != nil {
+		if err == common.ErrKeyNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	
+	return input, nil
 }

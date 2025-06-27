@@ -10,6 +10,7 @@ import (
 	// "github.com/ethpandaops/pandafuzz/pkg/common"
 	// "github.com/stretchr/testify/assert"
 	// "github.com/stretchr/testify/require"
+	// "github.com/sirupsen/logrus"
 )
 
 // TODO: All tests in this file need to be updated
@@ -177,7 +178,9 @@ func TestCrashAnalysis(t *testing.T) {
 		MinStackFrames:       3,
 		DeduplicationMethod:  "stack",
 	}
-	analyzer := analysis.NewCrashAnalyzer(analyzerConfig)
+	logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+	analyzer := analysis.NewCrashAnalyzer(analyzerConfig, logger)
 
 	// Create test crashes with stack traces
 	crashes := []*common.CrashResult{
@@ -457,7 +460,9 @@ func TestCrashTriage(t *testing.T) {
 		MaxStackFrames:       50,
 		MinStackFrames:       3,
 	}
-	analyzer := analysis.NewCrashAnalyzer(analyzerConfig)
+	logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+	analyzer := analysis.NewCrashAnalyzer(analyzerConfig, logger)
 
 	// Create crashes with different severity levels
 	criticalCrash := &common.CrashResult{

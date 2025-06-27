@@ -12,6 +12,7 @@ import (
 	// "github.com/ethpandaops/pandafuzz/pkg/bot"
 	// "github.com/ethpandaops/pandafuzz/pkg/common"
 	// "github.com/ethpandaops/pandafuzz/pkg/master"
+	// "github.com/sirupsen/logrus"
 )
 
 // TestCompleteBottWorkflow tests the complete bot workflow from registration to job completion
@@ -78,7 +79,9 @@ func TestCompleteBotWorkflow(t *testing.T) {
 		},
 	}
 
-	agent, err := bot.NewAgent(botCfg)
+	logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+	agent, err := bot.NewAgent(botCfg, logger)
 	require.NoError(t, err)
 
 	// Start bot agent
@@ -224,7 +227,9 @@ func TestMultipleBotCoordination(t *testing.T) {
 			},
 		}
 
-		agent, err := bot.NewAgent(botCfg)
+		logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+	agent, err := bot.NewAgent(botCfg, logger)
 		require.NoError(t, err)
 		bots[i] = agent
 
@@ -333,7 +338,9 @@ func TestBotReconnectionResilience(t *testing.T) {
 		},
 	}
 
-	agent, err := bot.NewAgent(botCfg)
+	logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+	agent, err := bot.NewAgent(botCfg, logger)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -411,7 +418,9 @@ func TestBotLoadBalancing(t *testing.T) {
 			},
 		}
 
-		agent, err := bot.NewAgent(botCfg)
+		logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+	agent, err := bot.NewAgent(botCfg, logger)
 		require.NoError(t, err)
 
 		ctx, cancel := context.WithCancel(context.Background())

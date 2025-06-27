@@ -19,14 +19,14 @@ import (
 // TestFuzzerInterface tests the fuzzer interface implementation
 func TestFuzzerInterface(t *testing.T) {
 	// Test AFL++ implementation
-	aflFuzzer := fuzzer.NewAFLPlusPlus()
+	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 	assert.NotNil(t, aflFuzzer)
 	assert.Equal(t, "AFL++", aflFuzzer.Name())
 	assert.Equal(t, fuzzer.FuzzerTypeAFL, aflFuzzer.Type())
 	assert.NotEmpty(t, aflFuzzer.GetCapabilities())
 
 	// Test LibFuzzer implementation
-	libFuzzer := fuzzer.NewLibFuzzer()
+	libFuzzer := fuzzer.NewLibFuzzer(nil)
 	assert.NotNil(t, libFuzzer)
 	assert.Equal(t, "LibFuzzer", libFuzzer.Name())
 	assert.Equal(t, fuzzer.FuzzerTypeLibFuzzer, libFuzzer.Type())
@@ -52,18 +52,18 @@ func TestFuzzerConfiguration(t *testing.T) {
 		Duration:        10 * time.Second,
 		Timeout:         1 * time.Second,
 		MemoryLimit:     1024,
-		FuzzerOptions: map[string]interface{}{
+		FuzzerOptions: map[string]any{
 			"deterministic": false,
 		},
 	}
 
 	// Test AFL++ configuration
-	aflFuzzer := fuzzer.NewAFLPlusPlus()
+	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 	err = aflFuzzer.Configure(config)
 	assert.NoError(t, err)
 
 	// Test LibFuzzer configuration
-	libFuzzer := fuzzer.NewLibFuzzer()
+	libFuzzer := fuzzer.NewLibFuzzer(nil)
 	err = libFuzzer.Configure(config)
 	assert.NoError(t, err)
 }
@@ -96,7 +96,7 @@ func TestFuzzerInitialization(t *testing.T) {
 	}
 
 	// Initialize AFL++
-	aflFuzzer := fuzzer.NewAFLPlusPlus()
+	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 	err = aflFuzzer.Configure(config)
 	require.NoError(t, err)
 	
@@ -109,7 +109,7 @@ func TestFuzzerInitialization(t *testing.T) {
 
 // TestFuzzerValidation tests fuzzer validation
 func TestFuzzerValidation(t *testing.T) {
-	aflFuzzer := fuzzer.NewAFLPlusPlus()
+	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 
 	// Test validation without configuration
 	err := aflFuzzer.Validate()
@@ -159,7 +159,7 @@ exit 0`
 	}
 
 	// Create and configure fuzzer
-	aflFuzzer := fuzzer.NewAFLPlusPlus()
+	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 	err = aflFuzzer.Configure(config)
 	require.NoError(t, err)
 	
@@ -286,7 +286,7 @@ func TestFuzzerCrashHandling(t *testing.T) {
 		WorkDirectory:   tempDir,
 	}
 
-	aflFuzzer := fuzzer.NewAFLPlusPlus()
+	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 	err = aflFuzzer.Configure(config)
 	require.NoError(t, err)
 
@@ -313,7 +313,7 @@ func TestFuzzerCrashHandling(t *testing.T) {
 
 // TestFuzzerCoverageReporting tests coverage collection
 func TestFuzzerCoverageReporting(t *testing.T) {
-	aflFuzzer := fuzzer.NewAFLPlusPlus()
+	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 	
 	// Configure with minimal settings
 	config := fuzzer.FuzzConfig{
@@ -334,7 +334,7 @@ func TestFuzzerCoverageReporting(t *testing.T) {
 
 // TestFuzzerProgress tests progress tracking
 func TestFuzzerProgress(t *testing.T) {
-	aflFuzzer := fuzzer.NewAFLPlusPlus()
+	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 	
 	config := fuzzer.FuzzConfig{
 		Target:          "/bin/test",
@@ -362,12 +362,12 @@ func TestFuzzerCleanup(t *testing.T) {
 	config := fuzzer.FuzzConfig{
 		Target:          "/bin/test",
 		OutputDirectory: tempDir,
-		FuzzerOptions: map[string]interface{}{
+		FuzzerOptions: map[string]any{
 			"clean_temp": true,
 		},
 	}
 
-	aflFuzzer := fuzzer.NewAFLPlusPlus()
+	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 	err = aflFuzzer.Configure(config)
 	require.NoError(t, err)
 	
@@ -412,7 +412,7 @@ echo "Running libfuzzer"
 		WorkDirectory:   tempDir,
 		Duration:        5 * time.Second,
 		MaxExecutions:   100,
-		FuzzerOptions: map[string]interface{}{
+		FuzzerOptions: map[string]any{
 			"workers":        2,
 			"fork":           true,
 			"value_profile":  true,
@@ -442,7 +442,7 @@ func TestFuzzerEventHandling(t *testing.T) {
 	events := make([]string, 0)
 	handler := &CollectingEventHandler{events: &events}
 
-	aflFuzzer := fuzzer.NewAFLPlusPlus()
+	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 	aflFuzzer.SetEventHandler(handler)
 
 	config := fuzzer.FuzzConfig{
@@ -465,13 +465,13 @@ func TestFuzzerEventHandling(t *testing.T) {
 // TestFuzzerFactory tests fuzzer factory pattern
 func TestFuzzerFactory(t *testing.T) {
 	// Test creating AFL++
-	aflFuzzer, err := fuzzer.CreateAFLPlusPlus()
+	aflFuzzer, err := fuzzer.CreateAFLPlusPlus(nil)
 	require.NoError(t, err)
 	assert.NotNil(t, aflFuzzer)
 	assert.Equal(t, fuzzer.FuzzerTypeAFL, aflFuzzer.Type())
 
 	// Test creating LibFuzzer
-	libFuzzer, err := fuzzer.CreateLibFuzzer()
+	libFuzzer, err := fuzzer.CreateLibFuzzer(nil)
 	require.NoError(t, err)
 	assert.NotNil(t, libFuzzer)
 	assert.Equal(t, fuzzer.FuzzerTypeLibFuzzer, libFuzzer.Type())

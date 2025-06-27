@@ -1,0 +1,97 @@
+run:
+  go: "1.23"
+  timeout: 5m
+  issues-exit-code: 1
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - goimports
+    - misspell
+    - revive
+    - gosec
+    - unconvert
+    - goconst
+    - gocyclo
+    - gocognit
+    - bodyclose
+    - noctx
+    - stylecheck
+    - unparam
+    - nakedret
+    - prealloc
+    - exportloopref
+    - gocritic
+
+linters-settings:
+  gofmt:
+    simplify: true
+  goimports:
+    local-prefixes: github.com/ethpandaops/pandafuzz
+  revive:
+    severity: warning
+    rules:
+      - name: context-as-argument
+        severity: error
+        arguments:
+          - allowTypesBefore: "*testing.T"
+      - name: error-naming
+      - name: error-return
+      - name: increment-decrement
+      - name: indent-error-flow
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: var-declaration
+      - name: var-naming
+  errcheck:
+    check-type-assertions: false
+    check-blank: false
+  govet:
+    enable-all: true
+  gocyclo:
+    min-complexity: 15
+  gocognit:
+    min-complexity: 20
+  nakedret:
+    max-func-lines: 5
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+  misspell:
+    locale: US
+  stylecheck:
+    checks: ["all", "-ST1000", "-ST1001", "-ST1003"]
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Exclude some linters from running on tests files.
+    - path: _test\.go
+      linters:
+        - gosec
+        - gocyclo
+        - gocognit
+        - errcheck
+        - dupl
+        - goconst
+    # Exclude known patterns
+    - linters:
+        - errcheck
+      text: "Error return value is not checked"
+      path: "logging|logger"
+    # Allow context.Background in main
+    - path: main\.go
+      linters:
+        - noctx
+      text: "should not use context.Background"

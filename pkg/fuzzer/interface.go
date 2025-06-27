@@ -98,7 +98,7 @@ type FuzzConfig struct {
 	CorpusDirectory string           `json:"corpus_directory" yaml:"corpus_directory"`
 	
 	// Fuzzer-specific options
-	FuzzerOptions map[string]interface{} `json:"fuzzer_options" yaml:"fuzzer_options"`
+	FuzzerOptions map[string]any `json:"fuzzer_options" yaml:"fuzzer_options"`
 	
 	// Resource limits
 	MaxCrashes    int               `json:"max_crashes" yaml:"max_crashes"`
@@ -211,7 +211,7 @@ type CorpusEntry struct {
 	Source      string            `json:"source"`
 	Energy      float64           `json:"energy"`
 	Executions  int64             `json:"executions"`
-	Metadata    map[string]interface{} `json:"metadata"`
+	Metadata    map[string]any `json:"metadata"`
 }
 
 // PerformanceMetrics tracks performance during fuzzing

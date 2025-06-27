@@ -1,10 +1,12 @@
 package master
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/service"
 	"github.com/sirupsen/logrus"
 )
 
@@ -18,6 +20,9 @@ type RecoveryManager struct {
 	stats        RecoveryStats
 }
 
+// Compile-time interface compliance check
+var _ service.RecoveryManager = (*RecoveryManager)(nil)
+
 // RecoveryStats tracks recovery operation statistics
 type RecoveryStats struct {
 	TotalRecoveries       int64     `json:"total_recoveries"`
@@ -30,9 +35,7 @@ type RecoveryStats struct {
 }
 
 // NewRecoveryManager creates a new recovery manager
-func NewRecoveryManager(state *PersistentState, timeout *TimeoutManager, config *common.MasterConfig) *RecoveryManager {
-	logger := logrus.New()
-	logger.SetLevel(logrus.InfoLevel)
+func NewRecoveryManager(state *PersistentState, timeout *TimeoutManager, config *common.MasterConfig, logger *logrus.Logger) *RecoveryManager {
 	
 	// Retry policy for recovery operations
 	recoveryPolicy := common.RetryPolicy{
@@ -59,44 +62,44 @@ func NewRecoveryManager(state *PersistentState, timeout *TimeoutManager, config 
 }
 
 // RecoverOnStartup performs comprehensive system recovery on startup
-func (rm *RecoveryManager) RecoverOnStartup() error {
+func (rm *RecoveryManager) RecoverOnStartup(ctx context.Context) error {
 	start := time.Now()
 	rm.logger.Info("Starting system recovery on startup")
 	
 	err := rm.retryManager.Execute(func() error {
 		// Step 1: Load all persisted state from disk
 		rm.logger.Info("Loading persisted state from database")
-		if err := rm.state.LoadPersistedState(); err != nil {
+		if err := rm.state.LoadPersistedState(ctx); err != nil {
 			return fmt.Errorf("failed to load persisted state: %w", err)
 		}
 		
 		// Step 2: Check for orphaned jobs (assigned but bot offline)
 		rm.logger.Info("Recovering orphaned jobs")
-		if err := rm.recoverOrphanedJobs(); err != nil {
+		if err := rm.recoverOrphanedJobs(ctx); err != nil {
 			return fmt.Errorf("failed to recover orphaned jobs: %w", err)
 		}
 		
 		// Step 3: Reset timed-out bots to idle
 		rm.logger.Info("Resetting timed-out bots")
-		if err := rm.resetTimedOutBots(); err != nil {
+		if err := rm.resetTimedOutBots(ctx); err != nil {
 			return fmt.Errorf("failed to reset timed-out bots: %w", err)
 		}
 		
 		// Step 4: Resume pending jobs
 		rm.logger.Info("Resuming pending jobs")
-		if err := rm.resumePendingJobs(); err != nil {
+		if err := rm.resumePendingJobs(ctx); err != nil {
 			return fmt.Errorf("failed to resume pending jobs: %w", err)
 		}
 		
 		// Step 5: Cleanup stale data
 		rm.logger.Info("Cleaning up stale data")
-		if err := rm.cleanupStaleData(); err != nil {
+		if err := rm.cleanupStaleData(ctx); err != nil {
 			return fmt.Errorf("failed to cleanup stale data: %w", err)
 		}
 		
 		// Step 6: Validate system state
 		rm.logger.Info("Validating system state")
-		if err := rm.validateSystemState(); err != nil {
+		if err := rm.validateSystemState(ctx); err != nil {
 			return fmt.Errorf("system state validation failed: %w", err)
 		}
 		
@@ -121,7 +124,7 @@ func (rm *RecoveryManager) RecoverOnStartup() error {
 }
 
 // recoverOrphanedJobs finds and reassigns orphaned jobs
-func (rm *RecoveryManager) recoverOrphanedJobs() error {
+func (rm *RecoveryManager) recoverOrphanedJobs(ctx context.Context) error {
 	orphanedJobs, err := rm.state.FindOrphanedJobs()
 	if err != nil {
 		return err
@@ -143,7 +146,7 @@ func (rm *RecoveryManager) recoverOrphanedJobs() error {
 			job.StartedAt = startedAt
 			
 			// Save updated job
-			if err := rm.state.SaveJobWithRetry(job); err != nil {
+			if err := rm.state.SaveJobWithRetry(ctx, job); err != nil {
 				return err
 			}
 			
@@ -173,7 +176,7 @@ func (rm *RecoveryManager) recoverOrphanedJobs() error {
 }
 
 // resetTimedOutBots resets bots that have timed out
-func (rm *RecoveryManager) resetTimedOutBots() error {
+func (rm *RecoveryManager) resetTimedOutBots(ctx context.Context) error {
 	timedOutBots, err := rm.state.FindTimedOutBots()
 	if err != nil {
 		return err
@@ -188,7 +191,7 @@ func (rm *RecoveryManager) resetTimedOutBots() error {
 	
 	for _, botID := range timedOutBots {
 		err := rm.retryManager.Execute(func() error {
-			if err := rm.state.ResetBot(botID); err != nil {
+			if err := rm.state.ResetBot(ctx, botID); err != nil {
 				return err
 			}
 			
@@ -211,7 +214,7 @@ func (rm *RecoveryManager) resetTimedOutBots() error {
 }
 
 // resumePendingJobs ensures pending jobs are ready for assignment
-func (rm *RecoveryManager) resumePendingJobs() error {
+func (rm *RecoveryManager) resumePendingJobs(ctx context.Context) error {
 	jobs, err := rm.state.ListJobs()
 	if err != nil {
 		return err
@@ -226,7 +229,7 @@ func (rm *RecoveryManager) resumePendingJobs() error {
 				newTimeout := time.Now().Add(rm.config.Timeouts.JobExecution)
 				job.TimeoutAt = newTimeout
 				
-				if err := rm.state.SaveJobWithRetry(job); err != nil {
+				if err := rm.state.SaveJobWithRetry(ctx, job); err != nil {
 					rm.logger.WithError(err).WithField("job_id", job.ID).Error("Failed to update job timeout")
 					continue
 				}
@@ -252,7 +255,7 @@ func (rm *RecoveryManager) resumePendingJobs() error {
 }
 
 // cleanupStaleData removes old and stale data
-func (rm *RecoveryManager) cleanupStaleData() error {
+func (rm *RecoveryManager) cleanupStaleData(ctx context.Context) error {
 	rm.logger.Debug("Starting stale data cleanup")
 	
 	// Define stale data thresholds
@@ -295,7 +298,7 @@ func (rm *RecoveryManager) cleanupStaleData() error {
 				rm.timeout.RemoveJobTimeout(job.ID)
 				
 				// Delete job (in a real implementation, you might archive instead)
-				if err := rm.state.DeleteJob(job.ID); err != nil {
+				if err := rm.state.DeleteJob(ctx, job.ID); err != nil {
 					return err
 				}
 				
@@ -328,11 +331,11 @@ func (rm *RecoveryManager) cleanupStaleData() error {
 }
 
 // validateSystemState performs system state validation
-func (rm *RecoveryManager) validateSystemState() error {
+func (rm *RecoveryManager) validateSystemState(ctx context.Context) error {
 	rm.logger.Debug("Validating system state")
 	
 	// Check database health
-	if err := rm.state.HealthCheck(); err != nil {
+	if err := rm.state.HealthCheck(ctx); err != nil {
 		return fmt.Errorf("database health check failed: %w", err)
 	}
 	
@@ -403,11 +406,11 @@ func (rm *RecoveryManager) validateSystemState() error {
 }
 
 // HandleBotFailureWithRetry handles bot failure with retry logic
-func (rm *RecoveryManager) HandleBotFailureWithRetry(botID string) error {
+func (rm *RecoveryManager) HandleBotFailureWithRetry(ctx context.Context, botID string) error {
 	return rm.retryManager.Execute(func() error {
-		return rm.state.db.Transaction(func(tx common.Transaction) error {
+		return rm.state.db.Transaction(ctx, func(tx common.Transaction) error {
 			// Get bot
-			bot, err := rm.state.GetBot(botID)
+			bot, err := rm.state.GetBot(ctx, botID)
 			if err != nil {
 				return err
 			}
@@ -418,7 +421,7 @@ func (rm *RecoveryManager) HandleBotFailureWithRetry(botID string) error {
 			
 			// Handle current job if any
 			if bot.CurrentJob != nil {
-				job, err := rm.state.GetJob(*bot.CurrentJob)
+				job, err := rm.state.GetJob(ctx, *bot.CurrentJob)
 				if err != nil {
 					return err
 				}
@@ -429,7 +432,7 @@ func (rm *RecoveryManager) HandleBotFailureWithRetry(botID string) error {
 				startedAt := (*time.Time)(nil)
 				job.StartedAt = startedAt
 				
-				if err := rm.state.SaveJobWithRetry(job); err != nil {
+				if err := rm.state.SaveJobWithRetry(ctx, job); err != nil {
 					return err
 				}
 				
@@ -448,7 +451,7 @@ func (rm *RecoveryManager) HandleBotFailureWithRetry(botID string) error {
 			bot.CurrentJob = nil
 			
 			// Save bot state
-			if err := rm.state.SaveBotWithRetry(bot); err != nil {
+			if err := rm.state.SaveBotWithRetry(ctx, bot); err != nil {
 				return err
 			}
 			
@@ -466,23 +469,23 @@ func (rm *RecoveryManager) HandleBotFailureWithRetry(botID string) error {
 }
 
 // PerformMaintenanceRecovery performs periodic maintenance recovery
-func (rm *RecoveryManager) PerformMaintenanceRecovery() error {
+func (rm *RecoveryManager) PerformMaintenanceRecovery(ctx context.Context) error {
 	rm.logger.Info("Performing maintenance recovery")
 	
 	start := time.Now()
 	
 	// Check for orphaned jobs
-	if err := rm.recoverOrphanedJobs(); err != nil {
+	if err := rm.recoverOrphanedJobs(ctx); err != nil {
 		rm.logger.WithError(err).Error("Maintenance: Failed to recover orphaned jobs")
 	}
 	
 	// Check for timed-out bots
-	if err := rm.resetTimedOutBots(); err != nil {
+	if err := rm.resetTimedOutBots(ctx); err != nil {
 		rm.logger.WithError(err).Error("Maintenance: Failed to reset timed-out bots")
 	}
 	
 	// Light cleanup (less aggressive than startup)
-	if err := rm.lightCleanup(); err != nil {
+	if err := rm.lightCleanup(ctx); err != nil {
 		rm.logger.WithError(err).Error("Maintenance: Failed to perform light cleanup")
 	}
 	
@@ -493,7 +496,7 @@ func (rm *RecoveryManager) PerformMaintenanceRecovery() error {
 }
 
 // lightCleanup performs light cleanup for maintenance
-func (rm *RecoveryManager) lightCleanup() error {
+func (rm *RecoveryManager) lightCleanup(ctx context.Context) error {
 	// Only clean very old data during maintenance
 	staleThreshold := 48 * time.Hour
 	
@@ -507,7 +510,7 @@ func (rm *RecoveryManager) lightCleanup() error {
 		if (job.Status == common.JobStatusCompleted || job.Status == common.JobStatusFailed) &&
 			job.CompletedAt != nil && time.Since(*job.CompletedAt) > staleThreshold {
 			
-			if err := rm.state.DeleteJob(job.ID); err != nil {
+			if err := rm.state.DeleteJob(ctx, job.ID); err != nil {
 				rm.logger.WithError(err).WithField("job_id", job.ID).Error("Failed to cleanup old job")
 				continue
 			}

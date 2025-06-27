@@ -43,12 +43,13 @@ services:
       master:
         condition: service_healthy
     volumes:
-      - ./bot-docker.yaml:/app/bot.yaml:ro
+      - ./bot-docker.yaml:/app/bot-docker.yaml:ro
       - bot-work:/app/work
     environment:
-      - PANDAFUZZ_LOG_LEVEL=info
+      - PANDAFUZZ_LOG_LEVEL=debug
       - AFL_SKIP_CPUFREQ=1
       - AFL_NO_AFFINITY=1
+    command: ["./pandafuzz-bot", "-config", "bot-docker.yaml", "-log-level", "debug"]
     networks:
       - pandafuzz
     deploy:
@@ -80,12 +81,13 @@ services:
       master:
         condition: service_healthy
     volumes:
-      - ./bot-docker.yaml:/app/bot.yaml:ro
+      - ./bot-docker.yaml:/app/bot-docker.yaml:ro
       - bot-dev-work:/app/work
       - ./:/workspace  # Mount source code for development
     environment:
       - PANDAFUZZ_LOG_LEVEL=debug
       - PANDAFUZZ_DEV=true
+    command: ["./pandafuzz-bot", "-config", "bot-docker.yaml", "-log-level", "debug"]
     networks:
       - pandafuzz
     profiles:

@@ -8,30 +8,30 @@ import (
 // Database defines the interface for persistent storage
 type Database interface {
 	// Basic operations
-	Store(key string, value interface{}) error
-	Get(key string, dest interface{}) error
-	Delete(key string) error
+	Store(ctx context.Context, key string, value any) error
+	Get(ctx context.Context, key string, dest any) error
+	Delete(ctx context.Context, key string) error
 	
 	// Transaction support
-	Transaction(fn func(tx Transaction) error) error
+	Transaction(ctx context.Context, fn func(tx Transaction) error) error
 	
 	// Lifecycle
-	Close() error
+	Close(ctx context.Context) error
 	
 	// Health and status
-	Ping() error
-	Stats() DatabaseStats
+	Ping(ctx context.Context) error
+	Stats(ctx context.Context) DatabaseStats
 }
 
 // Transaction defines the interface for database transactions
 type Transaction interface {
-	Store(key string, value interface{}) error
-	Get(key string, dest interface{}) error
-	Delete(key string) error
+	Store(ctx context.Context, key string, value any) error
+	Get(ctx context.Context, key string, dest any) error
+	Delete(ctx context.Context, key string) error
 	
 	// Transaction control
-	Commit() error
-	Rollback() error
+	Commit(ctx context.Context) error
+	Rollback(ctx context.Context) error
 }
 
 // DatabaseStats provides runtime statistics about the database
@@ -60,14 +60,10 @@ type DatabaseConfig struct {
 
 // Query interface for advanced database operations
 type Query interface {
-	// Basic querying
-	Select(query string, args ...interface{}) ([]map[string]interface{}, error)
-	SelectOne(query string, args ...interface{}) (map[string]interface{}, error)
-	Execute(query string, args ...interface{}) (int64, error)
-	
-	// Context-aware operations
-	SelectContext(ctx context.Context, query string, args ...interface{}) ([]map[string]interface{}, error)
-	ExecuteContext(ctx context.Context, query string, args ...interface{}) (int64, error)
+	// All operations require context for proper cancellation and timeout handling
+	Select(ctx context.Context, query string, args ...any) ([]map[string]any, error)
+	SelectOne(ctx context.Context, query string, args ...any) (map[string]any, error)
+	Execute(ctx context.Context, query string, args ...any) (int64, error)
 }
 
 // Advanced database interface for complex operations
@@ -76,29 +72,29 @@ type AdvancedDatabase interface {
 	Query
 	
 	// Batch operations
-	BatchStore(items map[string]interface{}) error
-	BatchDelete(keys []string) error
+	BatchStore(ctx context.Context, items map[string]any) error
+	BatchDelete(ctx context.Context, keys []string) error
 	
 	// Iteration
-	Iterate(prefix string, fn func(key string, value []byte) error) error
+	Iterate(ctx context.Context, prefix string, fn func(key string, value []byte) error) error
 	
 	// Backup and restore
-	Backup(path string) error
-	Restore(path string) error
+	Backup(ctx context.Context, path string) error
+	Restore(ctx context.Context, path string) error
 	
 	// Schema management (for SQL databases)
-	CreateTables() error
-	Migrate(version int) error
+	CreateTables(ctx context.Context) error
+	Migrate(ctx context.Context, version int) error
 	
 	// Maintenance
-	Vacuum() error
-	Compact() error
+	Vacuum(ctx context.Context) error
+	Compact(ctx context.Context) error
 }
 
 // DatabaseFactory creates database instances based on configuration
 type DatabaseFactory interface {
-	Create(config DatabaseConfig) (Database, error)
-	CreateAdvanced(config DatabaseConfig) (AdvancedDatabase, error)
+	Create(ctx context.Context, config DatabaseConfig) (Database, error)
+	CreateAdvanced(ctx context.Context, config DatabaseConfig) (AdvancedDatabase, error)
 }
 
 // Common errors
@@ -124,14 +120,14 @@ func IsDatabaseClosed(err error) bool {
 
 // DatabaseMiddleware provides middleware functionality
 type DatabaseMiddleware interface {
-	BeforeStore(key string, value interface{}) error
-	AfterStore(key string, value interface{}) error
-	BeforeGet(key string) error
-	AfterGet(key string, value interface{}) error
-	BeforeDelete(key string) error
-	AfterDelete(key string) error
-	BeforeTransaction() error
-	AfterTransaction(err error) error
+	BeforeStore(ctx context.Context, key string, value any) error
+	AfterStore(ctx context.Context, key string, value any) error
+	BeforeGet(ctx context.Context, key string) error
+	AfterGet(ctx context.Context, key string, value any) error
+	BeforeDelete(ctx context.Context, key string) error
+	AfterDelete(ctx context.Context, key string) error
+	BeforeTransaction(ctx context.Context) error
+	AfterTransaction(ctx context.Context, err error) error
 }
 
 // DatabaseWithMiddleware wraps a database with middleware
@@ -147,20 +143,20 @@ func NewDatabaseWithMiddleware(db Database, middleware ...DatabaseMiddleware) *D
 	}
 }
 
-func (dw *DatabaseWithMiddleware) Store(key string, value interface{}) error {
+func (dw *DatabaseWithMiddleware) Store(ctx context.Context, key string, value any) error {
 	// Run before middleware
 	for _, mw := range dw.middleware {
-		if err := mw.BeforeStore(key, value); err != nil {
+		if err := mw.BeforeStore(ctx, key, value); err != nil {
 			return err
 		}
 	}
 	
 	// Execute operation
-	err := dw.db.Store(key, value)
+	err := dw.db.Store(ctx, key, value)
 	
 	// Run after middleware
 	for _, mw := range dw.middleware {
-		if afterErr := mw.AfterStore(key, value); afterErr != nil {
+		if afterErr := mw.AfterStore(ctx, key, value); afterErr != nil {
 			// Log but don't override original error
 			return err
 		}
@@ -169,20 +165,20 @@ func (dw *DatabaseWithMiddleware) Store(key string, value interface{}) error {
 	return err
 }
 
-func (dw *DatabaseWithMiddleware) Get(key string, dest interface{}) error {
+func (dw *DatabaseWithMiddleware) Get(ctx context.Context, key string, dest any) error {
 	// Run before middleware
 	for _, mw := range dw.middleware {
-		if err := mw.BeforeGet(key); err != nil {
+		if err := mw.BeforeGet(ctx, key); err != nil {
 			return err
 		}
 	}
 	
 	// Execute operation
-	err := dw.db.Get(key, dest)
+	err := dw.db.Get(ctx, key, dest)
 	
 	// Run after middleware
 	for _, mw := range dw.middleware {
-		if afterErr := mw.AfterGet(key, dest); afterErr != nil {
+		if afterErr := mw.AfterGet(ctx, key, dest); afterErr != nil {
 			// Log but don't override original error
 			return err
 		}
@@ -191,20 +187,20 @@ func (dw *DatabaseWithMiddleware) Get(key string, dest interface{}) error {
 	return err
 }
 
-func (dw *DatabaseWithMiddleware) Delete(key string) error {
+func (dw *DatabaseWithMiddleware) Delete(ctx context.Context, key string) error {
 	// Run before middleware
 	for _, mw := range dw.middleware {
-		if err := mw.BeforeDelete(key); err != nil {
+		if err := mw.BeforeDelete(ctx, key); err != nil {
 			return err
 		}
 	}
 	
 	// Execute operation
-	err := dw.db.Delete(key)
+	err := dw.db.Delete(ctx, key)
 	
 	// Run after middleware
 	for _, mw := range dw.middleware {
-		if afterErr := mw.AfterDelete(key); afterErr != nil {
+		if afterErr := mw.AfterDelete(ctx, key); afterErr != nil {
 			// Log but don't override original error
 			return err
 		}
@@ -213,20 +209,20 @@ func (dw *DatabaseWithMiddleware) Delete(key string) error {
 	return err
 }
 
-func (dw *DatabaseWithMiddleware) Transaction(fn func(tx Transaction) error) error {
+func (dw *DatabaseWithMiddleware) Transaction(ctx context.Context, fn func(tx Transaction) error) error {
 	// Run before middleware
 	for _, mw := range dw.middleware {
-		if err := mw.BeforeTransaction(); err != nil {
+		if err := mw.BeforeTransaction(ctx); err != nil {
 			return err
 		}
 	}
 	
 	// Execute transaction
-	err := dw.db.Transaction(fn)
+	err := dw.db.Transaction(ctx, fn)
 	
 	// Run after middleware
 	for _, mw := range dw.middleware {
-		if afterErr := mw.AfterTransaction(err); afterErr != nil {
+		if afterErr := mw.AfterTransaction(ctx, err); afterErr != nil {
 			// Log but don't override original error
 			return err
 		}
@@ -235,14 +231,14 @@ func (dw *DatabaseWithMiddleware) Transaction(fn func(tx Transaction) error) err
 	return err
 }
 
-func (dw *DatabaseWithMiddleware) Close() error {
-	return dw.db.Close()
+func (dw *DatabaseWithMiddleware) Close(ctx context.Context) error {
+	return dw.db.Close(ctx)
 }
 
-func (dw *DatabaseWithMiddleware) Ping() error {
-	return dw.db.Ping()
+func (dw *DatabaseWithMiddleware) Ping(ctx context.Context) error {
+	return dw.db.Ping(ctx)
 }
 
-func (dw *DatabaseWithMiddleware) Stats() DatabaseStats {
-	return dw.db.Stats()
+func (dw *DatabaseWithMiddleware) Stats(ctx context.Context) DatabaseStats {
+	return dw.db.Stats(ctx)
 }

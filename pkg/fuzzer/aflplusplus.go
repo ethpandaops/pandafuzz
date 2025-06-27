@@ -38,10 +38,15 @@ type AFLPlusPlus struct {
 	botID         string
 }
 
+// Compile-time interface compliance check
+var _ Fuzzer = (*AFLPlusPlus)(nil)
+
 // NewAFLPlusPlus creates a new AFL++ fuzzer instance
-func NewAFLPlusPlus() *AFLPlusPlus {
-	logger := logrus.New()
-	logger.SetLevel(logrus.InfoLevel)
+func NewAFLPlusPlus(logger *logrus.Logger) *AFLPlusPlus {
+	if logger == nil {
+		logger = logrus.New()
+		logger.SetLevel(logrus.InfoLevel)
+	}
 	
 	return &AFLPlusPlus{
 		status:       StatusUninitialized,
@@ -998,7 +1003,7 @@ func (afl *AFLPlusPlus) detectCrashType(filename string) string {
 	return "unknown"
 }
 
-// Factory function for creating AFL++ instances
-func CreateAFLPlusPlus() (Fuzzer, error) {
-	return NewAFLPlusPlus(), nil
+// CreateAFLPlusPlus creates a new AFL++ instance with optional logger
+func CreateAFLPlusPlus(logger *logrus.Logger) (Fuzzer, error) {
+	return NewAFLPlusPlus(logger), nil
 }

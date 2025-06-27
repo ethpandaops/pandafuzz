@@ -17,7 +17,14 @@ type botService struct {
 	timeoutManager TimeoutManager
 	config         *common.MasterConfig
 	logger         *logrus.Logger
+	
+	// Lifecycle management
+	ctx    context.Context
+	cancel context.CancelFunc
 }
+
+// Compile-time interface compliance check
+var _ BotService = (*botService)(nil)
 
 // NewBotService creates a new bot service
 func NewBotService(
@@ -220,4 +227,59 @@ func hasRequiredCapabilities(botCapabilities, requiredCapabilities []string) boo
 	}
 
 	return true
+}
+
+// Start starts the bot service
+func (s *botService) Start(ctx context.Context) error {
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	
+	// Start heartbeat monitoring goroutine
+	go s.monitorBotHeartbeats()
+	
+	s.logger.Info("Bot service started")
+	return nil
+}
+
+// Stop stops the bot service
+func (s *botService) Stop() error {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	
+	// Clean up any resources
+	// Currently bot service doesn't have resources to clean up
+	
+	s.logger.Info("Bot service stopped")
+	return nil
+}
+
+// monitorBotHeartbeats monitors bot heartbeats in the background
+func (s *botService) monitorBotHeartbeats() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			// Check for offline bots
+			bots, err := s.state.ListBots()
+			if err != nil {
+				s.logger.WithError(err).Error("Failed to list bots for heartbeat monitoring")
+				continue
+			}
+			
+			now := time.Now()
+			for _, bot := range bots {
+				if bot.IsOnline && now.After(bot.TimeoutAt) {
+					s.logger.WithFields(logrus.Fields{
+						"bot_id":     bot.ID,
+						"last_seen":  bot.LastSeen,
+						"timeout_at": bot.TimeoutAt,
+					}).Warn("Bot missed heartbeat deadline")
+				}
+			}
+		}
+	}
 }

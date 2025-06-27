@@ -112,19 +112,23 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 		Logging: common.LoggingConfig{},
 	}
 
+	// Create logger for test environment
+	logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+
 	// Create database
-	db, err := storage.NewSQLiteStorage(masterConfig.Database)
+	db, err := storage.NewSQLiteStorage(masterConfig.Database, logger)
 	require.NoError(t, err)
 
 	err = db.CreateTables()
 	require.NoError(t, err)
 
 	// Create master components
-	state := master.NewPersistentState(db, masterConfig)
+	state := master.NewPersistentState(db, masterConfig, logger)
 
-	timeoutMgr := master.NewTimeoutManager(state, masterConfig)
-	recoveryMgr := master.NewRecoveryManager(state, timeoutMgr, masterConfig)
-	server := master.NewServer(masterConfig, state, timeoutMgr, nil)
+	timeoutMgr := master.NewTimeoutManager(state, masterConfig, logger)
+	recoveryMgr := master.NewRecoveryManager(state, timeoutMgr, masterConfig, logger)
+	server := master.NewServer(masterConfig, state, timeoutMgr, nil, logger)
 
 	// Create HTTP client with shorter timeout for tests
 	httpClient := &http.Client{

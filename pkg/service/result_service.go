@@ -14,7 +14,14 @@ type resultService struct {
 	state  StateStore
 	config *common.MasterConfig
 	logger *logrus.Logger
+	
+	// Lifecycle management
+	ctx    context.Context
+	cancel context.CancelFunc
 }
+
+// Compile-time interface compliance check
+var _ ResultService = (*resultService)(nil)
 
 // NewResultService creates a new result service
 func NewResultService(
@@ -134,4 +141,47 @@ func (s *resultService) GetCoverageHistory(ctx context.Context, jobID string) ([
 	// TODO: Implement actual coverage history retrieval from database
 	// For now, return empty list
 	return []*common.CoverageResult{}, nil
+}
+
+// Start starts the result service
+func (s *resultService) Start(ctx context.Context) error {
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	
+	// Start result processing goroutine
+	go s.processResultsQueue()
+	
+	s.logger.Info("Result service started")
+	return nil
+}
+
+// Stop stops the result service
+func (s *resultService) Stop() error {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	
+	// Clean up any resources
+	// Currently result service doesn't have resources to clean up
+	
+	s.logger.Info("Result service stopped")
+	return nil
+}
+
+// processResultsQueue processes queued results in the background
+func (s *resultService) processResultsQueue() {
+	// This is a placeholder for future queue processing
+	// Currently results are processed synchronously
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			// Future: Process any queued results here
+			// For now, just a heartbeat log
+			s.logger.Debug("Result service heartbeat")
+		}
+	}
 }

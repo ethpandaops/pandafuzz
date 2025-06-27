@@ -142,9 +142,7 @@ type TriageInfo struct {
 }
 
 // NewCrashAnalyzer creates a new crash analyzer
-func NewCrashAnalyzer(config *AnalyzerConfig) *CrashAnalyzer {
-	logger := logrus.New()
-	logger.SetLevel(logrus.InfoLevel)
+func NewCrashAnalyzer(config *AnalyzerConfig, logger *logrus.Logger) *CrashAnalyzer {
 	
 	// Set defaults
 	if config.MaxStackFrames == 0 {
@@ -1013,8 +1011,8 @@ func (ca *CrashAnalyzer) BatchAnalyze(crashes []*common.CrashResult) ([]*Analysi
 }
 
 // GetStatistics returns analysis statistics
-func (ca *CrashAnalyzer) GetStatistics() map[string]interface{} {
-	stats := make(map[string]interface{})
+func (ca *CrashAnalyzer) GetStatistics() map[string]any {
+	stats := make(map[string]any)
 	
 	// Count crash types
 	typeCounts := make(map[CrashType]int)

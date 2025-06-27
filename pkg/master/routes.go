@@ -82,6 +82,12 @@ func (s *Server) setupAPIRoutes(router *mux.Router) {
 	router.HandleFunc("/results/corpus", s.handleResultCorpus).Methods("POST")
 	router.HandleFunc("/results/status", s.handleResultStatus).Methods("POST")
 	
+	// Result retrieval (Admin/UI)
+	router.HandleFunc("/results/crashes", s.handleGetCrashes).Methods("GET")
+	router.HandleFunc("/results/crashes/{id}", s.handleGetCrash).Methods("GET")
+	router.HandleFunc("/results/crashes/{id}/input", s.handleGetCrashInput).Methods("GET")
+	router.HandleFunc("/jobs/{id}/crashes", s.handleGetJobCrashes).Methods("GET")
+	
 	// Job management (Admin)
 	router.HandleFunc("/jobs", s.handleJobCreate).Methods("POST")
 	router.HandleFunc("/jobs/upload", s.handleJobCreateWithUpload).Methods("POST")

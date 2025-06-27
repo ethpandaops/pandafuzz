@@ -9,6 +9,10 @@ import (
 
 // BotService handles bot-related business logic
 type BotService interface {
+	// Lifecycle methods
+	Start(ctx context.Context) error
+	Stop() error
+	
 	// RegisterBot registers a new bot
 	RegisterBot(ctx context.Context, hostname string, name string, capabilities []string, apiEndpoint string) (*common.Bot, error)
 	
@@ -30,6 +34,10 @@ type BotService interface {
 
 // JobService handles job-related business logic
 type JobService interface {
+	// Lifecycle methods
+	Start(ctx context.Context) error
+	Stop() error
+	
 	// CreateJob creates a new job
 	CreateJob(ctx context.Context, req CreateJobRequest) (*common.Job, error)
 	
@@ -54,6 +62,10 @@ type JobService interface {
 
 // ResultService handles result processing
 type ResultService interface {
+	// Lifecycle methods
+	Start(ctx context.Context) error
+	Stop() error
+	
 	// ProcessCrashResult processes a crash result
 	ProcessCrashResult(ctx context.Context, crash *common.CrashResult) error
 	
@@ -72,6 +84,10 @@ type ResultService interface {
 
 // SystemService handles system-level operations
 type SystemService interface {
+	// Lifecycle methods
+	Start(ctx context.Context) error
+	Stop() error
+	
 	// GetSystemStats returns system statistics
 	GetSystemStats(ctx context.Context) (SystemStats, error)
 	
@@ -106,10 +122,10 @@ type JobFilter struct {
 
 // SystemStats represents system statistics
 type SystemStats struct {
-	ServerStats    interface{} `json:"server"`
-	StateStats     interface{} `json:"state"`
-	TimeoutStats   interface{} `json:"timeouts"`
-	DatabaseStats  interface{} `json:"database"`
+	ServerStats    any `json:"server"`
+	StateStats     any `json:"state"`
+	TimeoutStats   any `json:"timeouts"`
+	DatabaseStats  any `json:"database"`
 	Timestamp      time.Time   `json:"timestamp"`
 }
 

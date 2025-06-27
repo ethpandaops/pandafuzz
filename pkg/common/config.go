@@ -36,6 +36,7 @@ type BotConfig struct {
 	ID           string            `yaml:"id" json:"id" validate:"required"`
 	Name         string            `yaml:"name" json:"name"`
 	MasterURL    string            `yaml:"master_url" json:"master_url" validate:"required,url"`
+	APIPort      int               `yaml:"api_port" json:"api_port"`
 	Capabilities []string          `yaml:"capabilities" json:"capabilities" validate:"required"`
 	Fuzzing      FuzzingConfig     `yaml:"fuzzing" json:"fuzzing" validate:"required"`
 	Timeouts     BotTimeoutConfig  `yaml:"timeouts" json:"timeouts" validate:"required"`
@@ -433,6 +434,11 @@ func (cm *ConfigManager) setBotDefaults(bot *BotConfig) {
 	if bot.ID == "" {
 		hostname, _ := os.Hostname()
 		bot.ID = fmt.Sprintf("bot-%s-%d", hostname, time.Now().Unix())
+	}
+	
+	// API port default
+	if bot.APIPort == 0 {
+		bot.APIPort = 9049
 	}
 	
 	// Fuzzing defaults

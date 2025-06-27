@@ -521,6 +521,10 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 	duration := job.Config.Duration
 	if duration == 0 {
 		duration = 60 * time.Second
+	} else if duration < time.Second {
+		// If duration looks like it's in seconds (less than 1 second as time.Duration),
+		// it was likely unmarshaled as an integer number of seconds
+		duration = time.Duration(duration) * time.Second
 	}
 	args = append(args, fmt.Sprintf("-max_total_time=%d", int(duration.Seconds())))
 
@@ -611,20 +615,52 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 		// Check exit code
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode := exitErr.ExitCode()
-			msg := fmt.Sprintf("LibFuzzer execution failed with exit code %d", exitCode)
-			rje.writeLog(execution.LogWriter, "error", "libfuzzer", msg)
-			if len(exitErr.Stderr) > 0 {
-				rje.writeLog(execution.LogWriter, "error", "libfuzzer", fmt.Sprintf("Stderr: %s", string(exitErr.Stderr)))
-			}
 			
-			// Check for immediate crash (SIGSEGV = -11, SIGILL = -4, SIGABRT = -6)
-			if exitCode == -11 || exitCode == -4 || exitCode == -6 {
-				rje.writeLog(execution.LogWriter, "error", "libfuzzer", "LibFuzzer binary crashed with signal (likely incompatible with Alpine musl libc)")
+			// LibFuzzer exit codes:
+			// 0 = success, no crashes
+			// 77 = crash found
+			// 78 = timeout
+			// -11 (SIGSEGV), -4 (SIGILL), -6 (SIGABRT) = LibFuzzer itself crashed
+			
+			if exitCode == 77 {
+				// Exit code 77 means LibFuzzer found a crash/bug
+				// This is considered "successful" fuzzing (the goal is to find bugs)
+				msg := "LibFuzzer successfully found a crash/bug!"
+				rje.writeLog(execution.LogWriter, "info", "libfuzzer", msg)
+				rje.writeLog(execution.LogWriter, "info", "libfuzzer", "Note: Finding crashes is the goal of fuzzing - this is a successful outcome")
+				
+				// Look for crash files in the working directory
+				crashFiles, err := rje.findCrashFiles(job.WorkDir)
+				if err != nil {
+					rje.writeLog(execution.LogWriter, "warning", "libfuzzer", fmt.Sprintf("Failed to find crash files: %v", err))
+				} else {
+					rje.writeLog(execution.LogWriter, "info", "libfuzzer", fmt.Sprintf("Found %d crash file(s)", len(crashFiles)))
+					for _, crashFile := range crashFiles {
+						rje.writeLog(execution.LogWriter, "info", "libfuzzer", fmt.Sprintf("Crash file: %s", crashFile))
+					}
+				}
+				
+				execution.LogWriter.Flush()
+				return true, msg, nil
+			} else if exitCode == 78 {
+				msg := "LibFuzzer timed out"
+				rje.writeLog(execution.LogWriter, "warning", "libfuzzer", msg)
+				execution.LogWriter.Flush()
+				return true, msg, nil
+			} else if exitCode == -11 || exitCode == -4 || exitCode == -6 {
+				// LibFuzzer binary itself crashed
+				rje.writeLog(execution.LogWriter, "error", "libfuzzer", fmt.Sprintf("LibFuzzer binary crashed with signal %d (likely incompatible with Alpine musl libc)", exitCode))
 				// Check if running on Alpine Linux
 				if _, err := os.Stat("/etc/alpine-release"); err == nil {
 					rje.writeLog(execution.LogWriter, "warning", "libfuzzer", "Alpine Linux detected - falling back to simulated execution due to binary incompatibility")
 					execution.LogWriter.Flush()
 					return rje.simulateLibFuzzerExecution(execution, duration)
+				}
+			} else {
+				msg := fmt.Sprintf("LibFuzzer execution failed with exit code %d", exitCode)
+				rje.writeLog(execution.LogWriter, "error", "libfuzzer", msg)
+				if len(exitErr.Stderr) > 0 {
+					rje.writeLog(execution.LogWriter, "error", "libfuzzer", fmt.Sprintf("Stderr: %s", string(exitErr.Stderr)))
 				}
 			}
 		} else {
@@ -675,6 +711,29 @@ func (rje *RealJobExecutor) simulateLibFuzzerExecution(execution *RealJobExecuti
 	}
 }
 
+// findCrashFiles finds crash files in the working directory
+func (rje *RealJobExecutor) findCrashFiles(workDir string) ([]string, error) {
+	var crashFiles []string
+	
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		return nil, err
+	}
+	
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		
+		// LibFuzzer crash files typically start with "crash-"
+		if strings.HasPrefix(entry.Name(), "crash-") {
+			crashFiles = append(crashFiles, filepath.Join(workDir, entry.Name()))
+		}
+	}
+	
+	return crashFiles, nil
+}
+
 // captureOutput captures output from a reader and writes to log
 func (rje *RealJobExecutor) captureOutput(reader io.Reader, logWriter *bufio.Writer, source string) {
 	scanner := bufio.NewScanner(reader)
@@ -688,9 +747,22 @@ func (rje *RealJobExecutor) captureOutput(reader io.Reader, logWriter *bufio.Wri
 		level := "info"
 		if strings.Contains(strings.ToLower(line), "error") {
 			level = "error"
-		} else if strings.Contains(strings.ToLower(line), "warning") || strings.Contains(strings.ToLower(line), "crash") || strings.Contains(line, "[!]") {
+		} else if strings.Contains(strings.ToLower(line), "warning") || strings.Contains(line, "[!]") {
 			level = "warning"
 		}
+		
+		// Special handling for LibFuzzer crash detection
+		if strings.Contains(line, "Test unit written to") && strings.Contains(line, "crash-") {
+			level = "error"
+			// Extract crash file name
+			if idx := strings.Index(line, "./crash-"); idx >= 0 {
+				crashFile := line[idx+2:] // Remove "./"
+				rje.logger.WithField("crash_file", crashFile).Info("LibFuzzer crash detected")
+			}
+		} else if strings.Contains(line, "libFuzzer: deadly signal") {
+			level = "error"
+		}
+		
 		rje.writeLog(logWriter, level, source, line)
 	}
 	if err := scanner.Err(); err != nil {

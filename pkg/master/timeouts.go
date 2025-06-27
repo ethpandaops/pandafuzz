@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/service"
 	"github.com/sirupsen/logrus"
 )
 
@@ -25,6 +26,9 @@ type TimeoutManager struct {
 	retryManager  *common.RetryManager
 	stats         TimeoutStats
 }
+
+// Compile-time interface compliance check
+var _ service.TimeoutManager = (*TimeoutManager)(nil)
 
 // TimeoutStats tracks timeout-related statistics
 type TimeoutStats struct {
@@ -58,9 +62,7 @@ const (
 type TimeoutCallback func(event TimeoutEvent) error
 
 // NewTimeoutManager creates a new timeout manager
-func NewTimeoutManager(state *PersistentState, config *common.MasterConfig) *TimeoutManager {
-	logger := logrus.New()
-	logger.SetLevel(logrus.InfoLevel)
+func NewTimeoutManager(state *PersistentState, config *common.MasterConfig, logger *logrus.Logger) *TimeoutManager {
 	
 	ctx, cancel := context.WithCancel(context.Background())
 	
@@ -254,7 +256,7 @@ func (tm *TimeoutManager) handleBotTimeout(botID string) error {
 	
 	err := tm.retryManager.Execute(func() error {
 		// Get bot information
-		bot, err := tm.state.GetBot(botID)
+		bot, err := tm.state.GetBot(context.Background(), botID)
 		if err != nil {
 			return err
 		}
@@ -269,7 +271,7 @@ func (tm *TimeoutManager) handleBotTimeout(botID string) error {
 		}
 		
 		// Reset the bot state
-		if err := tm.state.ResetBot(botID); err != nil {
+		if err := tm.state.ResetBot(context.Background(), botID); err != nil {
 			return err
 		}
 		
@@ -304,7 +306,7 @@ func (tm *TimeoutManager) handleJobTimeout(jobID string) error {
 	
 	err := tm.retryManager.Execute(func() error {
 		// Get job information
-		job, err := tm.state.GetJob(jobID)
+		job, err := tm.state.GetJob(context.Background(), jobID)
 		if err != nil {
 			return err
 		}
@@ -321,7 +323,7 @@ func (tm *TimeoutManager) handleJobTimeout(jobID string) error {
 		// Update job status to timed out
 		if job.AssignedBot != nil {
 			// Complete the job as failed to free up the bot
-			if err := tm.state.CompleteJobWithRetry(jobID, *job.AssignedBot, false); err != nil {
+			if err := tm.state.CompleteJobWithRetry(context.Background(), jobID, *job.AssignedBot, false); err != nil {
 				return err
 			}
 		}
@@ -466,11 +468,11 @@ func (tm *TimeoutManager) GetActiveTimeouts() (int, int) {
 func (tm *TimeoutManager) logTimeoutEvent(event TimeoutEvent) error {
 	// Store timeout event in metadata for audit purposes
 	key := fmt.Sprintf("timeout_event_%s_%d", event.EntityID, event.Timestamp.Unix())
-	return tm.state.SetMetadata(key, event)
+	return tm.state.SetMetadata(context.Background(), key, event)
 }
 
 // GetStats returns timeout manager statistics
-func (tm *TimeoutManager) GetStats() interface{} {
+func (tm *TimeoutManager) GetStats() any {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	

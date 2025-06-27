@@ -47,7 +47,7 @@ func (s *Server) handleGetJobCorpus(w http.ResponseWriter, r *http.Request) {
 	// Check if corpus directory exists
 	if _, err := os.Stat(corpusDir); os.IsNotExist(err) {
 		// Return empty list if corpus directory doesn't exist
-		response := map[string]interface{}{
+		response := map[string]any{
 			"job_id": jobID,
 			"files":  []CorpusFile{},
 		}
@@ -88,7 +88,7 @@ func (s *Server) handleGetJobCorpus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"job_id": jobID,
 		"files":  files,
 	}
@@ -162,7 +162,7 @@ func (s *Server) handleUploadJobCorpus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"job_id":         jobID,
 		"uploaded_files": uploadedFiles,
 		"count":          len(uploadedFiles),

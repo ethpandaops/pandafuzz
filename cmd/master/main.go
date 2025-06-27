@@ -86,7 +86,7 @@ func main() {
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to initialize database")
 	}
-	defer db.Close()
+	defer db.Close(context.Background())
 	
 	// Handle database operations
 	if *resetDB {
@@ -106,17 +106,17 @@ func main() {
 	logger.Info("Initializing PandaFuzz Master components")
 	
 	// Create persistent state manager
-	state := master.NewPersistentState(db, config)
+	state := master.NewPersistentState(db, config, logger)
 	
 	// Create timeout manager
-	timeoutMgr := master.NewTimeoutManager(state, config)
+	timeoutMgr := master.NewTimeoutManager(state, config, logger)
 	
 	// Create recovery manager
-	recoveryMgr := master.NewRecoveryManager(state, timeoutMgr, config)
+	recoveryMgr := master.NewRecoveryManager(state, timeoutMgr, config, logger)
 	
 	// Perform recovery on startup
 	logger.Info("Performing system recovery")
-	if err := recoveryMgr.RecoverOnStartup(); err != nil {
+	if err := recoveryMgr.RecoverOnStartup(context.Background()); err != nil {
 		logger.WithError(err).Error("Recovery failed, continuing anyway")
 	}
 	
@@ -128,7 +128,7 @@ func main() {
 	}
 	
 	// Create HTTP server
-	server := master.NewServer(config, state, timeoutMgr, versionInfo)
+	server := master.NewServer(config, state, timeoutMgr, versionInfo, logger)
 	
 	// Set recovery manager on server to avoid circular dependency
 	server.SetRecoveryManager(recoveryMgr)
@@ -193,7 +193,7 @@ func main() {
 	
 	// Final cleanup
 	logger.Info("Performing final cleanup")
-	if err := state.Close(); err != nil {
+	if err := state.Close(context.Background()); err != nil {
 		logger.WithError(err).Error("Cleanup error")
 	}
 	
@@ -334,7 +334,7 @@ func initializeDatabase(config *common.MasterConfig, logger *logrus.Logger) (com
 	
 	switch config.Database.Type {
 	case "sqlite":
-		db, err = storage.NewSQLiteStorage(config.Database)
+		db, err = storage.NewSQLiteStorage(config.Database, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SQLite database: %w", err)
 		}
@@ -351,13 +351,13 @@ func initializeDatabase(config *common.MasterConfig, logger *logrus.Logger) (com
 	
 	// Initialize schema (if supported)
 	if advDb, ok := db.(common.AdvancedDatabase); ok {
-		if err := advDb.CreateTables(); err != nil {
+		if err := advDb.CreateTables(context.Background()); err != nil {
 			return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 		}
 	}
 	
 	// Run health check
-	if err := db.Ping(); err != nil {
+	if err := db.Ping(context.Background()); err != nil {
 		return nil, fmt.Errorf("database health check failed: %w", err)
 	}
 	
@@ -397,7 +397,7 @@ func startMaintenance(ctx context.Context, recovery *master.RecoveryManager, log
 		case <-ticker.C:
 			logger.Debug("Running periodic maintenance")
 			
-			if err := recovery.PerformMaintenanceRecovery(); err != nil {
+			if err := recovery.PerformMaintenanceRecovery(ctx); err != nil {
 				logger.WithError(err).Error("Maintenance recovery failed")
 			}
 		}

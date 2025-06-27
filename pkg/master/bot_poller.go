@@ -115,7 +115,7 @@ func (p *BotPoller) Start() error {
 	p.wg.Add(1)
 	go p.pollLoop()
 	
-	p.logger.Info("Bot poller started")
+	p.logger.WithField("interval", p.interval).Info("Bot poller started")
 	return nil
 }
 
@@ -140,7 +140,13 @@ func (p *BotPoller) Stop() error {
 func (p *BotPoller) pollLoop() {
 	defer p.wg.Done()
 	
-	ticker := time.NewTicker(p.interval)
+	// Use 5 seconds as minimum interval for more responsive polling
+	interval := p.interval
+	if interval > 5*time.Second {
+		interval = 5 * time.Second
+	}
+	
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	
 	// Initial poll
@@ -164,12 +170,21 @@ func (p *BotPoller) pollAllBots() {
 		return
 	}
 	
+	p.logger.WithField("bot_count", len(bots)).Debug("Starting bot polling cycle")
+	
 	// Poll each bot concurrently
 	var wg sync.WaitGroup
 	for _, bot := range bots {
 		if bot.APIEndpoint == "" {
+			p.logger.WithField("bot_id", bot.ID).Debug("Skipping bot without API endpoint")
 			continue // Skip bots without API endpoints (legacy bots)
 		}
+		
+		p.logger.WithFields(logrus.Fields{
+			"bot_id": bot.ID,
+			"api_endpoint": bot.APIEndpoint,
+			"current_job": bot.CurrentJob,
+		}).Debug("Polling bot")
 		
 		wg.Add(1)
 		go func(b *common.Bot) {
@@ -223,6 +238,23 @@ func (p *BotPoller) pollBot(bot *common.Bot) {
 		} else {
 			p.updateJobStatus(bot, jobStatus)
 		}
+	} else if bot.CurrentJob != nil {
+		// Bot reports no current job but master thinks it has one
+		// This could mean the job completed - poll for the last known job
+		p.logger.WithFields(logrus.Fields{
+			"bot_id":        bot.ID,
+			"master_job_id": *bot.CurrentJob,
+		}).Info("Bot reports no job but master has one assigned, checking job status")
+		
+		jobStatus, err := p.pollJobStatus(bot, *bot.CurrentJob)
+		if err != nil {
+			p.logger.WithError(err).WithFields(logrus.Fields{
+				"bot_id": bot.ID,
+				"job_id": *bot.CurrentJob,
+			}).Debug("Job not found on bot, likely completed")
+		} else {
+			p.updateJobStatus(bot, jobStatus)
+		}
 	}
 }
 
@@ -252,6 +284,12 @@ func (p *BotPoller) pollBotHealth(bot *common.Bot) (*BotHealthStatus, error) {
 func (p *BotPoller) pollJobStatus(bot *common.Bot, jobID string) (*BotJobStatus, error) {
 	url := fmt.Sprintf("%s/api/v1/job/%s/status", bot.APIEndpoint, jobID)
 	
+	p.logger.WithFields(logrus.Fields{
+		"bot_id": bot.ID,
+		"job_id": jobID,
+		"url":    url,
+	}).Debug("Polling job status from bot")
+	
 	resp, err := p.httpClient.Get(url)
 	if err != nil {
 		return nil, err
@@ -266,6 +304,13 @@ func (p *BotPoller) pollJobStatus(bot *common.Bot, jobID string) (*BotJobStatus,
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
 		return nil, err
 	}
+	
+	p.logger.WithFields(logrus.Fields{
+		"bot_id":     bot.ID,
+		"job_id":     jobID,
+		"job_status": status.Status,
+		"success":    status.Success,
+	}).Debug("Received job status from bot")
 	
 	return &status, nil
 }
@@ -299,15 +344,122 @@ func (p *BotPoller) updateBotStatus(bot *common.Bot, health *BotHealthStatus) {
 
 // updateJobStatus updates job status based on bot's report
 func (p *BotPoller) updateJobStatus(bot *common.Bot, jobStatus *BotJobStatus) {
-	if jobStatus.Status != "completed" && jobStatus.Status != "failed" {
-		return // Only process completed or failed jobs
+	// Process completed, failed, or pending_ack jobs
+	if jobStatus.Status != "completed" && jobStatus.Status != "failed" && jobStatus.Status != "pending_ack" {
+		return
+	}
+	
+	// Get the job from master's perspective first
+	job, err := p.services.Job.GetJob(p.ctx, jobStatus.JobID)
+	if err != nil {
+		p.logger.WithError(err).WithFields(logrus.Fields{
+			"bot_id": bot.ID,
+			"job_id": jobStatus.JobID,
+		}).Warn("Failed to get job for status update")
+		return
+	}
+	
+	// Check if job is already completed/failed in master's view
+	if job.Status == common.JobStatusCompleted || job.Status == common.JobStatusCancelled {
+		p.logger.WithFields(logrus.Fields{
+			"bot_id":      bot.ID,
+			"job_id":      jobStatus.JobID,
+			"master_status": job.Status,
+			"bot_status":   jobStatus.Status,
+		}).Debug("Job already completed in master's view")
+		return
+	}
+	
+	// If job is unassigned or assigned to different bot, but this bot completed it,
+	// we should update it if the bot actually did the work
+	if job.AssignedBot == nil || (job.AssignedBot != nil && *job.AssignedBot != bot.ID) {
+		p.logger.WithFields(logrus.Fields{
+			"bot_id":       bot.ID,
+			"job_id":       jobStatus.JobID,
+			"assigned_bot": job.AssignedBot,
+			"bot_status":   jobStatus.Status,
+		}).Warn("Job assignment mismatch, attempting to reconcile")
+		
+		// If the bot has proof it completed the job (has end time), update the job
+		if !jobStatus.EndTime.IsZero() && jobStatus.Status == "completed" {
+			// Check if bot reported crashes but master doesn't have them
+			if jobStatus.CrashCount > 0 {
+				p.fetchMissingCrashes(bot, jobStatus)
+			}
+			
+			// Directly update the job status
+			job.Status = common.JobStatusCompleted
+			job.AssignedBot = &bot.ID
+			now := time.Now()
+			job.CompletedAt = &now
+			
+			if err := p.state.SaveJobWithRetry(p.ctx, job); err != nil {
+				p.logger.WithError(err).Error("Failed to save reconciled job status")
+				return
+			}
+			
+			// Clear bot's current job
+			bot.CurrentJob = nil
+			bot.Status = common.BotStatusIdle
+			if err := p.state.SaveBotWithRetry(p.ctx, bot); err != nil {
+				p.logger.WithError(err).Error("Failed to update bot after job reconciliation")
+			}
+			
+			p.logger.WithFields(logrus.Fields{
+				"bot_id":  bot.ID,
+				"job_id":  jobStatus.JobID,
+				"status":  jobStatus.Status,
+				"crashes": jobStatus.CrashCount,
+				"message": "Reconciled job completion from bot polling",
+			}).Info("Job status reconciled via polling")
+			return
+		}
+	}
+	
+	// Handle pending acknowledgment jobs
+	if jobStatus.Status == "pending_ack" {
+		p.logger.WithFields(logrus.Fields{
+			"bot_id": bot.ID,
+			"job_id": jobStatus.JobID,
+		}).Info("Found job pending acknowledgment, completing it now")
+		
+		// Check if bot reported crashes but master doesn't have them
+		if jobStatus.CrashCount > 0 {
+			p.fetchMissingCrashes(bot, jobStatus)
+		}
+		
+		// Complete the job
+		err = p.services.Job.CompleteJob(p.ctx, jobStatus.JobID, bot.ID, jobStatus.Success)
+		if err != nil {
+			p.logger.WithError(err).WithFields(logrus.Fields{
+				"bot_id": bot.ID,
+				"job_id": jobStatus.JobID,
+			}).Error("Failed to complete pending job from poll")
+			return
+		}
+		
+		p.logger.WithFields(logrus.Fields{
+			"bot_id":  bot.ID,
+			"job_id":  jobStatus.JobID,
+			"success": jobStatus.Success,
+			"crashes": jobStatus.CrashCount,
+			"message": jobStatus.Message,
+		}).Info("Pending job completed via polling")
+		
+		// TODO: Notify bot that the job is now acknowledged
+		return
+	}
+	
+	// Check if bot reported crashes but master doesn't have them
+	if jobStatus.Status == "completed" && jobStatus.CrashCount > 0 {
+		p.fetchMissingCrashes(bot, jobStatus)
 	}
 	
 	// Determine success based on status
 	success := jobStatus.Status == "completed" && jobStatus.Success
 	
-	// Complete the job
-	err := p.services.Job.CompleteJob(p.ctx, jobStatus.JobID, bot.ID, success)
+	// Try normal completion path
+	err = p.services.Job.CompleteJob(p.ctx, jobStatus.JobID, bot.ID, success)
 	if err != nil {
 		p.logger.WithError(err).WithFields(logrus.Fields{
 			"bot_id": bot.ID,
@@ -321,6 +473,7 @@ func (p *BotPoller) updateJobStatus(bot *common.Bot, jobStatus *BotJobStatus) {
 		"job_id":  jobStatus.JobID,
 		"status":  jobStatus.Status,
 		"success": success,
+		"crashes": jobStatus.CrashCount,
 		"message": jobStatus.Message,
 	}).Info("Job status updated via polling")
 }
@@ -349,7 +502,7 @@ func (p *BotPoller) markBotUnreachable(bot *common.Bot) {
 	bot.Status = common.BotStatusTimedOut
 	bot.IsOnline = false
 	
-	if err := p.state.SaveBotWithRetry(bot); err != nil {
+	if err := p.state.SaveBotWithRetry(p.ctx, bot); err != nil {
 		p.logger.WithError(err).Error("Failed to save bot timeout status")
 		return
 	}
@@ -364,13 +517,13 @@ func (p *BotPoller) markBotUnreachable(bot *common.Bot) {
 		
 		// Mark job as errored
 		job.Status = common.JobStatusFailed
-		if err := p.state.SaveJobWithRetry(job); err != nil {
+		if err := p.state.SaveJobWithRetry(p.ctx, job); err != nil {
 			p.logger.WithError(err).Error("Failed to save job error status")
 		}
 		
 		// Free bot's job assignment
 		bot.CurrentJob = nil
-		if err := p.state.SaveBotWithRetry(bot); err != nil {
+		if err := p.state.SaveBotWithRetry(p.ctx, bot); err != nil {
 			p.logger.WithError(err).Error("Failed to clear bot job assignment")
 		}
 	}
@@ -510,4 +663,102 @@ func (p *BotPoller) checkErroredJobs(bot *common.Bot) {
 			}
 		}
 	}
+}
+
+// fetchMissingCrashes fetches crash data from bot when master doesn't have it
+func (p *BotPoller) fetchMissingCrashes(bot *common.Bot, jobStatus *BotJobStatus) {
+	// First check how many crashes we have for this job
+	crashes, err := p.state.GetJobCrashes(p.ctx, jobStatus.JobID)
+	if err != nil {
+		p.logger.WithError(err).WithFields(logrus.Fields{
+			"bot_id": bot.ID,
+			"job_id": jobStatus.JobID,
+		}).Error("Failed to get job crashes")
+		return
+	}
+	
+	// If we already have all crashes, nothing to do
+	if len(crashes) >= jobStatus.CrashCount {
+		p.logger.WithFields(logrus.Fields{
+			"bot_id":        bot.ID,
+			"job_id":        jobStatus.JobID,
+			"have_crashes":  len(crashes),
+			"bot_reported": jobStatus.CrashCount,
+		}).Debug("Already have all crashes")
+		return
+	}
+	
+	p.logger.WithFields(logrus.Fields{
+		"bot_id":        bot.ID,
+		"job_id":        jobStatus.JobID,
+		"have_crashes":  len(crashes),
+		"bot_reported": jobStatus.CrashCount,
+		"missing":      jobStatus.CrashCount - len(crashes),
+	}).Info("Fetching missing crashes from bot")
+	
+	// Get job crashes from bot
+	url := fmt.Sprintf("%s/api/v1/jobs/%s/crashes", bot.APIEndpoint, jobStatus.JobID)
+	
+	resp, err := p.httpClient.Get(url)
+	if err != nil {
+		p.logger.WithError(err).WithFields(logrus.Fields{
+			"bot_id": bot.ID,
+			"job_id": jobStatus.JobID,
+			"url":    url,
+		}).Error("Failed to fetch crashes from bot")
+		return
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		p.logger.WithFields(logrus.Fields{
+			"bot_id": bot.ID,
+			"job_id": jobStatus.JobID,
+			"status": resp.StatusCode,
+		}).Error("Bot returned error for crash fetch")
+		return
+	}
+	
+	var botCrashes []common.CrashResult
+	if err := json.NewDecoder(resp.Body).Decode(&botCrashes); err != nil {
+		p.logger.WithError(err).Error("Failed to decode crash data from bot")
+		return
+	}
+	
+	// Process each crash
+	processed := 0
+	for _, crash := range botCrashes {
+		// Check if we already have this crash
+		exists := false
+		for _, existing := range crashes {
+			if existing.Hash == crash.Hash {
+				exists = true
+				break
+			}
+		}
+		
+		if !exists {
+			// Set timestamp if not provided
+			if crash.Timestamp.IsZero() {
+				crash.Timestamp = time.Now()
+			}
+			
+			// Process the crash
+			if err := p.state.ProcessCrashResultWithRetry(p.ctx, &crash); err != nil {
+				p.logger.WithError(err).WithFields(logrus.Fields{
+					"crash_id": crash.ID,
+					"hash":     crash.Hash,
+				}).Error("Failed to process fetched crash")
+			} else {
+				processed++
+			}
+		}
+	}
+	
+	p.logger.WithFields(logrus.Fields{
+		"bot_id":    bot.ID,
+		"job_id":    jobStatus.JobID,
+		"fetched":   len(botCrashes),
+		"processed": processed,
+	}).Info("Fetched and processed missing crashes")
 }

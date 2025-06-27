@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -28,6 +29,12 @@ func GetMigrations() []Migration {
 			Description: "Add api_endpoint column to bots table for polling",
 			Up:          addBotAPIEndpointUp,
 			Down:        addBotAPIEndpointDown,
+		},
+		{
+			ID:          "003_add_crash_output_columns",
+			Description: "Add output and stack_trace columns to crashes table",
+			Up:          addCrashOutputColumnsUp,
+			Down:        addCrashOutputColumnsDown,
 		},
 	}
 }
@@ -102,22 +109,6 @@ func normalizeSchemaUp(tx *sql.Tx) error {
 		}
 	}
 
-	// Add migration record
-	if _, err := tx.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			id TEXT PRIMARY KEY,
-			applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)
-	`); err != nil {
-		return fmt.Errorf("failed to create migrations table: %w", err)
-	}
-
-	if _, err := tx.Exec(`
-		INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)
-	`, "001_normalize_schema", time.Now()); err != nil {
-		return fmt.Errorf("failed to record migration: %w", err)
-	}
-
 	return nil
 }
 
@@ -128,7 +119,6 @@ func normalizeSchemaDown(tx *sql.Tx) error {
 		"corpus_files",
 		"job_configs",
 		"bot_capabilities",
-		"schema_migrations",
 	}
 
 	for _, table := range tables {
@@ -140,49 +130,64 @@ func normalizeSchemaDown(tx *sql.Tx) error {
 	return nil
 }
 
-// MigrateExistingData migrates existing JSON data to normalized tables
-func MigrateExistingData(db *sql.DB) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	// Check if migration already applied
-	var count int
-	err = tx.QueryRow(`
-		SELECT COUNT(*) FROM sqlite_master 
-		WHERE type='table' AND name='schema_migrations'
-	`).Scan(&count)
-	if err != nil {
-		return err
+// MigrateExistingData runs all pending database migrations
+func MigrateExistingData(ctx context.Context, db *sql.DB) error {
+	// Create migrations table if it doesn't exist
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			id TEXT PRIMARY KEY,
+			applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`); err != nil {
+		return fmt.Errorf("failed to create migrations table: %w", err)
 	}
 
-	if count > 0 {
-		// Check if this specific migration was applied
-		err = tx.QueryRow(`
-			SELECT COUNT(*) FROM schema_migrations WHERE id = '001_normalize_schema'
-		`).Scan(&count)
+	// Get all migrations
+	migrations := GetMigrations()
+	
+	for _, migration := range migrations {
+		// Check if migration was already applied
+		var count int
+		err := db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM schema_migrations WHERE id = ?
+		`, migration.ID).Scan(&count)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to check migration %s: %w", migration.ID, err)
 		}
+		
 		if count > 0 {
-			return nil // Migration already applied
+			continue // Migration already applied
 		}
+		
+		// Start transaction for this migration
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for migration %s: %w", migration.ID, err)
+		}
+		
+		// Apply the migration
+		if err := migration.Up(tx); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to apply migration %s: %w", migration.ID, err)
+		}
+		
+		// Record the migration
+		if _, err := tx.Exec(`
+			INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)
+		`, migration.ID, time.Now()); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to record migration %s: %w", migration.ID, err)
+		}
+		
+		// Commit the transaction
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit migration %s: %w", migration.ID, err)
+		}
+		
+		fmt.Printf("Applied migration: %s - %s\n", migration.ID, migration.Description)
 	}
-
-	// Apply the migration
-	if err := normalizeSchemaUp(tx); err != nil {
-		return err
-	}
-
-	// TODO: Migrate existing data from JSON columns to normalized tables
-	// This would involve:
-	// 1. Parsing bot capabilities from JSON and inserting into bot_capabilities
-	// 2. Parsing job configs from JSON and inserting into job_configs
-	// 3. Parsing corpus files from JSON and inserting into corpus_files
-
-	return tx.Commit()
+	
+	return nil
 }
 
 // addBotAPIEndpointUp adds the api_endpoint column to bots table
@@ -223,5 +228,55 @@ func addBotAPIEndpointDown(tx *sql.Tx) error {
 	// SQLite doesn't support dropping columns directly
 	// We would need to recreate the table without the column
 	// For simplicity, we'll just leave the column as is
+	return nil
+}
+
+// addCrashOutputColumnsUp adds output and stack_trace columns to crashes table
+func addCrashOutputColumnsUp(tx *sql.Tx) error {
+	// Check if output column already exists
+	var count int
+	err := tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('crashes') 
+		WHERE name = 'output'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for output column: %w", err)
+	}
+	
+	if count == 0 {
+		// Add the output column
+		if _, err := tx.Exec(`
+			ALTER TABLE crashes ADD COLUMN output TEXT
+		`); err != nil {
+			return fmt.Errorf("failed to add output column: %w", err)
+		}
+	}
+	
+	// Check if stack_trace column already exists
+	err = tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('crashes') 
+		WHERE name = 'stack_trace'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for stack_trace column: %w", err)
+	}
+	
+	if count == 0 {
+		// Add the stack_trace column
+		if _, err := tx.Exec(`
+			ALTER TABLE crashes ADD COLUMN stack_trace TEXT
+		`); err != nil {
+			return fmt.Errorf("failed to add stack_trace column: %w", err)
+		}
+	}
+	
+	return nil
+}
+
+// addCrashOutputColumnsDown removes output and stack_trace columns from crashes table
+func addCrashOutputColumnsDown(tx *sql.Tx) error {
+	// SQLite doesn't support dropping columns directly
+	// We would need to recreate the table without the columns
+	// For simplicity, we'll just leave the columns as is
 	return nil
 }

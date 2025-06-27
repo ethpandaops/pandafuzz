@@ -21,7 +21,7 @@ ENV GENERATE_SOURCEMAP=false
 RUN npm run build
 
 # Build stage for Go binaries
-FROM golang:1.22 AS builder
+FROM golang:1.23 AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \

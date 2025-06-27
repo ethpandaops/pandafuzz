@@ -95,7 +95,7 @@ func (s *Server) handleLogPush(w http.ResponseWriter, r *http.Request) {
 		"log_path": logPath,
 	}).Info("Job logs pushed successfully")
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status": "success",
 		"job_id": jobID,
 		"size": len(logContent),
@@ -120,7 +120,7 @@ func (s *Server) handleLogExists(w http.ResponseWriter, r *http.Request) {
 	_, err := os.Stat(logPath)
 	exists := err == nil
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"job_id": jobID,
 		"exists": exists,
 		"path": logPath,
