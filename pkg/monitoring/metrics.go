@@ -1,6 +1,7 @@
 package monitoring
 
 import (
+	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -11,33 +12,39 @@ type Metrics struct {
 	HTTPRequestsTotal   *prometheus.CounterVec
 	HTTPRequestDuration *prometheus.HistogramVec
 	HTTPResponseSize    *prometheus.HistogramVec
-	
+
 	// Bot metrics
 	BotsTotal           *prometheus.GaugeVec
 	BotHeartbeats       *prometheus.CounterVec
 	BotHeartbeatLatency *prometheus.HistogramVec
 	BotTimeouts         *prometheus.CounterVec
-	
+
 	// Job metrics
-	JobsTotal          *prometheus.CounterVec
-	JobsActive         *prometheus.GaugeVec
-	JobDuration        *prometheus.HistogramVec
-	JobQueueSize       prometheus.Gauge
-	JobAssignmentTime  *prometheus.HistogramVec
-	
+	JobsTotal         *prometheus.CounterVec
+	JobsActive        *prometheus.GaugeVec
+	JobDuration       *prometheus.HistogramVec
+	JobQueueSize      prometheus.Gauge
+	JobAssignmentTime *prometheus.HistogramVec
+
 	// Fuzzing metrics
-	CrashesTotal       *prometheus.CounterVec
-	UniqueCrashes      *prometheus.GaugeVec
-	CoverageEdges      *prometheus.GaugeVec
-	CoverageNewEdges   *prometheus.CounterVec
-	CorpusSize         *prometheus.GaugeVec
-	ExecRate           *prometheus.GaugeVec
-	
+	CrashesTotal     *prometheus.CounterVec
+	UniqueCrashes    *prometheus.GaugeVec
+	CoverageEdges    *prometheus.GaugeVec
+	CoverageNewEdges *prometheus.CounterVec
+	CorpusSize       *prometheus.GaugeVec
+	ExecRate         *prometheus.GaugeVec
+
 	// System metrics
 	DatabaseQueries     *prometheus.CounterVec
 	DatabaseLatency     *prometheus.HistogramVec
 	DatabaseErrors      *prometheus.CounterVec
 	CircuitBreakerState *prometheus.GaugeVec
+
+	// Resource usage metrics
+	CPUUsageGauge        *prometheus.GaugeVec
+	MemoryUsageGauge     *prometheus.GaugeVec
+	DiskUsageGauge       *prometheus.GaugeVec
+	ActiveProcessesGauge prometheus.Gauge
 }
 
 // NewMetrics creates and registers all Prometheus metrics
@@ -67,7 +74,7 @@ func NewMetrics() *Metrics {
 			},
 			[]string{"method", "endpoint"},
 		),
-		
+
 		// Bot metrics
 		BotsTotal: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -98,7 +105,7 @@ func NewMetrics() *Metrics {
 			},
 			[]string{"bot_id"},
 		),
-		
+
 		// Job metrics
 		JobsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -136,7 +143,7 @@ func NewMetrics() *Metrics {
 			},
 			[]string{"fuzzer"},
 		),
-		
+
 		// Fuzzing metrics
 		CrashesTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -180,7 +187,7 @@ func NewMetrics() *Metrics {
 			},
 			[]string{"job_id", "bot_id"},
 		),
-		
+
 		// System metrics
 		DatabaseQueries: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -211,5 +218,61 @@ func NewMetrics() *Metrics {
 			},
 			[]string{"name"},
 		),
+
+		// Resource usage metrics
+		CPUUsageGauge: promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "pandafuzz_cpu_usage_percent",
+				Help: "CPU usage percentage per bot",
+			},
+			[]string{"bot_id"},
+		),
+		MemoryUsageGauge: promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "pandafuzz_memory_usage_bytes",
+				Help: "Memory usage in bytes per bot",
+			},
+			[]string{"bot_id"},
+		),
+		DiskUsageGauge: promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "pandafuzz_disk_usage_bytes",
+				Help: "Disk usage in bytes per bot",
+			},
+			[]string{"bot_id"},
+		),
+		ActiveProcessesGauge: promauto.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "pandafuzz_active_processes_total",
+				Help: "Total number of active processes",
+			},
+		),
 	}
+}
+
+// UpdateResourceMetrics updates all resource usage gauges with the latest metrics
+func (m *Metrics) UpdateResourceMetrics(botID string, metrics *common.ResourceMetrics) {
+	if metrics == nil {
+		return
+	}
+
+	// Update CPU usage for the bot
+	m.CPUUsageGauge.WithLabelValues(botID).Set(metrics.CPU)
+
+	// Update memory usage for the bot
+	m.MemoryUsageGauge.WithLabelValues(botID).Set(float64(metrics.Memory))
+
+	// Update disk usage for the bot
+	m.DiskUsageGauge.WithLabelValues(botID).Set(float64(metrics.Disk))
+
+	// Update active processes count (system-wide, not per-bot)
+	m.ActiveProcessesGauge.Set(float64(metrics.ProcessCount))
+}
+
+// RegisterResourceMetrics registers resource metrics with Prometheus
+// Note: This is called automatically when using promauto in NewMetrics,
+// but this method can be used for explicit registration if needed
+func RegisterResourceMetrics() {
+	// The metrics are already registered via promauto in NewMetrics
+	// This function is kept for API consistency and future extensibility
 }

@@ -48,18 +48,19 @@ type BotOperationalConfig struct {
 
 // Job management
 type Job struct {
-	ID          string    `json:"id" db:"id"`
-	Name        string    `json:"name" db:"name"`
-	Target      string    `json:"target" db:"target"`
-	Fuzzer      string    `json:"fuzzer" db:"fuzzer"` // "afl++", "libfuzzer"
-	Status      JobStatus `json:"status" db:"status"`
-	AssignedBot *string   `json:"assigned_bot" db:"assigned_bot"`
-	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	ID          string     `json:"id" db:"id"`
+	Name        string     `json:"name" db:"name"`
+	Target      string     `json:"target" db:"target"`
+	Fuzzer      string     `json:"fuzzer" db:"fuzzer"` // "afl++", "libfuzzer"
+	Status      JobStatus  `json:"status" db:"status"`
+	AssignedBot *string    `json:"assigned_bot" db:"assigned_bot"`
+	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
 	StartedAt   *time.Time `json:"started_at" db:"started_at"`
 	CompletedAt *time.Time `json:"completed_at" db:"completed_at"`
-	TimeoutAt   time.Time `json:"timeout_at" db:"timeout_at"`
-	WorkDir     string    `json:"work_dir" db:"work_dir"`
-	Config      JobConfig `json:"config" db:"config"`
+	TimeoutAt   time.Time  `json:"timeout_at" db:"timeout_at"`
+	WorkDir     string     `json:"work_dir" db:"work_dir"`
+	Config      JobConfig  `json:"config" db:"config"`
+	Progress    int        `json:"progress" db:"progress"` // Job progress percentage (0-100)
 }
 
 type JobStatus string
@@ -75,12 +76,12 @@ const (
 )
 
 type JobConfig struct {
-	Duration      time.Duration `json:"duration" yaml:"duration"`           // Maximum runtime
-	MemoryLimit   int64         `json:"memory_limit" yaml:"memory_limit"`   // Memory limit in bytes
-	Timeout       time.Duration `json:"timeout" yaml:"timeout"`             // Execution timeout
-	Dictionary    string        `json:"dictionary" yaml:"dictionary"`       // Optional dictionary file
-	SeedCorpus    []string      `json:"seed_corpus" yaml:"seed_corpus"`     // Initial corpus files
-	OutputDir     string        `json:"output_dir" yaml:"output_dir"`       // Job-specific output directory
+	Duration    time.Duration `json:"duration" yaml:"duration"`         // Maximum runtime
+	MemoryLimit int64         `json:"memory_limit" yaml:"memory_limit"` // Memory limit in bytes
+	Timeout     time.Duration `json:"timeout" yaml:"timeout"`           // Execution timeout
+	Dictionary  string        `json:"dictionary" yaml:"dictionary"`     // Optional dictionary file
+	SeedCorpus  []string      `json:"seed_corpus" yaml:"seed_corpus"`   // Initial corpus files
+	OutputDir   string        `json:"output_dir" yaml:"output_dir"`     // Job-specific output directory
 }
 
 // Results and findings
@@ -88,24 +89,24 @@ type CrashResult struct {
 	ID         string    `json:"id" db:"id"`
 	JobID      string    `json:"job_id" db:"job_id"`
 	BotID      string    `json:"bot_id" db:"bot_id"`
-	Hash       string    `json:"hash" db:"hash"`         // SHA256 for deduplication
+	Hash       string    `json:"hash" db:"hash"`           // SHA256 for deduplication
 	FilePath   string    `json:"file_path" db:"file_path"` // Relative to job work dir
-	Type       string    `json:"type" db:"type"`         // "segfault", "assertion", "timeout"
-	Signal     int       `json:"signal" db:"signal"`     // Signal number if applicable
+	Type       string    `json:"type" db:"type"`           // "segfault", "assertion", "timeout"
+	Signal     int       `json:"signal" db:"signal"`       // Signal number if applicable
 	ExitCode   int       `json:"exit_code" db:"exit_code"`
 	Timestamp  time.Time `json:"timestamp" db:"timestamp"`
-	Size       int64     `json:"size" db:"size"`         // Crash input size
-	IsUnique   bool      `json:"is_unique" db:"is_unique"` // Not a duplicate
-	Input      []byte   `json:"-" db:"-"`                     // Raw crash input (not persisted)
-	Output     string   `json:"output" db:"output"`           // Crash output/stderr
-	StackTrace string   `json:"stack_trace" db:"stack_trace"` // Raw stack trace
+	Size       int64     `json:"size" db:"size"`               // Crash input size
+	IsUnique   bool      `json:"is_unique" db:"is_unique"`     // Not a duplicate
+	Input      []byte    `json:"-" db:"-"`                     // Raw crash input (not persisted)
+	Output     string    `json:"output" db:"output"`           // Crash output/stderr
+	StackTrace string    `json:"stack_trace" db:"stack_trace"` // Raw stack trace
 }
 
 type CoverageResult struct {
 	ID        string    `json:"id" db:"id"`
 	JobID     string    `json:"job_id" db:"job_id"`
 	BotID     string    `json:"bot_id" db:"bot_id"`
-	Edges     int       `json:"edges" db:"edges"`       // Total edges hit
+	Edges     int       `json:"edges" db:"edges"`         // Total edges hit
 	NewEdges  int       `json:"new_edges" db:"new_edges"` // New edges this run
 	Timestamp time.Time `json:"timestamp" db:"timestamp"`
 	ExecCount int64     `json:"exec_count" db:"exec_count"` // Total executions
@@ -115,7 +116,7 @@ type CorpusUpdate struct {
 	ID        string    `json:"id" db:"id"`
 	JobID     string    `json:"job_id" db:"job_id"`
 	BotID     string    `json:"bot_id" db:"bot_id"`
-	Files     []string  `json:"files" db:"files"`       // New corpus files
+	Files     []string  `json:"files" db:"files"` // New corpus files
 	Timestamp time.Time `json:"timestamp" db:"timestamp"`
 	TotalSize int64     `json:"total_size" db:"total_size"`
 }
@@ -164,6 +165,7 @@ type ResourceLimits struct {
 	MaxCrashCount     int           `json:"max_crash_count" yaml:"max_crash_count"`         // Maximum crashes per job
 	MaxJobDuration    time.Duration `json:"max_job_duration" yaml:"max_job_duration"`       // Maximum job runtime
 	MaxConcurrentJobs int           `json:"max_concurrent_jobs" yaml:"max_concurrent_jobs"` // Maximum concurrent jobs
+	MaxCacheSize      int           `json:"max_cache_size" yaml:"max_cache_size"`           // Maximum cache size per type
 }
 
 // Error types for consistent error handling
@@ -180,9 +182,9 @@ const (
 
 // PandaFuzzError with context
 type PandaFuzzError struct {
-	Type    ErrorType              `json:"type"`
-	Op      string                 `json:"operation"`
-	Err     error                  `json:"error"`
+	Type    ErrorType      `json:"type"`
+	Op      string         `json:"operation"`
+	Err     error          `json:"error"`
 	Context map[string]any `json:"context"`
 }
 
@@ -251,20 +253,60 @@ func IsNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Check for specific database error
 	if err == ErrKeyNotFound {
 		return true
 	}
-	
+
 	// Check if it's our error type
 	if e, ok := err.(*PandaFuzzError); ok {
 		return e.Type == "not_found"
 	}
-	
+
 	// Check error message
 	errStr := err.Error()
-	return strings.Contains(errStr, "not found") || 
+	return strings.Contains(errStr, "not found") ||
 		strings.Contains(errStr, "no such") ||
 		strings.Contains(errStr, "does not exist")
+}
+
+// Fuzzer event types
+type FuzzerEventType string
+
+const (
+	FuzzerEventStarted      FuzzerEventType = "started"
+	FuzzerEventStopped      FuzzerEventType = "stopped"
+	FuzzerEventCrashFound   FuzzerEventType = "crash_found"
+	FuzzerEventCorpusUpdate FuzzerEventType = "corpus_update"
+	FuzzerEventCoverage     FuzzerEventType = "coverage"
+	FuzzerEventStats        FuzzerEventType = "stats"
+	FuzzerEventError        FuzzerEventType = "error"
+	FuzzerEventTimeout      FuzzerEventType = "timeout"
+)
+
+// FuzzerEvent represents a fuzzer lifecycle or status event
+type FuzzerEvent struct {
+	Type      FuzzerEventType        `json:"type" db:"type"`
+	Timestamp time.Time              `json:"timestamp" db:"timestamp"`
+	JobID     string                 `json:"job_id" db:"job_id"`
+	Data      map[string]interface{} `json:"data" db:"data"` // Event-specific data
+}
+
+// ResourceMetrics represents system resource usage metrics
+type ResourceMetrics struct {
+	CPU          float64   `json:"cpu" db:"cpu"`                     // CPU usage percentage
+	Memory       int64     `json:"memory" db:"memory"`               // Memory usage in bytes
+	Disk         int64     `json:"disk" db:"disk"`                   // Disk usage in bytes
+	ProcessCount int       `json:"process_count" db:"process_count"` // Number of active processes
+	Timestamp    time.Time `json:"timestamp" db:"timestamp"`
+}
+
+// CleanupPolicy defines resource cleanup policies and thresholds
+type CleanupPolicy struct {
+	MaxJobAge       time.Duration `json:"max_job_age" yaml:"max_job_age"`           // Maximum age for job data retention
+	MaxCrashAge     time.Duration `json:"max_crash_age" yaml:"max_crash_age"`       // Maximum age for crash data retention
+	MaxCorpusSize   int64         `json:"max_corpus_size" yaml:"max_corpus_size"`   // Maximum corpus size in bytes
+	MaxDiskUsage    int64         `json:"max_disk_usage" yaml:"max_disk_usage"`     // Maximum disk usage in bytes
+	CleanupInterval time.Duration `json:"cleanup_interval" yaml:"cleanup_interval"` // How often cleanup runs
 }

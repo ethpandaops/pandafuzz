@@ -12,35 +12,38 @@ type ErrorType string
 
 const (
 	// System errors
-	ErrorTypeSystem      ErrorType = "system"
-	ErrorTypeDatabase    ErrorType = "database"
-	ErrorTypeNetwork     ErrorType = "network"
-	ErrorTypeStorage     ErrorType = "storage"
-	ErrorTypeTimeout     ErrorType = "timeout"
-	ErrorTypeConfig      ErrorType = "config"
-	
+	ErrorTypeSystem   ErrorType = "system"
+	ErrorTypeDatabase ErrorType = "database"
+	ErrorTypeNetwork  ErrorType = "network"
+	ErrorTypeStorage  ErrorType = "storage"
+	ErrorTypeTimeout  ErrorType = "timeout"
+	ErrorTypeConfig   ErrorType = "config"
+
 	// Business logic errors
-	ErrorTypeValidation  ErrorType = "validation"
-	ErrorTypeNotFound    ErrorType = "not_found"
-	ErrorTypeConflict    ErrorType = "conflict"
+	ErrorTypeValidation   ErrorType = "validation"
+	ErrorTypeNotFound     ErrorType = "not_found"
+	ErrorTypeConflict     ErrorType = "conflict"
 	ErrorTypeUnauthorized ErrorType = "unauthorized"
-	ErrorTypeForbidden   ErrorType = "forbidden"
-	
+	ErrorTypeForbidden    ErrorType = "forbidden"
+
 	// Job-specific errors
-	ErrorTypeJobFailed   ErrorType = "job_failed"
-	ErrorTypeBotOffline  ErrorType = "bot_offline"
-	ErrorTypeCapability  ErrorType = "capability"
+	ErrorTypeJobFailed  ErrorType = "job_failed"
+	ErrorTypeBotOffline ErrorType = "bot_offline"
+	ErrorTypeCapability ErrorType = "capability"
+
+	// Implementation errors
+	ErrorTypeMethodNotFound ErrorType = "method_not_found"
 )
 
 // Error represents a structured error with context
 type Error struct {
-	Type      ErrorType              `json:"type"`
-	Operation string                 `json:"operation"`
-	Message   string                 `json:"message"`
+	Type      ErrorType      `json:"type"`
+	Operation string         `json:"operation"`
+	Message   string         `json:"message"`
 	Details   map[string]any `json:"details,omitempty"`
-	Cause     error                  `json:"-"`
-	Stack     []string               `json:"stack,omitempty"`
-	Timestamp time.Time              `json:"timestamp"`
+	Cause     error          `json:"-"`
+	Stack     []string       `json:"stack,omitempty"`
+	Timestamp time.Time      `json:"timestamp"`
 }
 
 // Error implements the error interface
@@ -116,7 +119,7 @@ func captureStack() []string {
 	var stack []string
 	pcs := make([]uintptr, 10)
 	n := runtime.Callers(3, pcs)
-	
+
 	for i := 0; i < n; i++ {
 		pc := pcs[i]
 		fn := runtime.FuncForPC(pc)
@@ -125,7 +128,7 @@ func captureStack() []string {
 			stack = append(stack, fmt.Sprintf("%s:%d %s", file, line, fn.Name()))
 		}
 	}
-	
+
 	return stack
 }
 
@@ -233,21 +236,26 @@ func IsForbiddenError(err error) bool {
 	return isErrorType(err, ErrorTypeForbidden)
 }
 
+// IsMethodNotFound checks if error indicates a method is not implemented
+func IsMethodNotFound(err error) bool {
+	return isErrorType(err, ErrorTypeMethodNotFound)
+}
+
 // isErrorType checks if an error is of a specific type
 func isErrorType(err error, errorType ErrorType) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	if e, ok := err.(*Error); ok {
 		return e.Type == errorType
 	}
-	
+
 	// Check wrapped errors
 	if unwrapper, ok := err.(interface{ Unwrap() error }); ok {
 		return isErrorType(unwrapper.Unwrap(), errorType)
 	}
-	
+
 	return false
 }
 
@@ -256,15 +264,15 @@ func GetErrorType(err error) (ErrorType, bool) {
 	if err == nil {
 		return "", false
 	}
-	
+
 	if e, ok := err.(*Error); ok {
 		return e.Type, true
 	}
-	
+
 	// Check wrapped errors
 	if unwrapper, ok := err.(interface{ Unwrap() error }); ok {
 		return GetErrorType(unwrapper.Unwrap())
 	}
-	
+
 	return "", false
 }

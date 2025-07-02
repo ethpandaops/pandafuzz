@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
@@ -20,7 +20,6 @@ import (
 type SQLiteStorage struct {
 	db     *sql.DB
 	path   string
-	mu     sync.RWMutex
 	logger *logrus.Logger
 	config common.DatabaseConfig
 }
@@ -52,7 +51,7 @@ func NewSQLiteStorage(config common.DatabaseConfig, logger *logrus.Logger) (comm
 
 	// Build connection string with production settings
 	connStr := config.Path + "?cache=shared&mode=rwc&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000"
-	
+
 	// Add additional options if specified
 	for key, value := range config.Options {
 		connStr += fmt.Sprintf("&_%s=%s", key, value)
@@ -64,9 +63,26 @@ func NewSQLiteStorage(config common.DatabaseConfig, logger *logrus.Logger) (comm
 	}
 
 	// Configure connection pool for SQLite
-	db.SetMaxOpenConns(1) // SQLite limitation
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(time.Hour)
+	// With WAL mode, SQLite can handle multiple readers + one writer
+	// Using a small pool to balance performance and lock contention
+	db.SetMaxOpenConns(3)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(0) // Don't expire connections
+
+	// Set optimal pragmas for concurrent access
+	pragmas := []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA synchronous = NORMAL",
+		"PRAGMA temp_store = MEMORY",
+		"PRAGMA cache_size = -64000", // 64MB cache
+	}
+
+	for _, pragma := range pragmas {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, common.NewDatabaseError("set_pragma", fmt.Errorf("%s: %w", pragma, err))
+		}
+	}
 
 	storage := &SQLiteStorage{
 		db:     db,
@@ -211,6 +227,7 @@ func (s *SQLiteStorage) createTablesContext(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_jobs_timeout ON jobs(timeout_at);
 	CREATE INDEX IF NOT EXISTS idx_crashes_job_id ON crashes(job_id);
 	CREATE INDEX IF NOT EXISTS idx_crashes_hash ON crashes(hash);
+	CREATE INDEX IF NOT EXISTS idx_crashes_timestamp ON crashes(timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_coverage_job_id ON coverage(job_id);
 	CREATE INDEX IF NOT EXISTS idx_corpus_job_id ON corpus_updates(job_id);
 	`
@@ -225,8 +242,6 @@ func (s *SQLiteStorage) createTablesContext(ctx context.Context) error {
 
 // Store implements the Database interface
 func (s *SQLiteStorage) Store(ctx context.Context, key string, value any) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// Check context before proceeding
 	select {
@@ -247,8 +262,6 @@ func (s *SQLiteStorage) Store(ctx context.Context, key string, value any) error 
 
 // Get implements the Database interface
 func (s *SQLiteStorage) Get(ctx context.Context, key string, dest any) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 
 	// Check context before proceeding
 	select {
@@ -272,8 +285,6 @@ func (s *SQLiteStorage) Get(ctx context.Context, key string, dest any) error {
 
 // Delete implements the Database interface
 func (s *SQLiteStorage) Delete(ctx context.Context, key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// Check context before proceeding
 	select {
@@ -287,52 +298,57 @@ func (s *SQLiteStorage) Delete(ctx context.Context, key string) error {
 
 // Transaction implements the Database interface
 func (s *SQLiteStorage) Transaction(ctx context.Context, fn func(tx common.Transaction) error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Check context before proceeding
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-
-	sqlTx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return common.NewDatabaseError("begin_transaction", err)
-	}
-
-	tx := &SQLiteTransaction{
-		tx:     sqlTx,
-		logger: s.logger,
-		ctx:    ctx,
-	}
-
-	defer func() {
-		if p := recover(); p != nil {
-			sqlTx.Rollback()
-			panic(p)
+	// Wrap entire transaction in retry logic to handle transient locking issues
+	return ExecuteWithRetry(ctx, s.config, func() error {
+		// Check context before proceeding
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
 		}
-	}()
 
-	if err := fn(tx); err != nil {
-		if rollbackErr := sqlTx.Rollback(); rollbackErr != nil {
-			s.logger.WithError(rollbackErr).Error("Failed to rollback transaction")
+		// Use IMMEDIATE mode to avoid deadlocks in concurrent scenarios
+		// First begin a regular transaction
+		sqlTx, err := s.db.BeginTx(ctx, &sql.TxOptions{
+			Isolation: sql.LevelDefault,
+		})
+		if err != nil {
+			return common.NewDatabaseError("begin_transaction", err)
 		}
-		return err
-	}
 
-	if err := sqlTx.Commit(); err != nil {
-		return common.NewDatabaseError("commit_transaction", err)
-	}
+		// SQLite doesn't support BEGIN IMMEDIATE after BeginTx
+		// The retry logic will handle any lock contention
 
-	return nil
+		tx := &SQLiteTransaction{
+			tx:     sqlTx,
+			logger: s.logger,
+			ctx:    ctx,
+		}
+
+		defer func() {
+			if p := recover(); p != nil {
+				sqlTx.Rollback()
+				panic(p)
+			}
+		}()
+
+		if err := fn(tx); err != nil {
+			if rollbackErr := sqlTx.Rollback(); rollbackErr != nil {
+				s.logger.WithError(rollbackErr).Error("Failed to rollback transaction")
+			}
+			return err
+		}
+
+		if err := sqlTx.Commit(); err != nil {
+			return common.NewDatabaseError("commit_transaction", err)
+		}
+
+		return nil
+	})
 }
 
 // Close implements the Database interface
 func (s *SQLiteStorage) Close(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// Check context before proceeding
 	select {
@@ -353,8 +369,6 @@ func (s *SQLiteStorage) Close(ctx context.Context) error {
 
 // Ping implements the Database interface
 func (s *SQLiteStorage) Ping(ctx context.Context) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 
 	if s.db == nil {
 		return common.ErrDatabaseClosed
@@ -376,30 +390,56 @@ func (s *SQLiteStorage) Ping(ctx context.Context) error {
 
 // Stats implements the Database interface
 func (s *SQLiteStorage) Stats(ctx context.Context) common.DatabaseStats {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.logger.Debug("Stats: Starting database stats collection")
+	start := time.Now()
 
 	stats := common.DatabaseStats{
-		Type:        "sqlite",
-		Path:        s.path,
-		IsHealthy:   true,
+		Type:      "sqlite",
+		Path:      s.path,
+		IsHealthy: true,
 	}
 
 	// Get database file size
+	fileStart := time.Now()
 	if fileInfo, err := os.Stat(s.path); err == nil {
 		stats.Size = fileInfo.Size()
+		s.logger.WithField("duration", time.Since(fileStart)).Debug("Stats: File size retrieved")
+	} else {
+		s.logger.WithError(err).Warn("Stats: Failed to get file size")
 	}
 
 	// Get connection stats
+	connStart := time.Now()
 	if s.db != nil {
 		dbStats := s.db.Stats()
 		stats.Connections = dbStats.OpenConnections
+		s.logger.WithFields(logrus.Fields{
+			"duration":         time.Since(connStart),
+			"open_connections": dbStats.OpenConnections,
+			"in_use":           dbStats.InUse,
+			"idle":             dbStats.Idle,
+		}).Debug("Stats: Connection stats retrieved")
 	}
 
 	// Count total keys (tables)
+	keyStart := time.Now()
 	if keyCount, err := s.getTotalKeysContext(ctx); err == nil {
 		stats.Keys = keyCount
+		s.logger.WithFields(logrus.Fields{
+			"duration": time.Since(keyStart),
+			"keys":     keyCount,
+		}).Debug("Stats: Key count retrieved")
+	} else {
+		s.logger.WithError(err).WithField("duration", time.Since(keyStart)).Warn("Stats: Failed to get key count")
+		stats.IsHealthy = false
 	}
+
+	s.logger.WithFields(logrus.Fields{
+		"total_duration": time.Since(start),
+		"keys":           stats.Keys,
+		"size":           stats.Size,
+		"connections":    stats.Connections,
+	}).Debug("Stats: Database stats collection completed")
 
 	return stats
 }
@@ -436,7 +476,7 @@ func (s *SQLiteStorage) storeByKeyContext(ctx context.Context, key, data string)
 func (s *SQLiteStorage) getByKeyContext(ctx context.Context, key string) (string, error) {
 	parts := strings.SplitN(key, ":", 2)
 	if len(parts) != 2 {
-		return s.getMetadataContext(context.Background(), key)
+		return s.getMetadataContext(ctx, key)
 	}
 
 	table := parts[0]
@@ -494,8 +534,8 @@ func (s *SQLiteStorage) storeBotContext(ctx context.Context, id, data string) er
 			  SELECT ?, json_extract(?, '$.name'), json_extract(?, '$.hostname'), json_extract(?, '$.status'), json_extract(?, '$.last_seen'), 
 			         json_extract(?, '$.registered_at'), json_extract(?, '$.current_job'), json_extract(?, '$.capabilities'),
 			         json_extract(?, '$.timeout_at'), json_extract(?, '$.is_online'), json_extract(?, '$.failure_count'), json_extract(?, '$.api_endpoint'), CURRENT_TIMESTAMP`
-	
-	_, err := s.db.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data)
+
+	_, err := RetryableExec(ctx, s.db, s.config, query, id, data, data, data, data, data, data, data, data, data, data, data)
 	return err
 }
 
@@ -503,17 +543,19 @@ func (s *SQLiteStorage) getBotContext(ctx context.Context, id string) (string, e
 	query := `SELECT json_object('id', id, 'name', name, 'hostname', hostname, 'status', status, 'last_seen', last_seen,
 			         'registered_at', registered_at, 'current_job', current_job, 'capabilities', json(capabilities),
 			         'timeout_at', timeout_at, 'is_online', CAST(is_online AS INTEGER) != 0, 'failure_count', failure_count, 'api_endpoint', api_endpoint) FROM bots WHERE id = ?`
-	
-	var data string
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&data)
-	if err == sql.ErrNoRows {
-		return "", common.ErrKeyNotFound
-	}
-	return data, err
+
+	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (string, error) {
+		var data string
+		err := row.Scan(&data)
+		if err == sql.ErrNoRows {
+			return "", common.ErrKeyNotFound
+		}
+		return data, err
+	}, id)
 }
 
 func (s *SQLiteStorage) deleteBotContext(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM bots WHERE id = ?", id)
+	_, err := RetryableExec(ctx, s.db, s.config, "DELETE FROM bots WHERE id = ?", id)
 	return err
 }
 
@@ -523,8 +565,8 @@ func (s *SQLiteStorage) storeJobContext(ctx context.Context, id, data string) er
 			         json_extract(?, '$.status'), json_extract(?, '$.assigned_bot'), json_extract(?, '$.created_at'),
 			         json_extract(?, '$.started_at'), json_extract(?, '$.completed_at'), json_extract(?, '$.timeout_at'),
 			         json_extract(?, '$.work_dir'), json_extract(?, '$.config'), CURRENT_TIMESTAMP`
-	
-	_, err := s.db.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data)
+
+	_, err := RetryableExec(ctx, s.db, s.config, query, id, data, data, data, data, data, data, data, data, data, data, data)
 	return err
 }
 
@@ -533,17 +575,19 @@ func (s *SQLiteStorage) getJobContext(ctx context.Context, id string) (string, e
 			         'assigned_bot', assigned_bot, 'created_at', created_at, 'started_at', started_at,
 			         'completed_at', completed_at, 'timeout_at', timeout_at, 'work_dir', work_dir,
 			         'config', json(config)) FROM jobs WHERE id = ?`
-	
-	var data string
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&data)
-	if err == sql.ErrNoRows {
-		return "", common.ErrKeyNotFound
-	}
-	return data, err
+
+	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (string, error) {
+		var data string
+		err := row.Scan(&data)
+		if err == sql.ErrNoRows {
+			return "", common.ErrKeyNotFound
+		}
+		return data, err
+	}, id)
 }
 
 func (s *SQLiteStorage) deleteJobContext(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", id)
+	_, err := RetryableExec(ctx, s.db, s.config, "DELETE FROM jobs WHERE id = ?", id)
 	return err
 }
 
@@ -553,7 +597,7 @@ func (s *SQLiteStorage) storeCrashContext(ctx context.Context, id, data string) 
 			         json_extract(?, '$.file_path'), json_extract(?, '$.type'), json_extract(?, '$.signal'),
 			         json_extract(?, '$.exit_code'), json_extract(?, '$.timestamp'), json_extract(?, '$.size'),
 			         json_extract(?, '$.is_unique'), json_extract(?, '$.output'), json_extract(?, '$.stack_trace')`
-	
+
 	_, err := s.db.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data, data)
 	return err
 }
@@ -562,17 +606,19 @@ func (s *SQLiteStorage) getCrashContext(ctx context.Context, id string) (string,
 	query := `SELECT json_object('id', id, 'job_id', job_id, 'bot_id', bot_id, 'hash', hash, 'file_path', file_path,
 			         'type', type, 'signal', signal, 'exit_code', exit_code, 'timestamp', timestamp,
 			         'size', size, 'is_unique', is_unique, 'output', output, 'stack_trace', stack_trace) FROM crashes WHERE id = ?`
-	
-	var data string
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&data)
-	if err == sql.ErrNoRows {
-		return "", common.ErrKeyNotFound
-	}
-	return data, err
+
+	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (string, error) {
+		var data string
+		err := row.Scan(&data)
+		if err == sql.ErrNoRows {
+			return "", common.ErrKeyNotFound
+		}
+		return data, err
+	}, id)
 }
 
 func (s *SQLiteStorage) deleteCrashContext(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM crashes WHERE id = ?", id)
+	_, err := RetryableExec(ctx, s.db, s.config, "DELETE FROM crashes WHERE id = ?", id)
 	return err
 }
 
@@ -580,7 +626,7 @@ func (s *SQLiteStorage) storeCoverageContext(ctx context.Context, id, data strin
 	query := `INSERT OR REPLACE INTO coverage (id, job_id, bot_id, edges, new_edges, timestamp, exec_count)
 			  SELECT ?, json_extract(?, '$.job_id'), json_extract(?, '$.bot_id'), json_extract(?, '$.edges'),
 			         json_extract(?, '$.new_edges'), json_extract(?, '$.timestamp'), json_extract(?, '$.exec_count')`
-	
+
 	_, err := s.db.ExecContext(ctx, query, id, data, data, data, data, data, data)
 	return err
 }
@@ -588,17 +634,19 @@ func (s *SQLiteStorage) storeCoverageContext(ctx context.Context, id, data strin
 func (s *SQLiteStorage) getCoverageContext(ctx context.Context, id string) (string, error) {
 	query := `SELECT json_object('id', id, 'job_id', job_id, 'bot_id', bot_id, 'edges', edges,
 			         'new_edges', new_edges, 'timestamp', timestamp, 'exec_count', exec_count) FROM coverage WHERE id = ?`
-	
-	var data string
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&data)
-	if err == sql.ErrNoRows {
-		return "", common.ErrKeyNotFound
-	}
-	return data, err
+
+	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (string, error) {
+		var data string
+		err := row.Scan(&data)
+		if err == sql.ErrNoRows {
+			return "", common.ErrKeyNotFound
+		}
+		return data, err
+	}, id)
 }
 
 func (s *SQLiteStorage) deleteCoverageContext(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM coverage WHERE id = ?", id)
+	_, err := RetryableExec(ctx, s.db, s.config, "DELETE FROM coverage WHERE id = ?", id)
 	return err
 }
 
@@ -606,7 +654,7 @@ func (s *SQLiteStorage) storeCorpusContext(ctx context.Context, id, data string)
 	query := `INSERT OR REPLACE INTO corpus_updates (id, job_id, bot_id, files, timestamp, total_size)
 			  SELECT ?, json_extract(?, '$.job_id'), json_extract(?, '$.bot_id'), json_extract(?, '$.files'),
 			         json_extract(?, '$.timestamp'), json_extract(?, '$.total_size')`
-	
+
 	_, err := s.db.ExecContext(ctx, query, id, data, data, data, data, data)
 	return err
 }
@@ -614,24 +662,26 @@ func (s *SQLiteStorage) storeCorpusContext(ctx context.Context, id, data string)
 func (s *SQLiteStorage) getCorpusContext(ctx context.Context, id string) (string, error) {
 	query := `SELECT json_object('id', id, 'job_id', job_id, 'bot_id', bot_id, 'files', json(files),
 			         'timestamp', timestamp, 'total_size', total_size) FROM corpus_updates WHERE id = ?`
-	
-	var data string
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&data)
-	if err == sql.ErrNoRows {
-		return "", common.ErrKeyNotFound
-	}
-	return data, err
+
+	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (string, error) {
+		var data string
+		err := row.Scan(&data)
+		if err == sql.ErrNoRows {
+			return "", common.ErrKeyNotFound
+		}
+		return data, err
+	}, id)
 }
 
 func (s *SQLiteStorage) deleteCorpusContext(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM corpus_updates WHERE id = ?", id)
+	_, err := RetryableExec(ctx, s.db, s.config, "DELETE FROM corpus_updates WHERE id = ?", id)
 	return err
 }
 
 func (s *SQLiteStorage) storeAssignmentContext(ctx context.Context, id, data string) error {
 	query := `INSERT OR REPLACE INTO job_assignments (job_id, bot_id, timestamp, status)
 			  SELECT ?, json_extract(?, '$.bot_id'), json_extract(?, '$.timestamp'), json_extract(?, '$.status')`
-	
+
 	_, err := s.db.ExecContext(ctx, query, id, data, data, data)
 	return err
 }
@@ -639,53 +689,76 @@ func (s *SQLiteStorage) storeAssignmentContext(ctx context.Context, id, data str
 func (s *SQLiteStorage) getAssignmentContext(ctx context.Context, id string) (string, error) {
 	query := `SELECT json_object('job_id', job_id, 'bot_id', bot_id, 'timestamp', timestamp, 'status', status) 
 			  FROM job_assignments WHERE job_id = ?`
-	
-	var data string
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&data)
-	if err == sql.ErrNoRows {
-		return "", common.ErrKeyNotFound
-	}
-	return data, err
+
+	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (string, error) {
+		var data string
+		err := row.Scan(&data)
+		if err == sql.ErrNoRows {
+			return "", common.ErrKeyNotFound
+		}
+		return data, err
+	}, id)
 }
 
 func (s *SQLiteStorage) deleteAssignmentContext(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM job_assignments WHERE job_id = ?", id)
+	_, err := RetryableExec(ctx, s.db, s.config, "DELETE FROM job_assignments WHERE job_id = ?", id)
 	return err
 }
 
 func (s *SQLiteStorage) storeMetadataContext(ctx context.Context, key, data string) error {
-	_, err := s.db.ExecContext(ctx, "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)", key, data)
+	_, err := RetryableExec(ctx, s.db, s.config, "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)", key, data)
 	return err
 }
 
 func (s *SQLiteStorage) getMetadataContext(ctx context.Context, key string) (string, error) {
-	var data string
-	err := s.db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key = ?", key).Scan(&data)
-	if err == sql.ErrNoRows {
-		return "", common.ErrKeyNotFound
-	}
-	return data, err
+	return RetryableQueryRow(ctx, s.db, s.config, "SELECT value FROM metadata WHERE key = ?", func(row *sql.Row) (string, error) {
+		var data string
+		err := row.Scan(&data)
+		if err == sql.ErrNoRows {
+			return "", common.ErrKeyNotFound
+		}
+		return data, err
+	}, key)
 }
 
 func (s *SQLiteStorage) deleteMetadataContext(ctx context.Context, key string) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM metadata WHERE key = ?", key)
+	_, err := RetryableExec(ctx, s.db, s.config, "DELETE FROM metadata WHERE key = ?", key)
 	return err
 }
 
 func (s *SQLiteStorage) getTotalKeysContext(ctx context.Context) (int64, error) {
-	var total int64
-	
-	tables := []string{"bots", "jobs", "crashes", "coverage", "corpus_updates", "job_assignments", "metadata"}
-	for _, table := range tables {
-		var count int64
-		err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count)
-		if err != nil {
-			return 0, err
-		}
-		total += count
+	// Use a single query to get all counts at once for better performance
+	query := `
+		SELECT 
+			(SELECT COUNT(*) FROM bots) +
+			(SELECT COUNT(*) FROM jobs) +
+			(SELECT COUNT(*) FROM crashes) +
+			(SELECT COUNT(*) FROM coverage) +
+			(SELECT COUNT(*) FROM corpus_updates) +
+			(SELECT COUNT(*) FROM job_assignments) +
+			(SELECT COUNT(*) FROM metadata) as total
+	`
+
+	s.logger.Debug("getTotalKeysContext: Starting count query")
+	start := time.Now()
+
+	result, err := RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (int64, error) {
+		var total int64
+		err := row.Scan(&total)
+		return total, err
+	})
+
+	duration := time.Since(start)
+	if err != nil {
+		s.logger.WithError(err).WithField("duration", duration).Error("getTotalKeysContext: Count query failed")
+	} else {
+		s.logger.WithFields(logrus.Fields{
+			"duration": duration,
+			"total":    result,
+		}).Debug("getTotalKeysContext: Count query completed")
 	}
-	
-	return total, nil
+
+	return result, err
 }
 
 // parseKey extracts the table name and ID from a key
@@ -774,7 +847,7 @@ func (tx *SQLiteTransaction) storeBotInTx(ctx context.Context, id, data string) 
 			  SELECT ?, json_extract(?, '$.name'), json_extract(?, '$.hostname'), json_extract(?, '$.status'), json_extract(?, '$.last_seen'),
 			         json_extract(?, '$.registered_at'), json_extract(?, '$.current_job'), json_extract(?, '$.capabilities'),
 			         json_extract(?, '$.timeout_at'), json_extract(?, '$.is_online'), json_extract(?, '$.failure_count'), json_extract(?, '$.api_endpoint')`
-	
+
 	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data)
 	return err
 }
@@ -785,27 +858,47 @@ func (tx *SQLiteTransaction) storeJobInTx(ctx context.Context, id, data string) 
 			         json_extract(?, '$.status'), json_extract(?, '$.assigned_bot'), json_extract(?, '$.created_at'),
 			         json_extract(?, '$.started_at'), json_extract(?, '$.completed_at'), json_extract(?, '$.timeout_at'),
 			         json_extract(?, '$.work_dir'), json_extract(?, '$.config'), CURRENT_TIMESTAMP`
-	
+
 	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data)
 	return err
 }
 
 func (tx *SQLiteTransaction) storeCrashInTx(ctx context.Context, id, data string) error {
+	// Parse data to extract crash information for logging
+	var crashInfo map[string]interface{}
+	if err := json.Unmarshal([]byte(data), &crashInfo); err == nil {
+		tx.logger.WithFields(logrus.Fields{
+			"crash_id": id,
+			"job_id":   crashInfo["job_id"],
+			"bot_id":   crashInfo["bot_id"],
+			"hash":     crashInfo["hash"],
+			"type":     crashInfo["type"],
+			"size":     crashInfo["size"],
+		}).Info("Storing crash in database")
+	}
+
 	query := `INSERT OR REPLACE INTO crashes (id, job_id, bot_id, hash, file_path, type, signal, exit_code, timestamp, size, is_unique, output, stack_trace)
 			  SELECT ?, json_extract(?, '$.job_id'), json_extract(?, '$.bot_id'), json_extract(?, '$.hash'),
 			         json_extract(?, '$.file_path'), json_extract(?, '$.type'), json_extract(?, '$.signal'),
 			         json_extract(?, '$.exit_code'), json_extract(?, '$.timestamp'), json_extract(?, '$.size'),
 			         json_extract(?, '$.is_unique'), json_extract(?, '$.output'), json_extract(?, '$.stack_trace')`
-	
+
 	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data, data)
-	return err
+
+	if err != nil {
+		tx.logger.WithError(err).WithField("crash_id", id).Error("Failed to store crash in database")
+		return err
+	}
+
+	tx.logger.WithField("crash_id", id).Debug("Crash stored successfully in database")
+	return nil
 }
 
 func (tx *SQLiteTransaction) storeCoverageInTx(ctx context.Context, id, data string) error {
 	query := `INSERT OR REPLACE INTO coverage (id, job_id, bot_id, edges, new_edges, timestamp, exec_count)
 			  SELECT ?, json_extract(?, '$.job_id'), json_extract(?, '$.bot_id'), json_extract(?, '$.edges'),
 			         json_extract(?, '$.new_edges'), json_extract(?, '$.timestamp'), json_extract(?, '$.exec_count')`
-	
+
 	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data, data, data, data)
 	return err
 }
@@ -814,7 +907,7 @@ func (tx *SQLiteTransaction) storeCorpusInTx(ctx context.Context, id, data strin
 	query := `INSERT OR REPLACE INTO corpus_updates (id, job_id, bot_id, files, timestamp, total_size)
 			  SELECT ?, json_extract(?, '$.job_id'), json_extract(?, '$.bot_id'), json_extract(?, '$.files'),
 			         json_extract(?, '$.timestamp'), json_extract(?, '$.total_size')`
-	
+
 	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data, data, data)
 	return err
 }
@@ -822,38 +915,28 @@ func (tx *SQLiteTransaction) storeCorpusInTx(ctx context.Context, id, data strin
 func (tx *SQLiteTransaction) storeAssignmentInTx(ctx context.Context, id, data string) error {
 	query := `INSERT OR REPLACE INTO job_assignments (job_id, bot_id, timestamp, status)
 			  SELECT ?, json_extract(?, '$.bot_id'), json_extract(?, '$.timestamp'), json_extract(?, '$.status')`
-	
+
 	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data)
 	return err
 }
 
 // GetAllJobs retrieves all jobs from the database
 func (s *SQLiteStorage) GetAllJobs(ctx context.Context) ([]map[string]any, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	query := `SELECT id, name, target, fuzzer, status, assigned_bot, created_at, 
-	          started_at, completed_at, timeout_at, work_dir, config 
+	          started_at, completed_at, timeout_at, work_dir, config, progress 
 	          FROM jobs`
 
-	rows, err := s.db.QueryContext(ctx, query)
-	if err != nil {
-		return nil, common.NewDatabaseError("query_jobs", err)
-	}
-	defer rows.Close()
-
-	var jobs []map[string]any
-	for rows.Next() {
+	return RetryableQuery(ctx, s.db, s.config, query, func(rows *sql.Rows) (map[string]any, error) {
 		var id, name, target, fuzzer, status, workDir string
 		var assignedBot, config sql.NullString
 		var createdAt, timeoutAt time.Time
 		var startedAt, completedAt sql.NullTime
+		var progress sql.NullInt64
 
 		err := rows.Scan(&id, &name, &target, &fuzzer, &status, &assignedBot,
-			&createdAt, &startedAt, &completedAt, &timeoutAt, &workDir, &config)
+			&createdAt, &startedAt, &completedAt, &timeoutAt, &workDir, &config, &progress)
 		if err != nil {
-			s.logger.WithError(err).Warn("Failed to scan job row")
-			continue
+			return nil, err
 		}
 
 		job := map[string]any{
@@ -865,6 +948,7 @@ func (s *SQLiteStorage) GetAllJobs(ctx context.Context) ([]map[string]any, error
 			"created_at": createdAt,
 			"timeout_at": timeoutAt,
 			"work_dir":   workDir,
+			"progress":   0, // Default to 0
 		}
 
 		if assignedBot.Valid {
@@ -879,117 +963,139 @@ func (s *SQLiteStorage) GetAllJobs(ctx context.Context) ([]map[string]any, error
 		if config.Valid {
 			job["config"] = config.String
 		}
+		if progress.Valid {
+			job["progress"] = int(progress.Int64)
+		}
 
-		jobs = append(jobs, job)
-	}
-
-	return jobs, rows.Err()
+		return job, nil
+	})
 }
 
 // Iterate implements iteration over keys with a given prefix
 func (s *SQLiteStorage) Iterate(ctx context.Context, prefix string, fn func(key string, value []byte) error) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Determine which table to query based on prefix
-	var query string
-	switch prefix {
-	case "job:":
-		query = `SELECT id, json_object('id', id, 'name', name, 'target', target, 'fuzzer', fuzzer, 
-		         'status', status, 'assigned_bot', assigned_bot, 'created_at', created_at, 
-		         'started_at', started_at, 'completed_at', completed_at, 'timeout_at', timeout_at, 
-		         'work_dir', work_dir, 'config', json(config)) FROM jobs`
-	case "bot:":
-		query = `SELECT id, json_object('id', id, 'hostname', hostname, 'status', status, 
-		         'last_seen', last_seen, 'registered_at', registered_at, 'current_job', current_job, 
-		         'capabilities', json(capabilities), 'timeout_at', timeout_at, 'is_online', is_online, 
-		         'failure_count', failure_count) FROM bots`
-	default:
-		// For metadata table
-		query = `SELECT key, value FROM metadata WHERE key LIKE ? || '%'`
+	// Add timeout check
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
-	if prefix == "job:" || prefix == "bot:" {
-		rows, err := s.db.QueryContext(ctx, query)
-		if err != nil {
-			return common.NewDatabaseError("iterate_query", err)
+	return ExecuteWithRetry(ctx, s.config, func() error {
+		// Determine which table to query based on prefix
+		var query string
+		switch prefix {
+		case "job:":
+			query = `SELECT id, json_object('id', id, 'name', name, 'target', target, 'fuzzer', fuzzer, 
+			         'status', status, 'assigned_bot', assigned_bot, 'created_at', created_at, 
+			         'started_at', started_at, 'completed_at', completed_at, 'timeout_at', timeout_at, 
+			         'work_dir', work_dir, 'config', json(config), 'progress', progress) FROM jobs`
+		case "bot:":
+			query = `SELECT id, json_object('id', id, 'hostname', hostname, 'status', status, 
+			         'last_seen', last_seen, 'registered_at', registered_at, 'current_job', current_job, 
+			         'capabilities', json(capabilities), 'timeout_at', timeout_at, 'is_online', is_online, 
+			         'failure_count', failure_count) FROM bots`
+		default:
+			// For metadata table
+			query = `SELECT key, value FROM metadata WHERE key LIKE ? || '%'`
 		}
-		defer rows.Close()
 
-		for rows.Next() {
-			var id, data string
-			if err := rows.Scan(&id, &data); err != nil {
-				s.logger.WithError(err).Warn("Failed to scan row during iteration")
-				continue
+		if prefix == "job:" || prefix == "bot:" {
+			rows, err := s.db.QueryContext(ctx, query)
+			if err != nil {
+				return common.NewDatabaseError("iterate_query", err)
 			}
+			defer rows.Close()
 
-			key := prefix + id
-			if err := fn(key, []byte(data)); err != nil {
-				return err
+			for rows.Next() {
+				// Check context timeout during iteration
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+
+				var id, data string
+				if err := rows.Scan(&id, &data); err != nil {
+					s.logger.WithError(err).Warn("Failed to scan row during iteration")
+					continue
+				}
+
+				key := prefix + id
+				if err := fn(key, []byte(data)); err != nil {
+					return err
+				}
 			}
+			return rows.Err()
+		} else {
+			// Query metadata table
+			rows, err := s.db.QueryContext(ctx, query, prefix)
+			if err != nil {
+				return common.NewDatabaseError("iterate_metadata", err)
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				// Check context timeout during iteration
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+
+				var key, value string
+				if err := rows.Scan(&key, &value); err != nil {
+					s.logger.WithError(err).Warn("Failed to scan metadata row")
+					continue
+				}
+
+				if err := fn(key, []byte(value)); err != nil {
+					return err
+				}
+			}
+			return rows.Err()
 		}
-		return rows.Err()
-	} else {
-		// Query metadata table
-		rows, err := s.db.QueryContext(ctx, query, prefix)
-		if err != nil {
-			return common.NewDatabaseError("iterate_metadata", err)
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var key, value string
-			if err := rows.Scan(&key, &value); err != nil {
-				s.logger.WithError(err).Warn("Failed to scan metadata row")
-				continue
-			}
-
-			if err := fn(key, []byte(value)); err != nil {
-				return err
-			}
-		}
-		return rows.Err()
-	}
+	})
 }
 
 // AdvancedDatabase interface implementation
 
 // Select implements Query interface
 func (s *SQLiteStorage) Select(ctx context.Context, query string, args ...any) ([]map[string]any, error) {
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	// Get column names
-	cols, err := rows.Columns()
-	if err != nil {
-		return nil, err
-	}
-
-	var results []map[string]any
-	for rows.Next() {
-		// Create a slice of any to hold column values
-		values := make([]any, len(cols))
-		valuePtrs := make([]any, len(cols))
-		for i := range values {
-			valuePtrs[i] = &values[i]
+	return ExecuteWithRetryResult(ctx, s.config, func() ([]map[string]any, error) {
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
 		}
+		defer rows.Close()
 
-		if err := rows.Scan(valuePtrs...); err != nil {
+		// Get column names
+		cols, err := rows.Columns()
+		if err != nil {
 			return nil, err
 		}
 
-		// Create map for this row
-		row := make(map[string]any)
-		for i, col := range cols {
-			row[col] = values[i]
-		}
-		results = append(results, row)
-	}
+		var results []map[string]any
+		for rows.Next() {
+			// Check context timeout during iteration
+			if err := ctx.Err(); err != nil {
+				return results, err
+			}
 
-	return results, rows.Err()
+			// Create a slice of any to hold column values
+			values := make([]any, len(cols))
+			valuePtrs := make([]any, len(cols))
+			for i := range values {
+				valuePtrs[i] = &values[i]
+			}
+
+			if err := rows.Scan(valuePtrs...); err != nil {
+				return nil, err
+			}
+
+			// Create map for this row
+			row := make(map[string]any)
+			for i, col := range cols {
+				row[col] = values[i]
+			}
+			results = append(results, row)
+		}
+
+		return results, rows.Err()
+	})
 }
 
 // SelectOne implements Query interface
@@ -1006,7 +1112,7 @@ func (s *SQLiteStorage) SelectOne(ctx context.Context, query string, args ...any
 
 // Execute implements Query interface
 func (s *SQLiteStorage) Execute(ctx context.Context, query string, args ...any) (int64, error) {
-	result, err := s.db.ExecContext(ctx, query, args...)
+	result, err := RetryableExec(ctx, s.db, s.config, query, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -1018,22 +1124,23 @@ func (s *SQLiteStorage) Execute(ctx context.Context, query string, args ...any) 
 
 // GetCrashes retrieves crashes with pagination
 func (s *SQLiteStorage) GetCrashes(ctx context.Context, limit, offset int) ([]*common.CrashResult, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	// Check if context is already cancelled
+	if err := ctx.Err(); err != nil {
+		s.logger.WithError(err).Debug("Context cancelled before querying crashes")
+		return nil, err
+	}
 
 	query := `SELECT id, job_id, bot_id, hash, file_path, type, signal, exit_code, timestamp, size, is_unique, output, stack_trace 
 	          FROM crashes 
 	          ORDER BY timestamp DESC 
 	          LIMIT ? OFFSET ?`
-	
-	rows, err := s.db.QueryContext(ctx, query, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 
-	var crashes []*common.CrashResult
-	for rows.Next() {
+	return RetryableQuery(ctx, s.db, s.config, query, func(rows *sql.Rows) (*common.CrashResult, error) {
+		// Check context during iteration
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		crash := &common.CrashResult{}
 		var output, stackTrace sql.NullString
 		err := rows.Scan(&crash.ID, &crash.JobID, &crash.BotID, &crash.Hash, &crash.FilePath,
@@ -1044,69 +1151,58 @@ func (s *SQLiteStorage) GetCrashes(ctx context.Context, limit, offset int) ([]*c
 		}
 		crash.Output = output.String
 		crash.StackTrace = stackTrace.String
-		
-		// Load crash input data from separate table
-		if input, err := s.GetCrashInput(ctx, crash.ID); err == nil && input != nil {
-			crash.Input = input
-		}
-		
-		crashes = append(crashes, crash)
-	}
 
-	return crashes, rows.Err()
+		// Load crash input data from separate table if context not cancelled
+		if ctx.Err() == nil {
+			if input, err := s.GetCrashInput(ctx, crash.ID); err == nil && input != nil {
+				crash.Input = input
+			}
+		}
+
+		return crash, nil
+	}, limit, offset)
 }
 
 // GetCrash retrieves a specific crash by ID
 func (s *SQLiteStorage) GetCrash(ctx context.Context, crashID string) (*common.CrashResult, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	query := `SELECT id, job_id, bot_id, hash, file_path, type, signal, exit_code, timestamp, size, is_unique, output, stack_trace 
 	          FROM crashes 
 	          WHERE id = ?`
-	
-	crash := &common.CrashResult{}
-	var output, stackTrace sql.NullString
-	err := s.db.QueryRowContext(ctx, query, crashID).Scan(&crash.ID, &crash.JobID, &crash.BotID, &crash.Hash, &crash.FilePath,
-		&crash.Type, &crash.Signal, &crash.ExitCode, &crash.Timestamp, &crash.Size, &crash.IsUnique,
-		&output, &stackTrace)
-	
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	
-	crash.Output = output.String
-	crash.StackTrace = stackTrace.String
-	
-	// Load crash input data from separate table
-	if input, err := s.GetCrashInput(ctx, crash.ID); err == nil && input != nil {
-		crash.Input = input
-	}
 
-	return crash, nil
+	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (*common.CrashResult, error) {
+		crash := &common.CrashResult{}
+		var output, stackTrace sql.NullString
+		err := row.Scan(&crash.ID, &crash.JobID, &crash.BotID, &crash.Hash, &crash.FilePath,
+			&crash.Type, &crash.Signal, &crash.ExitCode, &crash.Timestamp, &crash.Size, &crash.IsUnique,
+			&output, &stackTrace)
+
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		crash.Output = output.String
+		crash.StackTrace = stackTrace.String
+
+		// Load crash input data from separate table
+		if input, err := s.GetCrashInput(ctx, crash.ID); err == nil && input != nil {
+			crash.Input = input
+		}
+
+		return crash, nil
+	}, crashID)
 }
 
 // GetJobCrashes retrieves all crashes for a specific job
 func (s *SQLiteStorage) GetJobCrashes(ctx context.Context, jobID string) ([]*common.CrashResult, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	query := `SELECT id, job_id, bot_id, hash, file_path, type, signal, exit_code, timestamp, size, is_unique, output, stack_trace 
 	          FROM crashes 
 	          WHERE job_id = ?
 	          ORDER BY timestamp DESC`
-	
-	rows, err := s.db.QueryContext(ctx, query, jobID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 
-	var crashes []*common.CrashResult
-	for rows.Next() {
+	return RetryableQuery(ctx, s.db, s.config, query, func(rows *sql.Rows) (*common.CrashResult, error) {
 		crash := &common.CrashResult{}
 		var output, stackTrace sql.NullString
 		err := rows.Scan(&crash.ID, &crash.JobID, &crash.BotID, &crash.Hash, &crash.FilePath,
@@ -1117,45 +1213,59 @@ func (s *SQLiteStorage) GetJobCrashes(ctx context.Context, jobID string) ([]*com
 		}
 		crash.Output = output.String
 		crash.StackTrace = stackTrace.String
-		
+
 		// Load crash input data from separate table
 		if input, err := s.GetCrashInput(ctx, crash.ID); err == nil && input != nil {
 			crash.Input = input
 		}
-		
-		crashes = append(crashes, crash)
-	}
 
-	return crashes, rows.Err()
+		return crash, nil
+	}, jobID)
 }
 
 // StoreCrashInput stores crash input data separately
 func (s *SQLiteStorage) StoreCrashInput(ctx context.Context, crashID string, input []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	
+	// Don't hold lock during database operation - SQLite handles its own locking
+
+	s.logger.WithFields(logrus.Fields{
+		"crash_id":   crashID,
+		"input_size": len(input),
+	}).Debug("Storing crash input to database")
+
 	query := `INSERT OR REPLACE INTO crash_inputs (crash_id, input) VALUES (?, ?)`
-	_, err := s.db.ExecContext(ctx, query, crashID, input)
-	return err
+	_, err := RetryableExec(ctx, s.db, s.config, query, crashID, input)
+
+	if err != nil {
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"crash_id":   crashID,
+			"input_size": len(input),
+		}).Error("Failed to store crash input in database")
+		return err
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"crash_id":   crashID,
+		"input_size": len(input),
+	}).Info("Successfully stored crash input in database")
+
+	return nil
 }
 
 // GetCrashInput retrieves crash input data
 func (s *SQLiteStorage) GetCrashInput(ctx context.Context, crashID string) ([]byte, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	
 	query := `SELECT input FROM crash_inputs WHERE crash_id = ?`
-	var input []byte
-	err := s.db.QueryRowContext(ctx, query, crashID).Scan(&input)
-	
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	
-	return input, nil
+
+	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) ([]byte, error) {
+		var input []byte
+		err := row.Scan(&input)
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return input, nil
+	}, crashID)
 }
 
 // BatchStore implements batch storage operations
@@ -1195,29 +1305,98 @@ func (s *SQLiteStorage) Migrate(ctx context.Context, version int) error {
 
 // Backup creates a backup of the database
 func (s *SQLiteStorage) Backup(ctx context.Context, path string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+
+	// Validate backup path to prevent directory traversal
+	cleanPath := filepath.Clean(path)
+	if !filepath.IsAbs(cleanPath) {
+		return fmt.Errorf("backup path must be absolute")
+	}
+
+	// Additional validation to prevent SQL injection
+	// Check that path doesn't contain SQL special characters
+	if strings.ContainsAny(cleanPath, "';\"") {
+		return fmt.Errorf("invalid characters in backup path")
+	}
 
 	// Ensure backup directory exists
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0755); err != nil {
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
 
-	// Use SQLite backup API
-	query := fmt.Sprintf("VACUUM INTO '%s'", path)
-	_, err := s.db.ExecContext(ctx, query)
-	if err != nil {
-		return fmt.Errorf("backup failed: %w", err)
-	}
+	// Use SQLite backup by copying the file directly while ensuring consistency
+	// This avoids SQL injection risks from VACUUM INTO
+	return ExecuteWithRetry(ctx, s.config, func() error {
+		// First, ensure all changes are written to disk
+		if _, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			return fmt.Errorf("failed to checkpoint WAL: %w", err)
+		}
 
-	s.logger.WithField("backup_path", path).Info("Database backup completed")
-	return nil
+		// Get the database file path
+		var dbPath string
+		err := s.db.QueryRowContext(ctx, "PRAGMA database_list").Scan(nil, nil, &dbPath)
+		if err != nil {
+			return fmt.Errorf("failed to get database path: %w", err)
+		}
+
+		// Copy the database file
+		srcFile, err := os.Open(dbPath)
+		if err != nil {
+			return fmt.Errorf("failed to open source database: %w", err)
+		}
+		defer srcFile.Close()
+
+		destFile, err := os.Create(cleanPath)
+		if err != nil {
+			return fmt.Errorf("failed to create backup file: %w", err)
+		}
+		defer destFile.Close()
+
+		// Copy the data
+		if _, err := io.Copy(destFile, srcFile); err != nil {
+			os.Remove(cleanPath) // Clean up on failure
+			return fmt.Errorf("failed to copy database: %w", err)
+		}
+
+		// Also copy WAL and SHM files if they exist
+		walPath := dbPath + "-wal"
+		if _, err := os.Stat(walPath); err == nil {
+			if err := copyFile(walPath, cleanPath+"-wal"); err != nil {
+				s.logger.WithError(err).Warn("Failed to copy WAL file")
+			}
+		}
+
+		shmPath := dbPath + "-shm"
+		if _, err := os.Stat(shmPath); err == nil {
+			if err := copyFile(shmPath, cleanPath+"-shm"); err != nil {
+				s.logger.WithError(err).Warn("Failed to copy SHM file")
+			}
+		}
+
+		s.logger.WithField("backup_path", cleanPath).Info("Database backup completed")
+		return nil
+	})
+}
+
+// copyFile is a helper function to copy files
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	return err
 }
 
 // Restore restores database from a backup
 func (s *SQLiteStorage) Restore(ctx context.Context, path string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// Check if backup file exists
 	if _, err := os.Stat(path); err != nil {
@@ -1253,14 +1432,83 @@ func (s *SQLiteStorage) Restore(ctx context.Context, path string) error {
 
 // Vacuum optimizes the database
 func (s *SQLiteStorage) Vacuum(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, err := s.db.ExecContext(ctx, "VACUUM")
+	_, err := RetryableExec(ctx, s.db, s.config, "VACUUM")
 	return err
 }
 
 // Compact is an alias for Vacuum in SQLite
 func (s *SQLiteStorage) Compact(ctx context.Context) error {
 	return s.Vacuum(ctx)
+}
+
+// DeleteOldCrashes deletes crashes older than the specified time
+func (s *SQLiteStorage) DeleteOldCrashes(ctx context.Context, before time.Time) error {
+	s.logger.WithField("before", before).Info("Deleting old crashes")
+
+	// First delete from crashes table
+	query := `DELETE FROM crashes WHERE timestamp < ?`
+	result, err := RetryableExec(ctx, s.db, s.config, query, before)
+	if err != nil {
+		return common.NewDatabaseError("delete_old_crashes", err)
+	}
+
+	s.logger.WithField("deleted", result).Info("Deleted old crash records")
+
+	// The crash_inputs table has ON DELETE CASCADE, so entries are automatically removed
+	return nil
+}
+
+// DeleteOldJobs deletes jobs older than the specified time
+func (s *SQLiteStorage) DeleteOldJobs(ctx context.Context, before time.Time) error {
+	s.logger.WithField("before", before).Info("Deleting old jobs")
+
+	// Delete completed/failed/cancelled jobs older than the specified time
+	query := `
+		DELETE FROM jobs 
+		WHERE status IN ('completed', 'failed', 'cancelled', 'timed_out') 
+		AND (completed_at < ? OR (completed_at IS NULL AND created_at < ?))
+	`
+	result, err := RetryableExec(ctx, s.db, s.config, query, before, before)
+	if err != nil {
+		return common.NewDatabaseError("delete_old_jobs", err)
+	}
+
+	s.logger.WithField("deleted", result).Info("Deleted old job records")
+
+	// Clean up orphaned records in related tables
+	// These don't have cascading deletes, so we need to clean them manually
+	orphanQueries := map[string]string{
+		"coverage":        "DELETE FROM coverage WHERE job_id NOT IN (SELECT id FROM jobs)",
+		"corpus_updates":  "DELETE FROM corpus_updates WHERE job_id NOT IN (SELECT id FROM jobs)",
+		"job_assignments": "DELETE FROM job_assignments WHERE job_id NOT IN (SELECT id FROM jobs)",
+	}
+
+	for table, cleanupQuery := range orphanQueries {
+		orphaned, err := RetryableExec(ctx, s.db, s.config, cleanupQuery)
+		if err != nil {
+			s.logger.WithError(err).WithField("table", table).Warn("Failed to clean orphaned records")
+		} else if rows, _ := orphaned.RowsAffected(); rows > 0 {
+			s.logger.WithFields(logrus.Fields{
+				"table": table,
+				"count": rows,
+			}).Info("Cleaned orphaned records")
+		}
+	}
+
+	return nil
+}
+
+// GetDatabaseSize returns the size of the database in bytes
+func (s *SQLiteStorage) GetDatabaseSize(ctx context.Context) (int64, error) {
+	// Get page count and page size to calculate total database size
+	query := `SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()`
+
+	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (int64, error) {
+		var size int64
+		err := row.Scan(&size)
+		if err != nil {
+			return 0, common.NewDatabaseError("get_database_size", err)
+		}
+		return size, nil
+	})
 }

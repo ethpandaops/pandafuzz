@@ -527,6 +527,9 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 		duration = time.Duration(duration) * time.Second
 	}
 	args = append(args, fmt.Sprintf("-max_total_time=%d", int(duration.Seconds())))
+	
+	// Set artifact prefix to ensure crashes are written to the work directory
+	args = append(args, fmt.Sprintf("-artifact_prefix=%s/", job.WorkDir))
 
 	// Check if running on Alpine and apply workarounds
 	if _, err := os.Stat("/etc/alpine-release"); err == nil {

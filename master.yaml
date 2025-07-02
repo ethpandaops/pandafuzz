@@ -1,94 +1,119 @@
 # PandaFuzz Master Configuration
 # This file configures the master server that coordinates fuzzing bots
 
-# Server configuration
-server:
-  host: "0.0.0.0"         # Listen on all interfaces
-  port: 8080              # Main HTTP server port
-  metrics_port: 9090      # Prometheus metrics port
-  enable_metrics: true    # Enable Prometheus metrics endpoint
+master:
+  # Server configuration
+  server:
+    host: "0.0.0.0"
+    port: 8080
+    read_timeout: "30s"
+    write_timeout: "30s"
+    idle_timeout: "60s"
+    max_header_bytes: 1048576
+    enable_tls: false
+    enable_cors: false
+    rate_limit_rps: 100
+    rate_limit_burst: 200
 
-# Storage configuration
-storage:
-  type: "sqlite"                           # Database type (sqlite or postgres)
-  path: "./data/pandafuzz.db"              # SQLite database path
-  # PostgreSQL configuration (when type is "postgres")
-  # postgres:
-  #   host: "localhost"
-  #   port: 5432
-  #   database: "pandafuzz"
-  #   username: "pandafuzz"
-  #   password: "changeme"
-  #   ssl_mode: "disable"
+  # Database configuration
+  database:
+    type: "sqlite"
+    path: "./data/pandafuzz.db"
+    max_conns: 1
+    idle_conns: 1
+    timeout: "30s"
 
-# Timeout configuration
-timeouts:
-  bot_idle: "5m"           # Time before marking idle bot as offline
-  bot_heartbeat: "1m"      # Expected heartbeat interval from bots
-  job_execution: "24h"     # Maximum job execution time
-  update_recovery: "5m"    # Time to wait for master recovery during updates
+  # Storage configuration
+  storage:
+    base_path: "./storage"
+    corpus_path: "./storage/corpus"
+    crash_path: "./storage/crashes"
+    log_path: "./storage/logs"
+    backup_path: "./storage/backups"
+    temp_path: "./storage/temp"
+    permissions: 0755
 
-# Retry configuration
-retry:
-  max_retries: 3
-  initial_delay: "1s"
-  max_delay: "30s"
-  multiplier: 2.0
+  # Timeout configuration
+  timeouts:
+    bot_heartbeat: "60s"
+    job_execution: "3600s"
+    master_recovery: "300s"
+    database_op: "10s"
+    database_retries: 5
+    http_request: "30s"
+    bot_registration: "60s"
+    job_assignment: "30s"
 
-# Resource limits
-limits:
-  max_bots_per_ip: 10       # Maximum bots allowed per IP address
-  max_jobs_per_bot: 1       # Maximum concurrent jobs per bot
-  max_pending_jobs: 1000    # Maximum jobs in pending queue
-  max_crash_size: 10485760  # Maximum crash report size (10MB)
-  max_corpus_size: 104857600 # Maximum corpus size per job (100MB)
-  max_coverage_reports: 10000 # Maximum coverage reports to store
+  # Resource limits
+  limits:
+    max_concurrent_jobs: 10
+    max_corpus_size: 1073741824  # 1GB
+    max_crash_size: 10485760     # 10MB
+    max_crash_count: 1000
+    max_job_duration: "24h"
+    max_bots_per_cluster: 100
+    max_pending_jobs: 1000
 
-# Maintenance configuration
-maintenance:
-  interval: "1h"           # Maintenance check interval
-  stale_job_age: "24h"     # Age before considering job stale
-  stale_crash_age: "168h"  # Age before archiving crashes (7 days)
-  enable_auto_cleanup: true # Enable automatic cleanup of old data
+  # Retry configuration
+  retry:
+    database:
+      max_retries: 5
+      initial_delay: "1s"
+      max_delay: "30s"
+      multiplier: 2.0
+    bot_operation:
+      max_retries: 3
+      initial_delay: "1s"
+      max_delay: "30s"
+      multiplier: 2.0
+    file_system:
+      max_retries: 3
+      initial_delay: "1s"
+      max_delay: "10s"
+      multiplier: 2.0
+    network:
+      max_retries: 3
+      initial_delay: "1s"
+      max_delay: "30s"
+      multiplier: 2.0
 
-# Security configuration
-security:
-  enable_auth: false       # Enable authentication
-  # auth_token: ""         # Bearer token for authentication
-  enable_tls: false        # Enable TLS/HTTPS
-  # tls_cert: ""           # Path to TLS certificate
-  # tls_key: ""            # Path to TLS private key
-  allowed_ips: []          # IP whitelist (empty = allow all)
-  rate_limit: 100          # Requests per minute per IP
+  # Circuit breaker configuration
+  circuit:
+    max_failures: 5
+    reset_timeout: "60s"
+    enabled: true
 
-# Job queue configuration
-queue:
-  scheduler: "fifo"        # Job scheduling algorithm (fifo, priority, fair)
-  max_queue_size: 10000    # Maximum jobs in queue
-  enable_priorities: true  # Enable job priorities
+  # Monitoring configuration
+  monitoring:
+    enabled: true
+    metrics_enabled: true
+    metrics_port: 9090
+    metrics_path: "/metrics"
+    health_enabled: true
+    health_path: "/health"
+    stats_interval: "30s"
+    profiler_enabled: false
+    profiler_port: 6060
 
-# Monitoring configuration
-monitoring:
-  enable_health_checks: true
-  health_check_interval: "30s"
-  alert_webhooks: []       # Webhook URLs for alerts
-  # - "https://hooks.slack.com/services/xxx"
-  
-# Logging configuration
-logging:
-  level: "info"            # Log level (debug, info, warn, error)
-  format: "json"           # Log format (text, json)
-  output: "stdout"         # Log output (stdout, file)
-  # file_path: "./logs/master.log"
-  max_size: 100            # Max log file size in MB
-  max_backups: 10          # Max number of log backups
-  max_age: 30              # Max age of log files in days
+  # Security configuration
+  security:
+    enable_input_validation: true
+    max_request_size: 10485760  # 10MB
+    allowed_file_extensions: [".txt", ".bin", ".data", ".input"]
+    forbidden_paths: ["/etc", "/proc", "/sys"]
+    enable_sanitization: true
+    max_crash_file_size: 10485760  # 10MB
+    max_corpus_file_size: 1048576  # 1MB
+    process_isolation_level: "sandbox"
 
-# Feature flags
-features:
-  enable_crash_dedup: true      # Enable crash deduplication
-  enable_coverage_merge: true   # Enable coverage merging
-  enable_corpus_sync: true      # Enable corpus synchronization
-  enable_live_stats: true       # Enable live statistics
-  enable_auto_triage: true      # Enable automatic crash triage
-  enable_job_templates: false   # Enable job templates
+  # Logging configuration
+  logging:
+    level: "debug"
+    format: "json"
+    output: "file"
+    file_path: "./logs/master.log"
+    max_size: 100
+    max_backups: 10
+    max_age: 30
+    compress: true
+    enable_trace: false

@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Database defines the interface for persistent storage
@@ -11,13 +12,13 @@ type Database interface {
 	Store(ctx context.Context, key string, value any) error
 	Get(ctx context.Context, key string, dest any) error
 	Delete(ctx context.Context, key string) error
-	
+
 	// Transaction support
 	Transaction(ctx context.Context, fn func(tx Transaction) error) error
-	
+
 	// Lifecycle
 	Close(ctx context.Context) error
-	
+
 	// Health and status
 	Ping(ctx context.Context) error
 	Stats(ctx context.Context) DatabaseStats
@@ -28,7 +29,7 @@ type Transaction interface {
 	Store(ctx context.Context, key string, value any) error
 	Get(ctx context.Context, key string, dest any) error
 	Delete(ctx context.Context, key string) error
-	
+
 	// Transaction control
 	Commit(ctx context.Context) error
 	Rollback(ctx context.Context) error
@@ -36,26 +37,119 @@ type Transaction interface {
 
 // DatabaseStats provides runtime statistics about the database
 type DatabaseStats struct {
-	Type          string `json:"type"`           // "sqlite", "badger", "memory"
-	Path          string `json:"path"`           // Database file path
-	Size          int64  `json:"size"`           // Database size in bytes
-	Keys          int64  `json:"keys"`           // Total number of keys
-	Connections   int    `json:"connections"`    // Active connections
-	Transactions  int64  `json:"transactions"`   // Total transactions
-	LastBackup    string `json:"last_backup"`    // Last backup timestamp
-	IsHealthy     bool   `json:"is_healthy"`     // Health status
+	Type         string `json:"type"`         // "sqlite", "badger", "memory"
+	Path         string `json:"path"`         // Database file path
+	Size         int64  `json:"size"`         // Database size in bytes
+	Keys         int64  `json:"keys"`         // Total number of keys
+	Connections  int    `json:"connections"`  // Active connections
+	Transactions int64  `json:"transactions"` // Total transactions
+	LastBackup   string `json:"last_backup"`  // Last backup timestamp
+	IsHealthy    bool   `json:"is_healthy"`   // Health status
 }
 
 // DatabaseConfig holds configuration for database initialization
 type DatabaseConfig struct {
-	Type        string            `json:"type" yaml:"type"`                 // "sqlite", "badger", "memory"
-	Path        string            `json:"path" yaml:"path"`                 // Database file path
-	MaxConns    int               `json:"max_conns" yaml:"max_conns"`       // Maximum connections
-	IdleConns   int               `json:"idle_conns" yaml:"idle_conns"`     // Idle connections
-	Timeout     string            `json:"timeout" yaml:"timeout"`           // Connection timeout
-	Options     map[string]string `json:"options" yaml:"options"`           // Database-specific options
-	BackupPath  string            `json:"backup_path" yaml:"backup_path"`   // Backup directory
-	BackupFreq  string            `json:"backup_freq" yaml:"backup_freq"`   // Backup frequency
+	Type       string            `json:"type" yaml:"type"`               // "sqlite", "badger", "memory"
+	Path       string            `json:"path" yaml:"path"`               // Database file path
+	MaxConns   int               `json:"max_conns" yaml:"max_conns"`     // Maximum connections
+	IdleConns  int               `json:"idle_conns" yaml:"idle_conns"`   // Idle connections
+	Timeout    string            `json:"timeout" yaml:"timeout"`         // Connection timeout
+	Options    map[string]string `json:"options" yaml:"options"`         // Database-specific options
+	BackupPath string            `json:"backup_path" yaml:"backup_path"` // Backup directory
+	BackupFreq string            `json:"backup_freq" yaml:"backup_freq"` // Backup frequency
+
+	// Retry configuration
+	MaxRetries      int           `json:"max_retries" yaml:"max_retries"`           // Maximum number of retries
+	RetryDelay      time.Duration `json:"retry_delay" yaml:"retry_delay"`           // Initial delay between retries
+	MaxRetryDelay   time.Duration `json:"max_retry_delay" yaml:"max_retry_delay"`   // Maximum delay between retries
+	RetryMultiplier float64       `json:"retry_multiplier" yaml:"retry_multiplier"` // Multiplier for exponential backoff
+}
+
+// SetDefaults sets default values for retry configuration
+func (dc *DatabaseConfig) SetDefaults() {
+	if dc.MaxRetries == 0 {
+		dc.MaxRetries = 5
+	}
+	if dc.RetryDelay == 0 {
+		dc.RetryDelay = 10 * time.Millisecond
+	}
+	if dc.MaxRetryDelay == 0 {
+		dc.MaxRetryDelay = 1 * time.Second
+	}
+	if dc.RetryMultiplier == 0 {
+		dc.RetryMultiplier = 2.0
+	}
+}
+
+// Validate validates the database configuration
+func (dc *DatabaseConfig) Validate() error {
+	// Validate database type
+	if dc.Type == "" {
+		return fmt.Errorf("database type is required")
+	}
+
+	validTypes := []string{"sqlite", "badger", "memory"}
+	validType := false
+	for _, t := range validTypes {
+		if dc.Type == t {
+			validType = true
+			break
+		}
+	}
+	if !validType {
+		return fmt.Errorf("invalid database type: %s (must be one of: sqlite, badger, memory)", dc.Type)
+	}
+
+	// Validate path for non-memory databases
+	if dc.Type != "memory" && dc.Path == "" {
+		return fmt.Errorf("database path is required for %s database", dc.Type)
+	}
+
+	// Validate retry configuration
+	if dc.MaxRetries < 0 {
+		return fmt.Errorf("max_retries cannot be negative")
+	}
+	if dc.MaxRetries > 100 {
+		return fmt.Errorf("max_retries too high (max: 100)")
+	}
+
+	if dc.RetryDelay < 0 {
+		return fmt.Errorf("retry_delay cannot be negative")
+	}
+	if dc.RetryDelay > 10*time.Second {
+		return fmt.Errorf("retry_delay too high (max: 10s)")
+	}
+
+	if dc.MaxRetryDelay < 0 {
+		return fmt.Errorf("max_retry_delay cannot be negative")
+	}
+	if dc.MaxRetryDelay > 5*time.Minute {
+		return fmt.Errorf("max_retry_delay too high (max: 5m)")
+	}
+
+	if dc.MaxRetryDelay < dc.RetryDelay {
+		return fmt.Errorf("max_retry_delay must be greater than or equal to retry_delay")
+	}
+
+	if dc.RetryMultiplier < 1.0 {
+		return fmt.Errorf("retry_multiplier must be at least 1.0")
+	}
+	if dc.RetryMultiplier > 10.0 {
+		return fmt.Errorf("retry_multiplier too high (max: 10.0)")
+	}
+
+	// Validate connection settings
+	if dc.MaxConns < 0 {
+		return fmt.Errorf("max_conns cannot be negative")
+	}
+	if dc.IdleConns < 0 {
+		return fmt.Errorf("idle_conns cannot be negative")
+	}
+	if dc.IdleConns > dc.MaxConns && dc.MaxConns > 0 {
+		return fmt.Errorf("idle_conns cannot be greater than max_conns")
+	}
+
+	return nil
 }
 
 // Query interface for advanced database operations
@@ -70,22 +164,22 @@ type Query interface {
 type AdvancedDatabase interface {
 	Database
 	Query
-	
+
 	// Batch operations
 	BatchStore(ctx context.Context, items map[string]any) error
 	BatchDelete(ctx context.Context, keys []string) error
-	
+
 	// Iteration
 	Iterate(ctx context.Context, prefix string, fn func(key string, value []byte) error) error
-	
+
 	// Backup and restore
 	Backup(ctx context.Context, path string) error
 	Restore(ctx context.Context, path string) error
-	
+
 	// Schema management (for SQL databases)
 	CreateTables(ctx context.Context) error
 	Migrate(ctx context.Context, version int) error
-	
+
 	// Maintenance
 	Vacuum(ctx context.Context) error
 	Compact(ctx context.Context) error
@@ -150,10 +244,10 @@ func (dw *DatabaseWithMiddleware) Store(ctx context.Context, key string, value a
 			return err
 		}
 	}
-	
+
 	// Execute operation
 	err := dw.db.Store(ctx, key, value)
-	
+
 	// Run after middleware
 	for _, mw := range dw.middleware {
 		if afterErr := mw.AfterStore(ctx, key, value); afterErr != nil {
@@ -161,7 +255,7 @@ func (dw *DatabaseWithMiddleware) Store(ctx context.Context, key string, value a
 			return err
 		}
 	}
-	
+
 	return err
 }
 
@@ -172,10 +266,10 @@ func (dw *DatabaseWithMiddleware) Get(ctx context.Context, key string, dest any)
 			return err
 		}
 	}
-	
+
 	// Execute operation
 	err := dw.db.Get(ctx, key, dest)
-	
+
 	// Run after middleware
 	for _, mw := range dw.middleware {
 		if afterErr := mw.AfterGet(ctx, key, dest); afterErr != nil {
@@ -183,7 +277,7 @@ func (dw *DatabaseWithMiddleware) Get(ctx context.Context, key string, dest any)
 			return err
 		}
 	}
-	
+
 	return err
 }
 
@@ -194,10 +288,10 @@ func (dw *DatabaseWithMiddleware) Delete(ctx context.Context, key string) error 
 			return err
 		}
 	}
-	
+
 	// Execute operation
 	err := dw.db.Delete(ctx, key)
-	
+
 	// Run after middleware
 	for _, mw := range dw.middleware {
 		if afterErr := mw.AfterDelete(ctx, key); afterErr != nil {
@@ -205,7 +299,7 @@ func (dw *DatabaseWithMiddleware) Delete(ctx context.Context, key string) error 
 			return err
 		}
 	}
-	
+
 	return err
 }
 
@@ -216,10 +310,10 @@ func (dw *DatabaseWithMiddleware) Transaction(ctx context.Context, fn func(tx Tr
 			return err
 		}
 	}
-	
+
 	// Execute transaction
 	err := dw.db.Transaction(ctx, fn)
-	
+
 	// Run after middleware
 	for _, mw := range dw.middleware {
 		if afterErr := mw.AfterTransaction(ctx, err); afterErr != nil {
@@ -227,7 +321,7 @@ func (dw *DatabaseWithMiddleware) Transaction(ctx context.Context, fn func(tx Tr
 			return err
 		}
 	}
-	
+
 	return err
 }
 

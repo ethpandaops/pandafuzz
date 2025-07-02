@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -37,9 +38,9 @@ func main() {
 		metricsPort   = flag.Int("metrics-port", 0, "Override metrics server port")
 		enableMetrics = flag.Bool("metrics", true, "Enable Prometheus metrics")
 	)
-	
+
 	flag.Parse()
-	
+
 	// Show version if requested
 	if *showVersion {
 		fmt.Printf("PandaFuzz Master\n")
@@ -48,16 +49,21 @@ func main() {
 		fmt.Printf("Git Commit: %s\n", gitCommit)
 		os.Exit(0)
 	}
-	
-	// Setup logging
-	logger := setupLogging(*logLevel)
-	
-	// Load configuration
+
+	// Load configuration first
 	config, err := loadConfig(*configFile)
 	if err != nil {
-		logger.WithError(err).Fatal("Failed to load configuration")
+		// Use basic logger for error
+		log.Fatalf("Failed to load configuration: %v", err)
 	}
-	
+
+	// Setup logging with config
+	logLevelStr := *logLevel
+	if config.Logging.Level != "" {
+		logLevelStr = config.Logging.Level
+	}
+	logger := setupLogging(logLevelStr)
+
 	// Override configuration with command line flags
 	if *port > 0 {
 		config.Server.Port = *port
@@ -70,24 +76,24 @@ func main() {
 	}
 	config.Monitoring.MetricsEnabled = *enableMetrics
 	config.Monitoring.Enabled = *enableMetrics
-	
+
 	// Validate configuration
 	if err := validateConfig(config); err != nil {
 		logger.WithError(err).Fatal("Invalid configuration")
 	}
-	
+
 	if *validateOnly {
 		logger.Info("Configuration is valid")
 		os.Exit(0)
 	}
-	
+
 	// Initialize database
 	db, err := initializeDatabase(config, logger)
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to initialize database")
 	}
 	defer db.Close(context.Background())
-	
+
 	// Handle database operations
 	if *resetDB {
 		if err := resetDatabase(db, logger); err != nil {
@@ -96,72 +102,72 @@ func main() {
 		logger.Info("Database reset successfully")
 		os.Exit(0)
 	}
-	
+
 	if *migrateDB {
 		logger.Info("Database migrations completed")
 		os.Exit(0)
 	}
-	
+
 	// Create master components
 	logger.Info("Initializing PandaFuzz Master components")
-	
+
 	// Create persistent state manager
 	state := master.NewPersistentState(db, config, logger)
-	
+
 	// Create timeout manager
 	timeoutMgr := master.NewTimeoutManager(state, config, logger)
-	
+
 	// Create recovery manager
 	recoveryMgr := master.NewRecoveryManager(state, timeoutMgr, config, logger)
-	
+
 	// Perform recovery on startup
 	logger.Info("Performing system recovery")
 	if err := recoveryMgr.RecoverOnStartup(context.Background()); err != nil {
 		logger.WithError(err).Error("Recovery failed, continuing anyway")
 	}
-	
+
 	// Create version info
 	versionInfo := &common.VersionInfo{
 		Version:   version,
 		BuildTime: buildTime,
 		GitCommit: gitCommit,
 	}
-	
+
 	// Create HTTP server
 	server := master.NewServer(config, state, timeoutMgr, versionInfo, logger)
-	
+
 	// Set recovery manager on server to avoid circular dependency
 	server.SetRecoveryManager(recoveryMgr)
-	
+
 	// Setup graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	
+
 	// Start timeout monitoring
 	logger.Info("Starting timeout monitor")
 	if err := timeoutMgr.Start(); err != nil {
 		logger.WithError(err).Fatal("Failed to start timeout manager")
 	}
-	
+
 	// Start periodic maintenance
 	logger.Info("Starting maintenance scheduler")
 	go startMaintenance(ctx, recoveryMgr, logger)
-	
+
 	// Start HTTP server
 	logger.WithFields(logrus.Fields{
 		"port":         config.Server.Port,
 		"metrics_port": config.Monitoring.MetricsPort,
 		"metrics":      config.Monitoring.MetricsEnabled,
 	}).Info("Starting HTTP server")
-	
+
 	// Start the server
 	if err := server.Start(); err != nil {
 		logger.WithError(err).Fatal("Failed to start server")
 	}
-	
+
 	// Log startup complete
 	logger.WithFields(logrus.Fields{
 		"version":     version,
@@ -170,56 +176,57 @@ func main() {
 		"config_file": *configFile,
 		"data_dir":    *dataDir,
 	}).Info("PandaFuzz Master started successfully")
-	
+
 	// Wait for shutdown signal
 	sig := <-sigChan
 	logger.WithField("signal", sig).Info("Received shutdown signal")
-	
+
 	// Graceful shutdown
 	logger.Info("Starting graceful shutdown")
-	
+
 	// Cancel context to stop background tasks
 	cancel()
-	
+
 	// Stop server
 	if err := server.Stop(); err != nil {
 		logger.WithError(err).Error("Failed to shutdown server gracefully")
 	}
-	
+
 	// Stop timeout manager
 	if err := timeoutMgr.Stop(); err != nil {
 		logger.WithError(err).Error("Failed to stop timeout manager")
 	}
-	
+
 	// Final cleanup
 	logger.Info("Performing final cleanup")
 	if err := state.Close(context.Background()); err != nil {
 		logger.WithError(err).Error("Cleanup error")
 	}
-	
+
 	logger.Info("PandaFuzz Master shutdown complete")
 }
 
 func setupLogging(level string) *logrus.Logger {
 	logger := logrus.New()
-	
+
 	// Set log level
 	logLevel, err := logrus.ParseLevel(level)
 	if err != nil {
 		logLevel = logrus.InfoLevel
 	}
 	logger.SetLevel(logLevel)
-	
-	// Set formatter
-	logger.SetFormatter(&logrus.TextFormatter{
-		FullTimestamp:   true,
+
+	// Set formatter (using JSON as specified in config)
+	logger.SetFormatter(&logrus.JSONFormatter{
 		TimestampFormat: "2006-01-02T15:04:05.000Z07:00",
-		DisableColors:   false,
 	})
-	
+
 	// Set output
 	logger.SetOutput(os.Stdout)
-	
+
+	// Log the configured level
+	logger.WithField("level", level).Info("Logging configured")
+
 	return logger
 }
 
@@ -241,6 +248,8 @@ func loadConfig(configFile string) (*common.MasterConfig, error) {
 			BotHeartbeat:   1 * time.Minute,
 			JobExecution:   24 * time.Hour,
 			MasterRecovery: 5 * time.Minute,
+			DatabaseOp:     10 * time.Second,
+			HTTPRequest:    30 * time.Second,
 		},
 		Limits: common.ResourceLimits{
 			MaxConcurrentJobs: 10,
@@ -250,10 +259,10 @@ func loadConfig(configFile string) (*common.MasterConfig, error) {
 			MaxJobDuration:    24 * time.Hour,
 		},
 		Monitoring: common.MonitoringConfig{
-			Enabled:      true,
-			MetricsPort:  9090,
-			MetricsPath:  "/metrics",
-			HealthPath:   "/health",
+			Enabled:     true,
+			MetricsPort: 9090,
+			MetricsPath: "/metrics",
+			HealthPath:  "/health",
 		},
 		Retry: common.RetryConfigs{
 			Database: common.RetryPolicy{
@@ -264,24 +273,32 @@ func loadConfig(configFile string) (*common.MasterConfig, error) {
 			},
 		},
 	}
-	
+
 	// Check if config file exists
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		// Use defaults
 		return config, nil
 	}
-	
+
 	// Read config file
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
-	
+
 	// Parse YAML
-	if err := yaml.Unmarshal(data, config); err != nil {
+	var fileConfig struct {
+		Master *common.MasterConfig `yaml:"master"`
+	}
+	if err := yaml.Unmarshal(data, &fileConfig); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
-	
+
+	// Use file config if available
+	if fileConfig.Master != nil {
+		config = fileConfig.Master
+	}
+
 	return config, nil
 }
 
@@ -290,34 +307,34 @@ func validateConfig(config *common.MasterConfig) error {
 	if config.Server.Port <= 0 || config.Server.Port > 65535 {
 		return fmt.Errorf("invalid server port: %d", config.Server.Port)
 	}
-	
+
 	if config.Monitoring.Enabled && (config.Monitoring.MetricsPort <= 0 || config.Monitoring.MetricsPort > 65535) {
 		return fmt.Errorf("invalid metrics port: %d", config.Monitoring.MetricsPort)
 	}
-	
+
 	// Validate database configuration
 	if config.Database.Type != "sqlite" && config.Database.Type != "postgres" {
 		return fmt.Errorf("unsupported database type: %s", config.Database.Type)
 	}
-	
+
 	// Validate timeouts
 	if config.Timeouts.BotHeartbeat < 10*time.Second {
 		return fmt.Errorf("bot heartbeat timeout too short: %v", config.Timeouts.BotHeartbeat)
 	}
-	
+
 	if config.Timeouts.JobExecution < time.Minute {
 		return fmt.Errorf("job execution timeout too short: %v", config.Timeouts.JobExecution)
 	}
-	
+
 	// Validate limits
 	if config.Limits.MaxConcurrentJobs <= 0 {
 		return fmt.Errorf("invalid max concurrent jobs: %d", config.Limits.MaxConcurrentJobs)
 	}
-	
+
 	if config.Limits.MaxCorpusSize <= 0 {
 		return fmt.Errorf("invalid max corpus size: %d", config.Limits.MaxCorpusSize)
 	}
-	
+
 	return nil
 }
 
@@ -327,59 +344,59 @@ func initializeDatabase(config *common.MasterConfig, logger *logrus.Logger) (com
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
-	
+
 	// Create database connection
 	var db common.Database
 	var err error
-	
+
 	switch config.Database.Type {
 	case "sqlite":
 		db, err = storage.NewSQLiteStorage(config.Database, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SQLite database: %w", err)
 		}
-		
+
 		logger.WithField("path", config.Database.Path).Info("Connected to SQLite database")
-		
+
 	case "postgres":
 		// PostgreSQL support would be implemented here
 		return nil, fmt.Errorf("PostgreSQL support not yet implemented")
-		
+
 	default:
 		return nil, fmt.Errorf("unsupported database type: %s", config.Database.Type)
 	}
-	
+
 	// Initialize schema (if supported)
 	if advDb, ok := db.(common.AdvancedDatabase); ok {
 		if err := advDb.CreateTables(context.Background()); err != nil {
 			return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 		}
 	}
-	
+
 	// Run health check
 	if err := db.Ping(context.Background()); err != nil {
 		return nil, fmt.Errorf("database health check failed: %w", err)
 	}
-	
+
 	return db, nil
 }
 
 func resetDatabase(db common.Database, logger *logrus.Logger) error {
 	logger.Warn("Resetting database - all data will be lost!")
-	
+
 	// Simple confirmation prompt
 	fmt.Print("Are you sure you want to reset the database? Type 'yes' to confirm: ")
 	var response string
 	fmt.Scanln(&response)
-	
+
 	if response != "yes" {
 		return fmt.Errorf("database reset cancelled")
 	}
-	
+
 	// For SQLite, we can simply delete and recreate tables
 	// This would be implemented in the database layer
 	logger.Info("Database reset is not fully implemented yet")
-	
+
 	return nil
 }
 
@@ -387,16 +404,16 @@ func startMaintenance(ctx context.Context, recovery *master.RecoveryManager, log
 	// Run maintenance every hour
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ctx.Done():
 			logger.Info("Stopping maintenance scheduler")
 			return
-			
+
 		case <-ticker.C:
 			logger.Debug("Running periodic maintenance")
-			
+
 			if err := recovery.PerformMaintenanceRecovery(ctx); err != nil {
 				logger.WithError(err).Error("Maintenance recovery failed")
 			}

@@ -60,11 +60,13 @@ FROM ubuntu:22.04 AS master
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
+# Install runtime dependencies with retry logic for flaky mirrors
+RUN apt-get update || apt-get update && \
+    apt-get install -y --no-install-recommends \
     ca-certificates \
     libsqlite3-0 \
     curl \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -103,8 +105,9 @@ FROM ubuntu:22.04 AS bot
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install runtime dependencies and fuzzing tools
-RUN apt-get update && apt-get install -y \
+# Install runtime dependencies and fuzzing tools with retry logic
+RUN apt-get update || apt-get update && \
+    apt-get install -y --no-install-recommends \
     ca-certificates \
     libsqlite3-0 \
     bash \
@@ -121,21 +124,18 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     python3-pip \
     libstdc++6 \
-    # Additional runtime libraries for libfuzzer
     libc++1 \
     libc++-dev \
     libc++abi-dev \
-    # AFL++ dependencies
     automake \
     autoconf \
     libtool \
     libgmp-dev \
     zlib1g-dev \
-    # Additional tools
     wget \
     curl \
     file \
-    # Clean up
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Set LLVM_CONFIG for AFL++ build
@@ -182,8 +182,9 @@ FROM bot AS development
 
 USER root
 
-# Install additional development tools
-RUN apt-get update && apt-get install -y \
+# Install additional development tools with retry logic
+RUN apt-get update || apt-get update && \
+    apt-get install -y --no-install-recommends \
     vim \
     tmux \
     htop \
@@ -193,12 +194,12 @@ RUN apt-get update && apt-get install -y \
     linux-tools-generic \
     tcpdump \
     netcat-openbsd \
-    # Ensure all AFL++ dependencies are present
     libclang-dev \
     llvm-dev \
     python3-dev \
     libgmp-dev \
     zlib1g-dev \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go for development

@@ -106,10 +106,10 @@ func (s *SQLiteStorage) SaveJobWithConfig(job *common.Job) error {
 	_, err = tx.Exec(`
 		INSERT OR REPLACE INTO jobs (
 			id, name, target, fuzzer, status, assigned_bot,
-			created_at, started_at, completed_at, timeout_at, work_dir
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			created_at, started_at, completed_at, timeout_at, work_dir, progress
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, job.ID, job.Name, job.Target, job.Fuzzer, job.Status, job.AssignedBot,
-		job.CreatedAt, job.StartedAt, job.CompletedAt, job.TimeoutAt, job.WorkDir)
+		job.CreatedAt, job.StartedAt, job.CompletedAt, job.TimeoutAt, job.WorkDir, job.Progress)
 	if err != nil {
 		return fmt.Errorf("failed to save job: %w", err)
 	}

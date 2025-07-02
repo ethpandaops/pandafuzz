@@ -36,6 +36,18 @@ func GetMigrations() []Migration {
 			Up:          addCrashOutputColumnsUp,
 			Down:        addCrashOutputColumnsDown,
 		},
+		{
+			ID:          "004_populate_missing_crash_inputs",
+			Description: "Populate crash_inputs table for existing crashes",
+			Up:          populateMissingCrashInputsUp,
+			Down:        populateMissingCrashInputsDown,
+		},
+		{
+			ID:          "005_add_job_progress",
+			Description: "Add progress column to jobs table",
+			Up:          addJobProgressUp,
+			Down:        addJobProgressDown,
+		},
 	}
 }
 
@@ -144,7 +156,7 @@ func MigrateExistingData(ctx context.Context, db *sql.DB) error {
 
 	// Get all migrations
 	migrations := GetMigrations()
-	
+
 	for _, migration := range migrations {
 		// Check if migration was already applied
 		var count int
@@ -154,23 +166,23 @@ func MigrateExistingData(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return fmt.Errorf("failed to check migration %s: %w", migration.ID, err)
 		}
-		
+
 		if count > 0 {
 			continue // Migration already applied
 		}
-		
+
 		// Start transaction for this migration
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("failed to begin transaction for migration %s: %w", migration.ID, err)
 		}
-		
+
 		// Apply the migration
 		if err := migration.Up(tx); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("failed to apply migration %s: %w", migration.ID, err)
 		}
-		
+
 		// Record the migration
 		if _, err := tx.Exec(`
 			INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)
@@ -178,15 +190,15 @@ func MigrateExistingData(ctx context.Context, db *sql.DB) error {
 			tx.Rollback()
 			return fmt.Errorf("failed to record migration %s: %w", migration.ID, err)
 		}
-		
+
 		// Commit the transaction
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("failed to commit migration %s: %w", migration.ID, err)
 		}
-		
+
 		fmt.Printf("Applied migration: %s - %s\n", migration.ID, migration.Description)
 	}
-	
+
 	return nil
 }
 
@@ -201,25 +213,25 @@ func addBotAPIEndpointUp(tx *sql.Tx) error {
 	if err != nil {
 		return fmt.Errorf("failed to check for api_endpoint column: %w", err)
 	}
-	
+
 	if count > 0 {
 		return nil // Column already exists
 	}
-	
+
 	// Add the api_endpoint column
 	if _, err := tx.Exec(`
 		ALTER TABLE bots ADD COLUMN api_endpoint TEXT DEFAULT ''
 	`); err != nil {
 		return fmt.Errorf("failed to add api_endpoint column: %w", err)
 	}
-	
+
 	// Create index for api_endpoint
 	if _, err := tx.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_bots_api_endpoint ON bots(api_endpoint)
 	`); err != nil {
 		return fmt.Errorf("failed to create api_endpoint index: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -242,7 +254,7 @@ func addCrashOutputColumnsUp(tx *sql.Tx) error {
 	if err != nil {
 		return fmt.Errorf("failed to check for output column: %w", err)
 	}
-	
+
 	if count == 0 {
 		// Add the output column
 		if _, err := tx.Exec(`
@@ -251,7 +263,7 @@ func addCrashOutputColumnsUp(tx *sql.Tx) error {
 			return fmt.Errorf("failed to add output column: %w", err)
 		}
 	}
-	
+
 	// Check if stack_trace column already exists
 	err = tx.QueryRow(`
 		SELECT COUNT(*) FROM pragma_table_info('crashes') 
@@ -260,7 +272,7 @@ func addCrashOutputColumnsUp(tx *sql.Tx) error {
 	if err != nil {
 		return fmt.Errorf("failed to check for stack_trace column: %w", err)
 	}
-	
+
 	if count == 0 {
 		// Add the stack_trace column
 		if _, err := tx.Exec(`
@@ -269,7 +281,7 @@ func addCrashOutputColumnsUp(tx *sql.Tx) error {
 			return fmt.Errorf("failed to add stack_trace column: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -278,5 +290,93 @@ func addCrashOutputColumnsDown(tx *sql.Tx) error {
 	// SQLite doesn't support dropping columns directly
 	// We would need to recreate the table without the columns
 	// For simplicity, we'll just leave the columns as is
+	return nil
+}
+
+// populateMissingCrashInputsUp populates crash_inputs for existing crashes
+func populateMissingCrashInputsUp(tx *sql.Tx) error {
+	// Find crashes that don't have corresponding entries in crash_inputs
+	query := `
+		SELECT c.id
+		FROM crashes c
+		LEFT JOIN crash_inputs ci ON c.id = ci.crash_id
+		WHERE ci.crash_id IS NULL
+	`
+
+	rows, err := tx.Query(query)
+	if err != nil {
+		return fmt.Errorf("failed to query crashes without inputs: %w", err)
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		var crashID string
+		if err := rows.Scan(&crashID); err != nil {
+			continue
+		}
+
+		// For old crashes, we'll create a placeholder input
+		// This ensures the download button works, even if the actual input is lost
+		placeholderInput := []byte(fmt.Sprintf("Input data for crash %s is no longer available.\nThis crash was found before input storage was implemented.", crashID))
+
+		// Insert the placeholder input
+		_, err := tx.Exec(`INSERT INTO crash_inputs (crash_id, input) VALUES (?, ?)`, crashID, placeholderInput)
+		if err != nil {
+			fmt.Printf("Failed to insert placeholder for crash %s: %v\n", crashID, err)
+			continue
+		}
+
+		count++
+	}
+
+	fmt.Printf("Added placeholder inputs for %d crashes\n", count)
+	return rows.Err()
+}
+
+// populateMissingCrashInputsDown removes populated crash inputs
+func populateMissingCrashInputsDown(tx *sql.Tx) error {
+	// This would remove the placeholder inputs, but it's safer to keep them
+	return nil
+}
+
+// addJobProgressUp adds the progress column to jobs table
+func addJobProgressUp(tx *sql.Tx) error {
+	// Check if progress column already exists
+	var count int
+	err := tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('jobs') 
+		WHERE name = 'progress'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for progress column: %w", err)
+	}
+
+	if count > 0 {
+		return nil // Column already exists
+	}
+
+	// Add the progress column with default value of 0
+	if _, err := tx.Exec(`
+		ALTER TABLE jobs ADD COLUMN progress INTEGER DEFAULT 0
+	`); err != nil {
+		return fmt.Errorf("failed to add progress column: %w", err)
+	}
+
+	// Update existing jobs to have progress = 0
+	if _, err := tx.Exec(`
+		UPDATE jobs SET progress = 0 WHERE progress IS NULL
+	`); err != nil {
+		return fmt.Errorf("failed to set default progress values: %w", err)
+	}
+
+	return nil
+}
+
+// addJobProgressDown removes the progress column from jobs table
+func addJobProgressDown(tx *sql.Tx) error {
+	// SQLite doesn't support dropping columns directly
+	// We would need to recreate the table without the column
+	// For simplicity, we'll just leave the column as is
 	return nil
 }

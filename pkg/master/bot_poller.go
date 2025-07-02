@@ -240,7 +240,25 @@ func (p *BotPoller) pollBot(bot *common.Bot) {
 		}
 	} else if bot.CurrentJob != nil {
 		// Bot reports no current job but master thinks it has one
-		// This could mean the job completed - poll for the last known job
+		// First check if the job is already completed in master's view
+		job, err := p.services.Job.GetJob(p.ctx, *bot.CurrentJob)
+		if err == nil && (job.Status == common.JobStatusCompleted || job.Status == common.JobStatusFailed || job.Status == common.JobStatusCancelled) {
+			// Job is already completed, just need to clear bot's reference
+			p.logger.WithFields(logrus.Fields{
+				"bot_id":        bot.ID,
+				"job_id":        *bot.CurrentJob,
+				"job_status":    job.Status,
+			}).Info("Clearing stale job reference from bot - job already completed")
+			
+			bot.CurrentJob = nil
+			bot.Status = common.BotStatusIdle
+			if err := p.state.SaveBotWithRetry(p.ctx, bot); err != nil {
+				p.logger.WithError(err).WithField("bot_id", bot.ID).Error("Failed to clear bot's job reference")
+			}
+			return
+		}
+		
+		// Job not completed in master's view, try to poll for status
 		p.logger.WithFields(logrus.Fields{
 			"bot_id":        bot.ID,
 			"master_job_id": *bot.CurrentJob,

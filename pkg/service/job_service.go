@@ -17,7 +17,7 @@ type jobService struct {
 	timeoutManager TimeoutManager
 	config         *common.MasterConfig
 	logger         *logrus.Logger
-	
+
 	// Lifecycle management
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -58,7 +58,7 @@ func (s *jobService) CreateJob(ctx context.Context, req CreateJobRequest) (*comm
 		}
 	}
 	if !isValid {
-		return nil, errors.NewValidationError("create_job", 
+		return nil, errors.NewValidationError("create_job",
 			fmt.Sprintf("Invalid fuzzer type. Must be one of: %v", validFuzzers))
 	}
 
@@ -82,9 +82,10 @@ func (s *jobService) CreateJob(ctx context.Context, req CreateJobRequest) (*comm
 		TimeoutAt: now.Add(duration),
 		WorkDir:   fmt.Sprintf("/tmp/pandafuzz/job_%s", jobID),
 		Config:    req.Config,
+		Progress:  0, // Initialize progress to 0
 	}
 
-	// Save job
+	// Save job with context
 	if err := s.state.SaveJobWithRetry(job); err != nil {
 		return nil, errors.Wrap(errors.ErrorTypeDatabase, "create_job", "Failed to save job", err)
 	}
@@ -109,6 +110,7 @@ func (s *jobService) GetJob(ctx context.Context, jobID string) (*common.Job, err
 		return nil, errors.NewValidationError("get_job", "Job ID is required")
 	}
 
+	// Use the provided context directly
 	job, err := s.state.GetJob(jobID)
 	if err != nil {
 		if common.IsNotFoundError(err) {
@@ -122,6 +124,14 @@ func (s *jobService) GetJob(ctx context.Context, jobID string) (*common.Job, err
 
 // ListJobs returns jobs with optional filters
 func (s *jobService) ListJobs(ctx context.Context, filter JobFilter) ([]*common.Job, error) {
+	// Try to use optimized filtered query if available
+	if jobs, err := s.state.ListJobsFiltered(ctx, filter.Status, filter.Fuzzer, filter.Limit, filter.Page); err == nil {
+		return jobs, nil
+	} else if !errors.IsMethodNotFound(err) {
+		return nil, errors.Wrap(errors.ErrorTypeDatabase, "list_jobs", "Failed to list jobs", err)
+	}
+
+	// Fallback to in-memory filtering
 	jobs, err := s.state.ListJobs()
 	if err != nil {
 		return nil, errors.Wrap(errors.ErrorTypeDatabase, "list_jobs", "Failed to list jobs", err)
@@ -166,7 +176,31 @@ func (s *jobService) AssignJob(ctx context.Context, botID string) (*common.Job, 
 		return nil, errors.NewValidationError("assign_job", "Bot ID is required")
 	}
 
-	// Atomic job assignment
+	// Use optimized assignment method if available
+	if job, err := s.state.AtomicJobAssignmentOptimized(ctx, botID); err == nil {
+		// Set job timeout
+		s.timeoutManager.UpdateJobTimeout(job.ID)
+
+		s.logger.WithFields(logrus.Fields{
+			"bot_id":   botID,
+			"job_id":   job.ID,
+			"job_name": job.Name,
+			"fuzzer":   job.Fuzzer,
+		}).Info("Job assigned to bot")
+
+		return job, nil
+	} else if !errors.IsMethodNotFound(err) {
+		// Handle actual errors
+		if errors.IsNotFoundError(err) {
+			return nil, errors.New(errors.ErrorTypeNotFound, "assign_job", "No jobs available for assignment")
+		}
+		if errors.IsConflictError(err) {
+			return nil, errors.Wrap(errors.ErrorTypeConflict, "assign_job", "Lock conflict during job assignment", err)
+		}
+		return nil, errors.Wrap(errors.ErrorTypeDatabase, "assign_job", "Failed to assign job", err)
+	}
+
+	// Fallback to traditional method
 	job, err := s.state.AtomicJobAssignmentWithRetry(botID)
 	if err != nil {
 		if err.Error() == "no jobs available" {
@@ -194,7 +228,30 @@ func (s *jobService) CompleteJob(ctx context.Context, jobID, botID string, succe
 		return errors.NewValidationError("complete_job", "Job ID and Bot ID are required")
 	}
 
-	// Get bot's current job
+	// Use optimized completion method if available
+	if err := s.state.CompleteJobOptimized(ctx, jobID, botID, success); err == nil {
+		// Remove job timeout
+		s.timeoutManager.RemoveJobTimeout(jobID)
+
+		s.logger.WithFields(logrus.Fields{
+			"bot_id":  botID,
+			"job_id":  jobID,
+			"success": success,
+		}).Info("Job completed")
+
+		return nil
+	} else if !errors.IsMethodNotFound(err) {
+		// Handle actual errors
+		if errors.IsValidationError(err) {
+			return err // Pass through validation errors
+		}
+		if errors.IsConflictError(err) {
+			return errors.Wrap(errors.ErrorTypeConflict, "complete_job", "Lock conflict during job completion", err)
+		}
+		return errors.Wrap(errors.ErrorTypeDatabase, "complete_job", "Failed to complete job", err)
+	}
+
+	// Fallback: Get bot's current job
 	bot, err := s.state.GetBot(botID)
 	if err != nil {
 		return errors.Wrap(errors.ErrorTypeDatabase, "complete_job", "Failed to get bot", err)
@@ -227,6 +284,7 @@ func (s *jobService) CancelJob(ctx context.Context, jobID string) error {
 		return errors.NewValidationError("cancel_job", "Job ID is required")
 	}
 
+	// Use the provided context directly
 	job, err := s.state.GetJob(jobID)
 	if err != nil {
 		return errors.Wrap(errors.ErrorTypeDatabase, "cancel_job", "Failed to get job", err)
@@ -290,10 +348,10 @@ func (s *jobService) GetJobLogs(ctx context.Context, jobID string) ([]string, er
 // Start starts the job service
 func (s *jobService) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
-	
+
 	// Start any background goroutines here
 	// Currently job service doesn't have background tasks
-	
+
 	s.logger.Info("Job service started")
 	return nil
 }
@@ -303,10 +361,10 @@ func (s *jobService) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	
+
 	// Clean up any resources
 	// Currently job service doesn't have resources to clean up
-	
+
 	s.logger.Info("Job service stopped")
 	return nil
 }

@@ -13,18 +13,18 @@ import (
 
 // TimeoutManager handles timeout tracking and enforcement
 type TimeoutManager struct {
-	state         *PersistentState
-	botTimeouts   map[string]time.Time
-	jobTimeouts   map[string]time.Time
-	mu            sync.RWMutex
-	logger        *logrus.Logger
-	config        *common.MasterConfig
-	ticker        *time.Ticker
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
-	retryManager  *common.RetryManager
-	stats         TimeoutStats
+	state        *PersistentState
+	botTimeouts  map[string]time.Time
+	jobTimeouts  map[string]time.Time
+	mu           sync.RWMutex
+	logger       *logrus.Logger
+	config       *common.MasterConfig
+	ticker       *time.Ticker
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	retryManager *common.RetryManager
+	stats        TimeoutStats
 }
 
 // Compile-time interface compliance check
@@ -32,22 +32,22 @@ var _ service.TimeoutManager = (*TimeoutManager)(nil)
 
 // TimeoutStats tracks timeout-related statistics
 type TimeoutStats struct {
-	BotsTimedOut         int64     `json:"bots_timed_out"`
-	JobsTimedOut         int64     `json:"jobs_timed_out"`
-	TimeoutChecks        int64     `json:"timeout_checks"`
-	LastCheck            time.Time `json:"last_check"`
+	BotsTimedOut         int64         `json:"bots_timed_out"`
+	JobsTimedOut         int64         `json:"jobs_timed_out"`
+	TimeoutChecks        int64         `json:"timeout_checks"`
+	LastCheck            time.Time     `json:"last_check"`
 	AverageCheckDuration time.Duration `json:"average_check_duration"`
-	ActiveBotTimeouts    int       `json:"active_bot_timeouts"`
-	ActiveJobTimeouts    int       `json:"active_job_timeouts"`
+	ActiveBotTimeouts    int           `json:"active_bot_timeouts"`
+	ActiveJobTimeouts    int           `json:"active_job_timeouts"`
 }
 
 // TimeoutEvent represents a timeout event
 type TimeoutEvent struct {
-	Type      TimeoutType `json:"type"`
-	EntityID  string      `json:"entity_id"`
-	Timestamp time.Time   `json:"timestamp"`
+	Type      TimeoutType   `json:"type"`
+	EntityID  string        `json:"entity_id"`
+	Timestamp time.Time     `json:"timestamp"`
 	Duration  time.Duration `json:"duration"`
-	Reason    string      `json:"reason"`
+	Reason    string        `json:"reason"`
 }
 
 // TimeoutType represents the type of timeout
@@ -63,14 +63,14 @@ type TimeoutCallback func(event TimeoutEvent) error
 
 // NewTimeoutManager creates a new timeout manager
 func NewTimeoutManager(state *PersistentState, config *common.MasterConfig, logger *logrus.Logger) *TimeoutManager {
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	retryPolicy := config.Retry.BotOperation
 	if retryPolicy.MaxRetries == 0 {
 		retryPolicy = common.DefaultRetryPolicy
 	}
-	
+
 	return &TimeoutManager{
 		state:        state,
 		botTimeouts:  make(map[string]time.Time),
@@ -86,24 +86,24 @@ func NewTimeoutManager(state *PersistentState, config *common.MasterConfig, logg
 // Start begins the timeout monitoring process
 func (tm *TimeoutManager) Start() error {
 	tm.logger.Info("Starting timeout manager")
-	
+
 	// Start with an initial check
 	if err := tm.initializeTimeouts(); err != nil {
 		return common.NewSystemError("start_timeout_manager", err)
 	}
-	
+
 	// Initialize LastCheck to current time to prevent health check failures on startup
 	tm.mu.Lock()
 	tm.stats.LastCheck = time.Now()
 	tm.mu.Unlock()
-	
+
 	// Create ticker for periodic checks (every 30 seconds)
 	tm.ticker = time.NewTicker(30 * time.Second)
-	
+
 	// Start background goroutine
 	tm.wg.Add(1)
 	go tm.run()
-	
+
 	tm.logger.Info("Timeout manager started successfully")
 	return nil
 }
@@ -111,16 +111,16 @@ func (tm *TimeoutManager) Start() error {
 // Stop gracefully shuts down the timeout manager
 func (tm *TimeoutManager) Stop() error {
 	tm.logger.Info("Stopping timeout manager")
-	
+
 	// Cancel context and stop ticker
 	tm.cancel()
 	if tm.ticker != nil {
 		tm.ticker.Stop()
 	}
-	
+
 	// Wait for background goroutine to finish
 	tm.wg.Wait()
-	
+
 	tm.logger.Info("Timeout manager stopped")
 	return nil
 }
@@ -128,7 +128,7 @@ func (tm *TimeoutManager) Stop() error {
 // run is the main loop for timeout checking
 func (tm *TimeoutManager) run() {
 	defer tm.wg.Done()
-	
+
 	for {
 		select {
 		case <-tm.ctx.Done():
@@ -142,45 +142,45 @@ func (tm *TimeoutManager) run() {
 // initializeTimeouts loads existing timeouts from persistent state
 func (tm *TimeoutManager) initializeTimeouts() error {
 	tm.logger.Debug("Initializing timeouts from persistent state")
-	
+
 	// Load bot timeouts
-	bots, err := tm.state.ListBots()
+	bots, err := tm.state.ListBots(context.Background())
 	if err != nil {
 		return common.NewSystemError("load_bot_timeouts", err)
 	}
-	
+
 	tm.mu.Lock()
 	for _, bot := range bots {
 		tm.botTimeouts[bot.ID] = bot.TimeoutAt
 	}
 	tm.mu.Unlock()
-	
+
 	// Load job timeouts
-	jobs, err := tm.state.ListJobs()
+	jobs, err := tm.state.ListJobs(context.Background())
 	if err != nil {
 		return common.NewSystemError("load_job_timeouts", err)
 	}
-	
+
 	tm.mu.Lock()
 	for _, job := range jobs {
 		tm.jobTimeouts[job.ID] = job.TimeoutAt
 	}
 	tm.mu.Unlock()
-	
+
 	tm.logger.WithFields(logrus.Fields{
 		"bot_timeouts": len(tm.botTimeouts),
 		"job_timeouts": len(tm.jobTimeouts),
 	}).Debug("Timeouts initialized")
-	
+
 	return nil
 }
 
 // performTimeoutCheck checks for and handles timeouts
 func (tm *TimeoutManager) performTimeoutCheck() {
 	start := time.Now()
-	
+
 	tm.logger.Debug("Performing timeout check")
-	
+
 	// Check bot timeouts
 	timedOutBots := tm.checkBotTimeouts()
 	for _, botID := range timedOutBots {
@@ -188,7 +188,7 @@ func (tm *TimeoutManager) performTimeoutCheck() {
 			tm.logger.WithError(err).WithField("bot_id", botID).Error("Failed to handle bot timeout")
 		}
 	}
-	
+
 	// Check job timeouts
 	timedOutJobs := tm.checkJobTimeouts()
 	for _, jobID := range timedOutJobs {
@@ -196,7 +196,7 @@ func (tm *TimeoutManager) performTimeoutCheck() {
 			tm.logger.WithError(err).WithField("job_id", jobID).Error("Failed to handle job timeout")
 		}
 	}
-	
+
 	// Update statistics
 	duration := time.Since(start)
 	tm.mu.Lock()
@@ -206,7 +206,7 @@ func (tm *TimeoutManager) performTimeoutCheck() {
 	tm.stats.ActiveBotTimeouts = len(tm.botTimeouts)
 	tm.stats.ActiveJobTimeouts = len(tm.jobTimeouts)
 	tm.mu.Unlock()
-	
+
 	if len(timedOutBots) > 0 || len(timedOutJobs) > 0 {
 		tm.logger.WithFields(logrus.Fields{
 			"timed_out_bots": len(timedOutBots),
@@ -220,16 +220,16 @@ func (tm *TimeoutManager) performTimeoutCheck() {
 func (tm *TimeoutManager) checkBotTimeouts() []string {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	now := time.Now()
 	var timedOut []string
-	
+
 	for botID, timeout := range tm.botTimeouts {
 		if now.After(timeout) {
 			timedOut = append(timedOut, botID)
 		}
 	}
-	
+
 	return timedOut
 }
 
@@ -237,30 +237,30 @@ func (tm *TimeoutManager) checkBotTimeouts() []string {
 func (tm *TimeoutManager) checkJobTimeouts() []string {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	now := time.Now()
 	var timedOut []string
-	
+
 	for jobID, timeout := range tm.jobTimeouts {
 		if now.After(timeout) {
 			timedOut = append(timedOut, jobID)
 		}
 	}
-	
+
 	return timedOut
 }
 
 // handleBotTimeout handles a bot timeout
 func (tm *TimeoutManager) handleBotTimeout(botID string) error {
 	tm.logger.WithField("bot_id", botID).Warn("Bot timeout detected")
-	
+
 	err := tm.retryManager.Execute(func() error {
 		// Get bot information
 		bot, err := tm.state.GetBot(context.Background(), botID)
 		if err != nil {
 			return err
 		}
-		
+
 		// Create timeout event
 		event := TimeoutEvent{
 			Type:      TimeoutTypeBot,
@@ -269,18 +269,18 @@ func (tm *TimeoutManager) handleBotTimeout(botID string) error {
 			Duration:  time.Since(bot.LastSeen),
 			Reason:    "Heartbeat timeout",
 		}
-		
+
 		// Reset the bot state
 		if err := tm.state.ResetBot(context.Background(), botID); err != nil {
 			return err
 		}
-		
+
 		// Remove from timeout tracking
 		tm.mu.Lock()
 		delete(tm.botTimeouts, botID)
 		tm.stats.BotsTimedOut++
 		tm.mu.Unlock()
-		
+
 		tm.logger.WithFields(logrus.Fields{
 			"bot_id":      botID,
 			"hostname":    bot.Hostname,
@@ -288,29 +288,29 @@ func (tm *TimeoutManager) handleBotTimeout(botID string) error {
 			"timeout_at":  bot.TimeoutAt,
 			"current_job": bot.CurrentJob,
 		}).Info("Bot timeout handled")
-		
+
 		// Log the timeout event
 		return tm.logTimeoutEvent(event)
 	})
-	
+
 	if err != nil {
 		return common.NewSystemError("handle_bot_timeout", err)
 	}
-	
+
 	return nil
 }
 
 // handleJobTimeout handles a job timeout
 func (tm *TimeoutManager) handleJobTimeout(jobID string) error {
 	tm.logger.WithField("job_id", jobID).Warn("Job timeout detected")
-	
+
 	err := tm.retryManager.Execute(func() error {
 		// Get job information
 		job, err := tm.state.GetJob(context.Background(), jobID)
 		if err != nil {
 			return err
 		}
-		
+
 		// Create timeout event
 		event := TimeoutEvent{
 			Type:      TimeoutTypeJob,
@@ -319,7 +319,7 @@ func (tm *TimeoutManager) handleJobTimeout(jobID string) error {
 			Duration:  time.Since(job.CreatedAt),
 			Reason:    "Execution timeout",
 		}
-		
+
 		// Update job status to timed out
 		if job.AssignedBot != nil {
 			// Complete the job as failed to free up the bot
@@ -327,13 +327,13 @@ func (tm *TimeoutManager) handleJobTimeout(jobID string) error {
 				return err
 			}
 		}
-		
+
 		// Remove from timeout tracking
 		tm.mu.Lock()
 		delete(tm.jobTimeouts, jobID)
 		tm.stats.JobsTimedOut++
 		tm.mu.Unlock()
-		
+
 		tm.logger.WithFields(logrus.Fields{
 			"job_id":       jobID,
 			"job_name":     job.Name,
@@ -342,15 +342,15 @@ func (tm *TimeoutManager) handleJobTimeout(jobID string) error {
 			"timeout_at":   job.TimeoutAt,
 			"assigned_bot": job.AssignedBot,
 		}).Info("Job timeout handled")
-		
+
 		// Log the timeout event
 		return tm.logTimeoutEvent(event)
 	})
-	
+
 	if err != nil {
 		return common.NewSystemError("handle_job_timeout", err)
 	}
-	
+
 	return nil
 }
 
@@ -358,10 +358,10 @@ func (tm *TimeoutManager) handleJobTimeout(jobID string) error {
 func (tm *TimeoutManager) SetBotTimeout(botID string, timeout time.Duration) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	
+
 	timeoutAt := time.Now().Add(timeout)
 	tm.botTimeouts[botID] = timeoutAt
-	
+
 	tm.logger.WithFields(logrus.Fields{
 		"bot_id":     botID,
 		"timeout":    timeout,
@@ -373,10 +373,10 @@ func (tm *TimeoutManager) SetBotTimeout(botID string, timeout time.Duration) {
 func (tm *TimeoutManager) SetJobTimeout(jobID string, timeout time.Duration) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	
+
 	timeoutAt := time.Now().Add(timeout)
 	tm.jobTimeouts[jobID] = timeoutAt
-	
+
 	tm.logger.WithFields(logrus.Fields{
 		"job_id":     jobID,
 		"timeout":    timeout,
@@ -388,11 +388,11 @@ func (tm *TimeoutManager) SetJobTimeout(jobID string, timeout time.Duration) {
 func (tm *TimeoutManager) ExtendBotTimeout(botID string, extension time.Duration) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	
+
 	if existingTimeout, exists := tm.botTimeouts[botID]; exists {
 		newTimeout := existingTimeout.Add(extension)
 		tm.botTimeouts[botID] = newTimeout
-		
+
 		tm.logger.WithFields(logrus.Fields{
 			"bot_id":      botID,
 			"extension":   extension,
@@ -405,11 +405,11 @@ func (tm *TimeoutManager) ExtendBotTimeout(botID string, extension time.Duration
 func (tm *TimeoutManager) ExtendJobTimeout(jobID string, extension time.Duration) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	
+
 	if existingTimeout, exists := tm.jobTimeouts[jobID]; exists {
 		newTimeout := existingTimeout.Add(extension)
 		tm.jobTimeouts[jobID] = newTimeout
-		
+
 		tm.logger.WithFields(logrus.Fields{
 			"job_id":      jobID,
 			"extension":   extension,
@@ -422,9 +422,9 @@ func (tm *TimeoutManager) ExtendJobTimeout(jobID string, extension time.Duration
 func (tm *TimeoutManager) RemoveBotTimeout(botID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	
+
 	delete(tm.botTimeouts, botID)
-	
+
 	tm.logger.WithField("bot_id", botID).Debug("Bot timeout removed")
 }
 
@@ -432,9 +432,9 @@ func (tm *TimeoutManager) RemoveBotTimeout(botID string) {
 func (tm *TimeoutManager) RemoveJobTimeout(jobID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	
+
 	delete(tm.jobTimeouts, jobID)
-	
+
 	tm.logger.WithField("job_id", jobID).Debug("Job timeout removed")
 }
 
@@ -442,7 +442,7 @@ func (tm *TimeoutManager) RemoveJobTimeout(jobID string) {
 func (tm *TimeoutManager) GetBotTimeout(botID string) (time.Time, bool) {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	timeout, exists := tm.botTimeouts[botID]
 	return timeout, exists
 }
@@ -451,7 +451,7 @@ func (tm *TimeoutManager) GetBotTimeout(botID string) (time.Time, bool) {
 func (tm *TimeoutManager) GetJobTimeout(jobID string) (time.Time, bool) {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	timeout, exists := tm.jobTimeouts[jobID]
 	return timeout, exists
 }
@@ -460,7 +460,7 @@ func (tm *TimeoutManager) GetJobTimeout(jobID string) (time.Time, bool) {
 func (tm *TimeoutManager) GetActiveTimeouts() (int, int) {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	return len(tm.botTimeouts), len(tm.jobTimeouts)
 }
 
@@ -475,11 +475,11 @@ func (tm *TimeoutManager) logTimeoutEvent(event TimeoutEvent) error {
 func (tm *TimeoutManager) GetStats() any {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	stats := tm.stats
 	stats.ActiveBotTimeouts = len(tm.botTimeouts)
 	stats.ActiveJobTimeouts = len(tm.jobTimeouts)
-	
+
 	return stats
 }
 
@@ -487,11 +487,11 @@ func (tm *TimeoutManager) GetStats() any {
 func (tm *TimeoutManager) GetStatsTyped() TimeoutStats {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	stats := tm.stats
 	stats.ActiveBotTimeouts = len(tm.botTimeouts)
 	stats.ActiveJobTimeouts = len(tm.jobTimeouts)
-	
+
 	return stats
 }
 
@@ -499,12 +499,12 @@ func (tm *TimeoutManager) GetStatsTyped() TimeoutStats {
 func (tm *TimeoutManager) ListBotTimeouts() map[string]time.Time {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	result := make(map[string]time.Time)
 	for botID, timeout := range tm.botTimeouts {
 		result[botID] = timeout
 	}
-	
+
 	return result
 }
 
@@ -512,12 +512,12 @@ func (tm *TimeoutManager) ListBotTimeouts() map[string]time.Time {
 func (tm *TimeoutManager) ListJobTimeouts() map[string]time.Time {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	result := make(map[string]time.Time)
 	for jobID, timeout := range tm.jobTimeouts {
 		result[jobID] = timeout
 	}
-	
+
 	return result
 }
 
@@ -525,11 +525,11 @@ func (tm *TimeoutManager) ListJobTimeouts() map[string]time.Time {
 func (tm *TimeoutManager) IsExpiredBot(botID string) bool {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	if timeout, exists := tm.botTimeouts[botID]; exists {
 		return time.Now().After(timeout)
 	}
-	
+
 	return false
 }
 
@@ -537,11 +537,11 @@ func (tm *TimeoutManager) IsExpiredBot(botID string) bool {
 func (tm *TimeoutManager) IsExpiredJob(jobID string) bool {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	if timeout, exists := tm.jobTimeouts[jobID]; exists {
 		return time.Now().After(timeout)
 	}
-	
+
 	return false
 }
 
@@ -587,16 +587,16 @@ func (tm *TimeoutManager) ForceTimeoutTyped(entityType TimeoutType, entityID str
 func (tm *TimeoutManager) HealthCheck() error {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	
+
 	// If LastCheck is zero, the timeout manager hasn't started yet - this is OK during startup
 	if tm.stats.LastCheck.IsZero() {
 		return nil
 	}
-	
+
 	// Check if we've performed a recent timeout check
 	if time.Since(tm.stats.LastCheck) > 2*time.Minute {
 		return common.NewSystemError("timeout_manager_health", fmt.Errorf("no recent timeout checks"))
 	}
-	
+
 	return nil
 }
