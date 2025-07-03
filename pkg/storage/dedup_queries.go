@@ -17,7 +17,7 @@ func (s *SQLiteStorage) CreateCrashGroup(ctx context.Context, cg *common.CrashGr
 		return fmt.Errorf("failed to marshal stack frames: %w", err)
 	}
 
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO crash_groups (
 				id, campaign_id, stack_hash, first_seen, last_seen,
@@ -34,7 +34,7 @@ func (s *SQLiteStorage) GetCrashGroup(ctx context.Context, campaignID, stackHash
 	var cg common.CrashGroup
 	var stackFramesJSON string
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		return s.db.QueryRowContext(ctx, `
 			SELECT id, campaign_id, stack_hash, first_seen, last_seen,
 				count, severity, stack_frames, example_crash
@@ -62,7 +62,7 @@ func (s *SQLiteStorage) GetCrashGroup(ctx context.Context, campaignID, stackHash
 
 // UpdateCrashGroupCount increments the crash count and updates last seen time
 func (s *SQLiteStorage) UpdateCrashGroupCount(ctx context.Context, id string) error {
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		result, err := s.db.ExecContext(ctx, `
 			UPDATE crash_groups 
 			SET count = count + 1, last_seen = CURRENT_TIMESTAMP
@@ -89,7 +89,7 @@ func (s *SQLiteStorage) UpdateCrashGroupCount(ctx context.Context, id string) er
 func (s *SQLiteStorage) ListCrashGroups(ctx context.Context, campaignID string) ([]*common.CrashGroup, error) {
 	var groups []*common.CrashGroup
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		rows, err := s.db.QueryContext(ctx, `
 			SELECT id, campaign_id, stack_hash, first_seen, last_seen,
 				count, severity, stack_frames, example_crash
@@ -135,7 +135,7 @@ func (s *SQLiteStorage) CreateStackTrace(ctx context.Context, crashID string, st
 		return fmt.Errorf("failed to marshal stack frames: %w", err)
 	}
 
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO stack_traces (
 				crash_id, top_n_hash, full_hash, frames, raw_trace
@@ -150,7 +150,7 @@ func (s *SQLiteStorage) GetStackTrace(ctx context.Context, crashID string) (*com
 	var st common.StackTrace
 	var framesJSON string
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		return s.db.QueryRowContext(ctx, `
 			SELECT top_n_hash, full_hash, frames, raw_trace
 			FROM stack_traces
@@ -175,7 +175,7 @@ func (s *SQLiteStorage) GetStackTrace(ctx context.Context, crashID string) (*com
 
 // LinkCrashToGroup associates a crash with a crash group
 func (s *SQLiteStorage) LinkCrashToGroup(ctx context.Context, crashID, groupID string) error {
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		result, err := s.db.ExecContext(ctx, `
 			UPDATE crashes 
 			SET crash_group_id = ?
@@ -200,7 +200,7 @@ func (s *SQLiteStorage) LinkCrashToGroup(ctx context.Context, crashID, groupID s
 
 // UpdateCrashWithCampaign updates a crash to associate it with a campaign
 func (s *SQLiteStorage) UpdateCrashWithCampaign(ctx context.Context, crashID, campaignID string) error {
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		result, err := s.db.ExecContext(ctx, `
 			UPDATE crashes 
 			SET campaign_id = ?
@@ -227,7 +227,7 @@ func (s *SQLiteStorage) UpdateCrashWithCampaign(ctx context.Context, crashID, ca
 func (s *SQLiteStorage) GetCrashesWithoutStackTrace(ctx context.Context, limit int) ([]*common.CrashResult, error) {
 	var crashes []*common.CrashResult
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		query := `
 			SELECT c.id, c.job_id, c.bot_id, c.hash, c.file_path, c.type,
 				c.signal, c.exit_code, c.timestamp, c.size, c.is_unique,
@@ -266,7 +266,7 @@ func (s *SQLiteStorage) GetCrashesWithoutStackTrace(ctx context.Context, limit i
 func (s *SQLiteStorage) GetCrashGroupStats(ctx context.Context, campaignID string) (map[string]interface{}, error) {
 	stats := make(map[string]interface{})
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		// Total unique crash groups
 		var totalGroups int
 		err := s.db.QueryRowContext(ctx, `

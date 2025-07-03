@@ -41,7 +41,9 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 		"fuzzer":   job.Fuzzer,
 		"target":   job.Target,
 		"work_dir": job.WorkDir,
-	}).Info("Starting fuzzer job execution")
+		"config":   job.Config,
+		"status":   job.Status,
+	}).Info("FuzzerJobExecutor: Starting fuzzer job execution")
 
 	// Create appropriate fuzzer
 	fuzz, err := fje.createFuzzer(job)

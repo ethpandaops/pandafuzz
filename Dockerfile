@@ -83,8 +83,8 @@ WORKDIR /app
 COPY --from=builder /build/pandafuzz-master /app/
 COPY --from=builder /build/master.yaml /app/
 
-# Copy web UI build
-COPY --from=web-builder /build/build /app/web/build
+# Copy web UI build to where the server expects it
+COPY --from=web-builder /build/build /app/web/static
 
 # Switch to non-root user
 USER pandafuzz

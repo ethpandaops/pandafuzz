@@ -16,38 +16,39 @@ import (
 
 // Server represents the master HTTP server
 type Server struct {
-	config           *common.MasterConfig
-	state            *PersistentState
-	timeoutManager   *TimeoutManager
-	recoveryManager  *RecoveryManager
-	botPoller        *BotPoller
-	services         *service.Manager
-	httpServer       *http.Server
-	router           *mux.Router
-	logger           *logrus.Logger
-	retryManager     *common.RetryManager
-	circuitBreaker   *common.CircuitBreaker
-	responseWriter   *httputil.ResponseWriter
-	middleware       []Middleware
-	shutdownTimeout  time.Duration
-	mu               sync.RWMutex
-	running          bool
-	stats            ServerStats
-	version          string
-	buildTime        string
-	gitCommit        string
+	config          *common.MasterConfig
+	state           *PersistentState
+	timeoutManager  *TimeoutManager
+	recoveryManager *RecoveryManager
+	botPoller       *BotPoller
+	services        *service.Manager
+	httpServer      *http.Server
+	router          *mux.Router
+	logger          *logrus.Logger
+	retryManager    *common.RetryManager
+	circuitBreaker  *common.CircuitBreaker
+	responseWriter  *httputil.ResponseWriter
+	wsHub           *WSHub
+	middleware      []Middleware
+	shutdownTimeout time.Duration
+	mu              sync.RWMutex
+	running         bool
+	stats           ServerStats
+	version         string
+	buildTime       string
+	gitCommit       string
 }
 
 // ServerStats tracks server performance metrics
 type ServerStats struct {
-	StartTime       time.Time `json:"start_time"`
-	RequestCount    int64     `json:"request_count"`
-	ErrorCount      int64     `json:"error_count"`
-	ActiveRequests  int64     `json:"active_requests"`
-	AverageLatency  time.Duration `json:"average_latency"`
-	LastRequest     time.Time `json:"last_request"`
-	HealthyUptime   time.Duration `json:"healthy_uptime"`
-	TotalConnections int64     `json:"total_connections"`
+	StartTime        time.Time     `json:"start_time"`
+	RequestCount     int64         `json:"request_count"`
+	ErrorCount       int64         `json:"error_count"`
+	ActiveRequests   int64         `json:"active_requests"`
+	AverageLatency   time.Duration `json:"average_latency"`
+	LastRequest      time.Time     `json:"last_request"`
+	HealthyUptime    time.Duration `json:"healthy_uptime"`
+	TotalConnections int64         `json:"total_connections"`
 }
 
 // Middleware represents HTTP middleware
@@ -55,19 +56,19 @@ type Middleware func(http.Handler) http.Handler
 
 // NewServer creates a new master server instance
 func NewServer(config *common.MasterConfig, state *PersistentState, timeoutManager *TimeoutManager, versionInfo *common.VersionInfo, logger *logrus.Logger) *Server {
-	
+
 	// Configure retry manager for server operations
 	retryPolicy := config.Retry.Network
 	if retryPolicy.MaxRetries == 0 {
 		retryPolicy = common.NetworkRetryPolicy
 	}
-	
+
 	// Configure circuit breaker
 	circuitBreaker := common.NewCircuitBreaker(
 		config.Circuit.MaxFailures,
 		config.Circuit.ResetTimeout,
 	)
-	
+
 	server := &Server{
 		config:          config,
 		state:           state,
@@ -76,6 +77,7 @@ func NewServer(config *common.MasterConfig, state *PersistentState, timeoutManag
 		retryManager:    common.NewRetryManager(retryPolicy),
 		circuitBreaker:  circuitBreaker,
 		responseWriter:  httputil.NewResponseWriter(logger),
+		wsHub:           NewWSHub(logger),
 		shutdownTimeout: 30 * time.Second,
 		stats: ServerStats{
 			StartTime: time.Now(),
@@ -84,14 +86,14 @@ func NewServer(config *common.MasterConfig, state *PersistentState, timeoutManag
 		buildTime: "unknown",
 		gitCommit: "unknown",
 	}
-	
+
 	// Set version info if provided
 	if versionInfo != nil {
 		server.version = versionInfo.Version
 		server.buildTime = versionInfo.BuildTime
 		server.gitCommit = versionInfo.GitCommit
 	}
-	
+
 	return server
 }
 
@@ -99,18 +101,18 @@ func NewServer(config *common.MasterConfig, state *PersistentState, timeoutManag
 func (s *Server) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	if s.running {
 		return common.NewSystemError("start_server", fmt.Errorf("server already running"))
 	}
-	
+
 	s.logger.Info("Starting master HTTP server")
-	
+
 	// Setup router and middleware
 	if err := s.setupRouter(); err != nil {
 		return common.NewSystemError("setup_router", err)
 	}
-	
+
 	// Configure HTTP server
 	s.httpServer = &http.Server{
 		Addr:           fmt.Sprintf("%s:%d", s.config.Server.Host, s.config.Server.Port),
@@ -120,14 +122,14 @@ func (s *Server) Start() error {
 		IdleTimeout:    s.config.Server.IdleTimeout,
 		MaxHeaderBytes: s.config.Server.MaxHeaderBytes,
 	}
-	
+
 	// Start services through manager
 	if s.services != nil {
 		ctx := context.Background()
 		if err := s.services.Start(ctx); err != nil {
 			return common.NewSystemError("start_services", err)
 		}
-		
+
 		// Start separate metrics server if configured
 		if s.config.Monitoring.Enabled {
 			metricsAddr := s.config.Monitoring.GetMetricsAddr()
@@ -141,7 +143,7 @@ func (s *Server) Start() error {
 			}
 		}
 	}
-	
+
 	// Start bot poller
 	if s.botPoller != nil {
 		s.logger.Info("Starting bot poller")
@@ -149,29 +151,29 @@ func (s *Server) Start() error {
 			return common.NewSystemError("start_bot_poller", err)
 		}
 	}
-	
+
 	// Start server in background
 	go func() {
 		s.logger.WithFields(logrus.Fields{
 			"host": s.config.Server.Host,
 			"port": s.config.Server.Port,
 		}).Info("HTTP server listening")
-		
+
 		var err error
 		if s.config.Server.EnableTLS {
 			err = s.httpServer.ListenAndServeTLS(s.config.Server.TLSCertFile, s.config.Server.TLSKeyFile)
 		} else {
 			err = s.httpServer.ListenAndServe()
 		}
-		
+
 		if err != nil && err != http.ErrServerClosed {
 			s.logger.WithError(err).Error("HTTP server error")
 		}
 	}()
-	
+
 	s.running = true
 	s.logger.Info("Master HTTP server started successfully")
-	
+
 	return nil
 }
 
@@ -179,17 +181,17 @@ func (s *Server) Start() error {
 func (s *Server) Stop() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	if !s.running {
 		return nil
 	}
-	
+
 	s.logger.Info("Stopping master HTTP server")
-	
+
 	// Create shutdown context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer cancel()
-	
+
 	// Stop services through manager
 	if s.services != nil {
 		s.logger.Info("Stopping services")
@@ -197,7 +199,7 @@ func (s *Server) Stop() error {
 			s.logger.WithError(err).Error("Error stopping services")
 		}
 	}
-	
+
 	// Stop bot poller
 	if s.botPoller != nil {
 		s.logger.Info("Stopping bot poller")
@@ -205,31 +207,27 @@ func (s *Server) Stop() error {
 			s.logger.WithError(err).Error("Error stopping bot poller")
 		}
 	}
-	
+
 	// Graceful shutdown
 	if err := s.httpServer.Shutdown(ctx); err != nil {
 		s.logger.WithError(err).Error("Error during server shutdown")
 		return common.NewSystemError("stop_server", err)
 	}
-	
+
 	s.running = false
 	s.logger.Info("Master HTTP server stopped")
-	
+
 	return nil
 }
-
-
-
-
 
 // GetStats returns server statistics
 func (s *Server) GetStats() ServerStats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	stats := s.stats
 	stats.HealthyUptime = time.Since(s.stats.StartTime)
-	
+
 	return stats
 }
 

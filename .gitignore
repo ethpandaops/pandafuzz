@@ -21,3 +21,28 @@ package-lock.json
 *.swp
 *.swo
 
+# Compiled binaries
+test_crasher
+test_crash
+test_fuzzer
+libfuzzer_test
+*.test
+
+# Crash artifacts
+crash-*
+
+# Go build artifacts
+/cmd/bot/bot
+/cmd/master/master
+
+# Database files
+/data/*.db
+/data/*.db-journal
+
+# Temporary files
+*.tmp
+*.log
+
+# Configuration files (keep examples only)
+bot.yaml
+bot-docker.yaml

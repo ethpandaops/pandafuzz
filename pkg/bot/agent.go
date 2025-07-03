@@ -406,11 +406,26 @@ func (a *Agent) requestNewJob() {
 	a.mu.Unlock()
 
 	a.logger.WithFields(logrus.Fields{
-		"job_id":   job.ID,
-		"job_name": job.Name,
-		"fuzzer":   job.Fuzzer,
-		"target":   job.Target,
-	}).Info("Received new job")
+		"job_id":     job.ID,
+		"job_name":   job.Name,
+		"fuzzer":     job.Fuzzer,
+		"target":     job.Target,
+		"job_status": job.Status,
+		"work_dir":   job.WorkDir,
+		"timeout_at": job.TimeoutAt,
+	}).Info("Bot received new job from master")
+
+	// Update API server immediately to reflect we have the job
+	if a.apiServer != nil {
+		status := &JobStatus{
+			JobID:     job.ID,
+			Status:    "preparing",
+			StartTime: time.Now(),
+			Message:   "Job received, preparing environment",
+			UpdatedAt: time.Now(),
+		}
+		a.apiServer.UpdateJobStatus(job.ID, status)
+	}
 
 	// Prepare job for execution (download binary if needed)
 	go a.prepareAndExecuteJob(job)
@@ -419,6 +434,22 @@ func (a *Agent) requestNewJob() {
 // prepareAndExecuteJob prepares and executes a fuzzing job
 func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 	a.logger.WithField("job_id", job.ID).Info("Preparing job for execution")
+
+	// Resolve work directory - if it's a relative path, prepend the bot's work directory
+	if !filepath.IsAbs(job.WorkDir) {
+		// Use bot's configured work directory as base
+		baseWorkDir := a.config.Fuzzing.WorkDir
+		if baseWorkDir == "" {
+			baseWorkDir = "./work"
+		}
+		job.WorkDir = filepath.Join(baseWorkDir, "jobs", job.WorkDir)
+	}
+
+	a.logger.WithFields(logrus.Fields{
+		"job_id":        job.ID,
+		"work_dir":      job.WorkDir,
+		"resolved_path": job.WorkDir,
+	}).Info("Resolved job work directory")
 
 	// Create work directory first
 	if err := os.MkdirAll(job.WorkDir, 0755); err != nil {
@@ -429,6 +460,17 @@ func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 
 	// Always download binary from master since the path refers to the master's filesystem
 	localBinaryPath := filepath.Join(job.WorkDir, "target_binary")
+
+	// Log job details for debugging
+	a.logger.WithFields(logrus.Fields{
+		"job_id":            job.ID,
+		"job_status":        job.Status,
+		"job_fuzzer":        job.Fuzzer,
+		"work_dir":          job.WorkDir,
+		"abs_work_dir":      func() string { p, _ := filepath.Abs(job.WorkDir); return p }(),
+		"target_path":       job.Target,
+		"local_binary_path": localBinaryPath,
+	}).Info("Starting job preparation")
 
 	// Remove any existing file to avoid confusion
 	if _, err := os.Stat(localBinaryPath); err == nil {
@@ -532,11 +574,16 @@ func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 		if err := os.MkdirAll(inputDir, 0755); err != nil {
 			a.logger.WithError(err).Warn("Failed to create input directory")
 		} else {
-			// Extract zip file to input directory
-			if err := a.extractZipFile(corpusPath, inputDir); err != nil {
-				a.logger.WithError(err).Warn("Failed to extract seed corpus")
+			// Check if the corpus file exists before trying to extract
+			if _, err := os.Stat(corpusPath); err == nil {
+				// Extract zip file to input directory
+				if err := a.extractZipFile(corpusPath, inputDir); err != nil {
+					a.logger.WithError(err).Warn("Failed to extract seed corpus")
+				} else {
+					a.logger.WithField("input_dir", inputDir).Info("Seed corpus extracted successfully")
+				}
 			} else {
-				a.logger.WithField("input_dir", inputDir).Info("Seed corpus extracted successfully")
+				a.logger.Debug("Seed corpus file does not exist, skipping extraction")
 			}
 		}
 		a.logger.Info("Seed corpus downloaded successfully")
@@ -613,6 +660,24 @@ func (a *Agent) continueCurrentJob() {
 	if time.Now().After(job.TimeoutAt) {
 		a.logger.WithField("job_id", job.ID).Warn("Job has timed out")
 		a.completeCurrentJob(false, "Job timeout")
+		return
+	}
+
+	// Check if job has been cancelled by master
+	// Query master for job status
+	masterJob, err := a.client.GetJob(a.config.ID)
+	if err != nil {
+		a.logger.WithError(err).Warn("Failed to check job status with master")
+		// Continue with job execution on error
+	} else if masterJob == nil || masterJob.ID != job.ID {
+		// Master has no job for us or a different job
+		a.logger.WithField("job_id", job.ID).Warn("Job no longer assigned by master")
+		a.completeCurrentJob(false, "Job cancelled or reassigned")
+		return
+	} else if masterJob.Status == common.JobStatusCancelled {
+		// Job has been explicitly cancelled
+		a.logger.WithField("job_id", job.ID).Info("Job has been cancelled by master")
+		a.completeCurrentJob(false, "Job cancelled by master")
 		return
 	}
 

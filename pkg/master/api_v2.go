@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/storage"
 	"github.com/gorilla/mux"
-	"github.com/sirupsen/logrus"
 )
 
 // API v2 structures
@@ -29,6 +30,28 @@ type BotMetricsStream struct {
 	CPUUsage    float64   `json:"cpu_usage"`
 	MemoryUsage uint64    `json:"memory_usage"`
 	JobProgress float64   `json:"job_progress,omitempty"`
+}
+
+// circuitBreakerMiddleware implements circuit breaker pattern for API endpoints
+func (s *Server) circuitBreakerMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip circuit breaker for health checks
+		if r.URL.Path == "/api/v2/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Execute with circuit breaker
+		err := s.circuitBreaker.Execute(func() error {
+			next.ServeHTTP(w, r)
+			return nil
+		})
+
+		if err != nil {
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Service temporarily unavailable", err)
+			return
+		}
+	})
 }
 
 // setupAPIv2Routes configures all v2 API routes
@@ -256,7 +279,7 @@ func (s *Server) handleV2GetCampaign(w http.ResponseWriter, r *http.Request) {
 
 	// Get additional details
 	stats, _ := s.services.Campaign.GetStatistics(r.Context(), campaignID)
-	jobs, _ := s.state.GetCampaignJobs(r.Context(), campaignID)
+	jobs, _ := s.state.db.(*storage.SQLiteStorage).GetCampaignJobs(r.Context(), campaignID)
 
 	response := map[string]any{
 		"campaign":   campaign,
@@ -377,7 +400,7 @@ func (s *Server) handleV2GetCampaignTimeline(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Add job events
-	jobs, _ := s.state.GetCampaignJobs(r.Context(), campaignID)
+	jobs, _ := s.state.db.(*storage.SQLiteStorage).GetCampaignJobs(r.Context(), campaignID)
 	for _, job := range jobs {
 		timeline = append(timeline, CampaignTimelineEntry{
 			Timestamp:   job.CreatedAt,
@@ -403,7 +426,9 @@ func (s *Server) handleV2GetCampaignTimeline(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Add crash events
-	crashGroups, _ := s.services.Deduplication.GetCrashGroups(r.Context(), campaignID)
+	// TODO: Implement deduplication service
+	// crashGroups, _ := s.services.Deduplication.GetCrashGroups(r.Context(), campaignID)
+	var crashGroups []*common.CrashGroup
 	for _, group := range crashGroups {
 		timeline = append(timeline, CampaignTimelineEntry{
 			Timestamp:   group.FirstSeen,
@@ -472,7 +497,7 @@ func (s *Server) handleV2StreamBotMetrics(w http.ResponseWriter, r *http.Request
 	botID := vars["id"]
 
 	// Verify bot exists
-	bot, err := s.services.Bot.GetBot(r.Context(), botID)
+	_, err := s.services.Bot.GetBot(r.Context(), botID)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusNotFound, "Bot not found", err)
 		return
@@ -525,7 +550,7 @@ func (s *Server) handleV2StreamBotMetrics(w http.ResponseWriter, r *http.Request
 			if currentBot != nil && currentBot.CurrentJob != nil {
 				job, _ := s.state.GetJob(r.Context(), *currentBot.CurrentJob)
 				if job != nil {
-					metrics.JobProgress = job.Progress
+					metrics.JobProgress = float64(job.Progress)
 				}
 			}
 
@@ -610,7 +635,7 @@ func (s *Server) handleV2ListJobs(w http.ResponseWriter, r *http.Request) {
 
 	if campaignID != "" {
 		// Get jobs for specific campaign
-		jobs, err := s.state.GetCampaignJobs(r.Context(), campaignID)
+		jobs, err := s.state.db.(*storage.SQLiteStorage).GetCampaignJobs(r.Context(), campaignID)
 		if err != nil {
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get campaign jobs", err)
 			return

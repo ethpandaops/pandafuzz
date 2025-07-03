@@ -18,10 +18,10 @@ import (
 
 // RealJobExecutor handles the actual execution of fuzzing jobs with log capture
 type RealJobExecutor struct {
-	config      *common.BotConfig
-	logger      *logrus.Logger
-	activeJobs  map[string]*RealJobExecution
-	mu          sync.RWMutex
+	config     *common.BotConfig
+	logger     *logrus.Logger
+	activeJobs map[string]*RealJobExecution
+	mu         sync.RWMutex
 }
 
 // RealJobExecution represents an active job execution with logging
@@ -58,20 +58,42 @@ func (rje *RealJobExecutor) ExecuteJob(job *common.Job) (success bool, message s
 
 	// Ensure work directory exists
 	rje.logger.WithFields(logrus.Fields{
-		"work_dir": job.WorkDir,
-		"target": job.Target,
+		"work_dir":    job.WorkDir,
+		"target":      job.Target,
+		"is_absolute": filepath.IsAbs(job.WorkDir),
+		"current_dir": func() string { pwd, _ := os.Getwd(); return pwd }(),
 	}).Info("Creating job work directory")
-	
+
+	// Check if work directory path is valid
+	if job.WorkDir == "" {
+		msg := "Work directory path is empty"
+		rje.logger.Error(msg)
+		return false, msg, fmt.Errorf("empty work directory")
+	}
+
+	// Get absolute path for logging
+	absWorkDir, _ := filepath.Abs(job.WorkDir)
+	rje.logger.WithField("absolute_work_dir", absWorkDir).Debug("Resolved absolute work directory")
+
 	if err := os.MkdirAll(job.WorkDir, 0755); err != nil {
 		msg := fmt.Sprintf("Failed to create work directory %s: %v", job.WorkDir, err)
-		rje.logger.WithError(err).WithField("work_dir", job.WorkDir).Error("Failed to create work directory")
-		
+		rje.logger.WithError(err).WithFields(logrus.Fields{
+			"work_dir":      job.WorkDir,
+			"abs_path":      absWorkDir,
+			"error_details": err.Error(),
+		}).Error("Failed to create work directory")
+
 		// Try to create parent directory first
 		parentDir := filepath.Dir(job.WorkDir)
 		if parentErr := os.MkdirAll(parentDir, 0755); parentErr != nil {
 			msg += fmt.Sprintf("; also failed to create parent directory %s: %v", parentDir, parentErr)
 		}
-		
+
+		// Check if it's a permission issue
+		if os.IsPermission(err) {
+			msg += "; permission denied - check that the bot has write access to the parent directory"
+		}
+
 		return false, msg, err
 	}
 
@@ -92,7 +114,7 @@ func (rje *RealJobExecutor) ExecuteJob(job *common.Job) (success bool, message s
 			tempFile.Close()
 			rje.logger.WithField("emergency_log", tempLogPath).Error("Created emergency log file")
 		}
-		
+
 		return false, fmt.Sprintf("Failed to create log file at %s: %v", logPath, err), err
 	}
 	defer logFile.Close()
@@ -115,7 +137,7 @@ func (rje *RealJobExecutor) ExecuteJob(job *common.Job) (success bool, message s
 	// Create execution context
 	var ctx context.Context
 	var cancel context.CancelFunc
-	
+
 	if job.Config.Timeout > 0 {
 		ctx, cancel = context.WithTimeout(context.Background(), job.Config.Timeout)
 	} else {
@@ -172,7 +194,7 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 
 	// Use the local binary path instead of job.Target which is on master
 	localBinaryPath := filepath.Join(job.WorkDir, "target_binary")
-	
+
 	// Debug: List directory contents
 	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("Checking work directory: %s", job.WorkDir))
 	if files, err := os.ReadDir(job.WorkDir); err == nil {
@@ -189,7 +211,7 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 	} else {
 		rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Failed to list directory: %v", err))
 	}
-	
+
 	// Check if target exists
 	if _, err := os.Stat(localBinaryPath); os.IsNotExist(err) {
 		msg := fmt.Sprintf("Target binary not found at local path: %s (original: %s)", localBinaryPath, job.Target)
@@ -197,7 +219,7 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 		execution.LogWriter.Flush()
 		return false, msg, nil
 	}
-	
+
 	// Check if target is executable
 	fileInfo, err := os.Stat(localBinaryPath)
 	if err != nil {
@@ -206,7 +228,7 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 		execution.LogWriter.Flush()
 		return false, msg, err
 	}
-	
+
 	// Check execution permissions
 	if fileInfo.Mode().Perm()&0111 == 0 {
 		msg := fmt.Sprintf("Target binary is not executable: %s (mode: %v)", localBinaryPath, fileInfo.Mode())
@@ -214,20 +236,20 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 		execution.LogWriter.Flush()
 		return false, msg, nil
 	}
-	
+
 	// Test if binary runs at all
 	rje.writeLog(execution.LogWriter, "info", "system", "Testing target binary...")
 	testCmd := exec.Command(localBinaryPath)
 	testCmd.Dir = job.WorkDir
 	testOutput, testErr := testCmd.CombinedOutput()
-	
+
 	if testErr != nil {
 		// Log the test execution error
 		rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Target binary test failed: %v", testErr))
 		if len(testOutput) > 0 {
 			rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Target binary output: %s", string(testOutput)))
 		}
-		
+
 		// Check if it's a crash vs other error
 		if exitErr, ok := testErr.(*exec.ExitError); ok {
 			if exitErr.ExitCode() < 0 {
@@ -236,15 +258,15 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 				rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Target binary exited with code: %d", exitErr.ExitCode()))
 			}
 		}
-		
+
 		// Still try to fuzz it - the fuzzer might handle it better
 		rje.writeLog(execution.LogWriter, "info", "system", "Proceeding with fuzzing despite test failure...")
 	}
 
 	// Prepare AFL++ command
 	args := []string{
-		"-i", filepath.Join(job.WorkDir, "input"),    // Input directory
-		"-o", filepath.Join(job.WorkDir, "output"),   // Output directory
+		"-i", filepath.Join(job.WorkDir, "input"), // Input directory
+		"-o", filepath.Join(job.WorkDir, "output"), // Output directory
 		"-t", fmt.Sprintf("%d", job.Config.Timeout/time.Millisecond), // Timeout in ms
 		"-m", fmt.Sprintf("%d", job.Config.MemoryLimit), // Memory limit
 	}
@@ -276,18 +298,18 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 
 	// Start command
 	rje.writeLog(execution.LogWriter, "info", "afl++", fmt.Sprintf("Starting AFL++ with command: afl-fuzz %s", strings.Join(args, " ")))
-	
+
 	if err := cmd.Start(); err != nil {
 		msg := fmt.Sprintf("Failed to start AFL++: %v", err)
 		rje.writeLog(execution.LogWriter, "error", "afl++", msg)
-		
+
 		// If afl-fuzz is not found, simulate execution
 		if strings.Contains(err.Error(), "executable file not found") {
 			rje.writeLog(execution.LogWriter, "warning", "afl++", "AFL++ not found, simulating execution")
 			execution.LogWriter.Flush()
 			return rje.simulateAFLExecution(execution)
 		}
-		
+
 		// Make sure logs are written
 		execution.LogWriter.Flush()
 		return false, msg, err
@@ -323,7 +345,7 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 			execution.LogWriter.Flush()
 			return false, msg, nil
 		}
-		
+
 		// Check if it's an exit error to get more details
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			msg := fmt.Sprintf("AFL++ execution failed with exit code %d", exitErr.ExitCode())
@@ -335,7 +357,7 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 			msg := fmt.Sprintf("AFL++ execution failed: %v", err)
 			rje.writeLog(execution.LogWriter, "error", "afl++", msg)
 		}
-		
+
 		execution.LogWriter.Flush()
 		return false, fmt.Sprintf("AFL++ execution failed: %v", err), nil
 	}
@@ -348,59 +370,59 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 // simulateAFLExecution simulates AFL++ execution when the binary is not available
 func (rje *RealJobExecutor) simulateAFLExecution(execution *RealJobExecution) (bool, string, error) {
 	job := execution.Job
-	
+
 	// Simulate AFL++ output
 	rje.writeLog(execution.LogWriter, "info", "afl++", "Starting simulated AFL++ fuzzing")
 	rje.writeLog(execution.LogWriter, "info", "afl++", fmt.Sprintf("Target: %s", job.Target))
-	
+
 	// Create fake input/output directories
 	inputDir := filepath.Join(job.WorkDir, "input")
 	outputDir := filepath.Join(job.WorkDir, "output")
 	os.MkdirAll(inputDir, 0755)
 	os.MkdirAll(outputDir, 0755)
-	
+
 	// Simulate fuzzing progress
 	duration := job.Config.Duration
 	if duration == 0 {
 		duration = 60 * time.Second
 	}
-	
+
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	
+
 	startTime := time.Now()
 	execCount := 0
-	
+
 	for {
 		select {
 		case <-execution.Context.Done():
 			msg := "Simulated AFL++ job cancelled"
 			rje.writeLog(execution.LogWriter, "warning", "afl++", msg)
 			return false, msg, nil
-			
+
 		case <-ticker.C:
 			elapsed := time.Since(startTime)
 			execCount += 1000 + (execCount * 100) // Simulate increasing exec speed
-			
+
 			rje.writeLog(execution.LogWriter, "info", "afl++", fmt.Sprintf(
 				"american fuzzy lop ++4.09c (default) [explore] -- %s",
 				job.Target,
 			))
 			rje.writeLog(execution.LogWriter, "info", "afl++", fmt.Sprintf(
-				"[*] Fuzzing test case #%d (0 crashes found, exec speed: %d/sec)", 
+				"[*] Fuzzing test case #%d (0 crashes found, exec speed: %d/sec)",
 				execCount, execCount/int(elapsed.Seconds()+1),
 			))
-			
+
 			// Simulate finding a crash occasionally
 			if execCount > 5000 && execCount%7000 == 0 {
-				rje.writeLog(execution.LogWriter, "warning", "afl++", 
+				rje.writeLog(execution.LogWriter, "warning", "afl++",
 					fmt.Sprintf("[!] Crash detected in test case #%d", execCount))
 			}
-			
+
 			if elapsed >= duration {
 				msg := fmt.Sprintf("Simulated AFL++ execution completed after %v", elapsed)
 				rje.writeLog(execution.LogWriter, "info", "afl++", msg)
-				rje.writeLog(execution.LogWriter, "info", "afl++", 
+				rje.writeLog(execution.LogWriter, "info", "afl++",
 					fmt.Sprintf("Total executions: %d, Crashes: %d", execCount, execCount/7000))
 				return true, msg, nil
 			}
@@ -420,7 +442,7 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 
 	// Use the local binary path instead of job.Target which is on master
 	localBinaryPath := filepath.Join(job.WorkDir, "target_binary")
-	
+
 	// Debug: List directory contents
 	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("Checking work directory: %s", job.WorkDir))
 	if files, err := os.ReadDir(job.WorkDir); err == nil {
@@ -437,7 +459,7 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 	} else {
 		rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Failed to list directory: %v", err))
 	}
-	
+
 	// Check if target exists
 	if _, err := os.Stat(localBinaryPath); os.IsNotExist(err) {
 		msg := fmt.Sprintf("Target binary not found at local path: %s (original: %s)", localBinaryPath, job.Target)
@@ -448,37 +470,37 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 
 	// Test if binary runs
 	rje.writeLog(execution.LogWriter, "info", "system", "Testing target binary...")
-	
+
 	// First check file details
 	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("Running diagnostic commands on binary: %s", localBinaryPath))
-	
+
 	// Check system architecture
 	unameCmd := exec.Command("uname", "-a")
 	unameOutput, _ := unameCmd.CombinedOutput()
 	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("System info: %s", strings.TrimSpace(string(unameOutput))))
-	
+
 	// Run file command to check binary type
 	fileCmd := exec.Command("file", localBinaryPath)
 	fileOutput, _ := fileCmd.CombinedOutput()
 	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("File type: %s", strings.TrimSpace(string(fileOutput))))
-	
+
 	// Run ldd to check dynamic libraries (if it's a dynamically linked binary)
 	lddCmd := exec.Command("ldd", localBinaryPath)
 	lddOutput, _ := lddCmd.CombinedOutput()
 	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("Dynamic libraries: %s", strings.TrimSpace(string(lddOutput))))
-	
+
 	// Check if running on Alpine Linux
 	isAlpine := false
 	if _, err := os.Stat("/etc/alpine-release"); err == nil {
 		isAlpine = true
 		rje.writeLog(execution.LogWriter, "info", "system", "Detected Alpine Linux environment")
 	}
-	
+
 	// Check if file exists using ls
 	lsCmd := exec.Command("ls", "-la", localBinaryPath)
 	lsOutput, _ := lsCmd.CombinedOutput()
 	rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("ls -la output: %s", strings.TrimSpace(string(lsOutput))))
-	
+
 	// For libfuzzer binaries on Alpine, test with -help=1 flag first
 	var testCmd *exec.Cmd
 	if isAlpine && strings.Contains(strings.ToLower(string(fileOutput)), "fuzzer") {
@@ -489,13 +511,13 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 	}
 	testCmd.Dir = job.WorkDir
 	testOutput, testErr := testCmd.CombinedOutput()
-	
+
 	if testErr != nil {
 		rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Target binary test failed: %v", testErr))
 		if len(testOutput) > 0 {
 			rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Target binary output: %s", string(testOutput)))
 		}
-		
+
 		// Try to get more specific error info
 		if exitErr, ok := testErr.(*exec.ExitError); ok {
 			rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Exit error details: ProcessState=%v, Stderr=%s", exitErr.ProcessState, string(exitErr.Stderr)))
@@ -505,7 +527,7 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 
 	// Prepare LibFuzzer arguments
 	args := []string{}
-	
+
 	// Add corpus directory if it exists
 	corpusDir := filepath.Join(job.WorkDir, "corpus")
 	if err := os.MkdirAll(corpusDir, 0755); err == nil {
@@ -527,14 +549,14 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 		duration = time.Duration(duration) * time.Second
 	}
 	args = append(args, fmt.Sprintf("-max_total_time=%d", int(duration.Seconds())))
-	
+
 	// Set artifact prefix to ensure crashes are written to the work directory
 	args = append(args, fmt.Sprintf("-artifact_prefix=%s/", job.WorkDir))
 
 	// Check if running on Alpine and apply workarounds
 	if _, err := os.Stat("/etc/alpine-release"); err == nil {
 		rje.writeLog(execution.LogWriter, "info", "system", "Applying Alpine Linux libfuzzer workarounds")
-		
+
 		// Set environment variables that might help with Alpine compatibility
 		os.Setenv("ASAN_OPTIONS", "allocator_may_return_null=1:symbolize=0")
 		os.Setenv("UBSAN_OPTIONS", "print_stacktrace=0")
@@ -543,7 +565,7 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 	// Create command
 	cmd := exec.CommandContext(execution.Context, localBinaryPath, args...)
 	cmd.Dir = job.WorkDir
-	
+
 	// Set environment for the command
 	cmd.Env = os.Environ()
 
@@ -566,20 +588,20 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 
 	// Start command
 	rje.writeLog(execution.LogWriter, "info", "libfuzzer", fmt.Sprintf("Starting LibFuzzer with command: %s %s", localBinaryPath, strings.Join(args, " ")))
-	
+
 	if err := cmd.Start(); err != nil {
 		msg := fmt.Sprintf("Failed to start LibFuzzer: %v", err)
 		rje.writeLog(execution.LogWriter, "error", "libfuzzer", msg)
-		
+
 		// If binary not found or not executable, or if we're on Alpine and it crashes immediately
-		if strings.Contains(err.Error(), "executable file not found") || 
-		   strings.Contains(err.Error(), "permission denied") ||
-		   (isAlpine && strings.Contains(err.Error(), "signal")) {
+		if strings.Contains(err.Error(), "executable file not found") ||
+			strings.Contains(err.Error(), "permission denied") ||
+			(isAlpine && strings.Contains(err.Error(), "signal")) {
 			rje.writeLog(execution.LogWriter, "warning", "libfuzzer", "LibFuzzer binary incompatible with environment, falling back to simulated execution")
 			execution.LogWriter.Flush()
 			return rje.simulateLibFuzzerExecution(execution, duration)
 		}
-		
+
 		execution.LogWriter.Flush()
 		return false, msg, err
 	}
@@ -614,24 +636,24 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 			execution.LogWriter.Flush()
 			return false, msg, nil
 		}
-		
+
 		// Check exit code
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode := exitErr.ExitCode()
-			
+
 			// LibFuzzer exit codes:
 			// 0 = success, no crashes
 			// 77 = crash found
 			// 78 = timeout
 			// -11 (SIGSEGV), -4 (SIGILL), -6 (SIGABRT) = LibFuzzer itself crashed
-			
+
 			if exitCode == 77 {
 				// Exit code 77 means LibFuzzer found a crash/bug
 				// This is considered "successful" fuzzing (the goal is to find bugs)
 				msg := "LibFuzzer successfully found a crash/bug!"
 				rje.writeLog(execution.LogWriter, "info", "libfuzzer", msg)
 				rje.writeLog(execution.LogWriter, "info", "libfuzzer", "Note: Finding crashes is the goal of fuzzing - this is a successful outcome")
-				
+
 				// Look for crash files in the working directory
 				crashFiles, err := rje.findCrashFiles(job.WorkDir)
 				if err != nil {
@@ -642,7 +664,7 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 						rje.writeLog(execution.LogWriter, "info", "libfuzzer", fmt.Sprintf("Crash file: %s", crashFile))
 					}
 				}
-				
+
 				execution.LogWriter.Flush()
 				return true, msg, nil
 			} else if exitCode == 78 {
@@ -670,7 +692,7 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 			msg := fmt.Sprintf("LibFuzzer execution failed: %v", err)
 			rje.writeLog(execution.LogWriter, "error", "libfuzzer", msg)
 		}
-		
+
 		execution.LogWriter.Flush()
 		return false, fmt.Sprintf("LibFuzzer execution failed: %v", err), nil
 	}
@@ -699,14 +721,14 @@ func (rje *RealJobExecutor) simulateLibFuzzerExecution(execution *RealJobExecuti
 			elapsed := time.Since(startTime)
 			iterations += 10000
 
-			rje.writeLog(execution.LogWriter, "info", "libfuzzer", 
-				fmt.Sprintf("#%d\tREAD units: %d exec/s: %d", 
+			rje.writeLog(execution.LogWriter, "info", "libfuzzer",
+				fmt.Sprintf("#%d\tREAD units: %d exec/s: %d",
 					iterations, iterations/1000, iterations/int(elapsed.Seconds()+1)))
 
 			if elapsed >= duration {
 				msg := fmt.Sprintf("LibFuzzer execution completed after %v", elapsed)
 				rje.writeLog(execution.LogWriter, "info", "libfuzzer", msg)
-				rje.writeLog(execution.LogWriter, "info", "libfuzzer", 
+				rje.writeLog(execution.LogWriter, "info", "libfuzzer",
 					fmt.Sprintf("Total iterations: %d", iterations))
 				return true, msg, nil
 			}
@@ -717,23 +739,23 @@ func (rje *RealJobExecutor) simulateLibFuzzerExecution(execution *RealJobExecuti
 // findCrashFiles finds crash files in the working directory
 func (rje *RealJobExecutor) findCrashFiles(workDir string) ([]string, error) {
 	var crashFiles []string
-	
+
 	entries, err := os.ReadDir(workDir)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
-		
+
 		// LibFuzzer crash files typically start with "crash-"
 		if strings.HasPrefix(entry.Name(), "crash-") {
 			crashFiles = append(crashFiles, filepath.Join(workDir, entry.Name()))
 		}
 	}
-	
+
 	return crashFiles, nil
 }
 
@@ -743,7 +765,7 @@ func (rje *RealJobExecutor) captureOutput(reader io.Reader, logWriter *bufio.Wri
 	// Set a larger buffer for long lines
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
-	
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		// Determine log level based on content
@@ -753,7 +775,7 @@ func (rje *RealJobExecutor) captureOutput(reader io.Reader, logWriter *bufio.Wri
 		} else if strings.Contains(strings.ToLower(line), "warning") || strings.Contains(line, "[!]") {
 			level = "warning"
 		}
-		
+
 		// Special handling for LibFuzzer crash detection
 		if strings.Contains(line, "Test unit written to") && strings.Contains(line, "crash-") {
 			level = "error"
@@ -765,7 +787,7 @@ func (rje *RealJobExecutor) captureOutput(reader io.Reader, logWriter *bufio.Wri
 		} else if strings.Contains(line, "libFuzzer: deadly signal") {
 			level = "error"
 		}
-		
+
 		rje.writeLog(logWriter, level, source, line)
 	}
 	if err := scanner.Err(); err != nil {
@@ -794,19 +816,19 @@ func (rje *RealJobExecutor) StopJob(jobID string) {
 
 	if execution, exists := rje.activeJobs[jobID]; exists {
 		rje.logger.WithField("job_id", jobID).Info("Stopping job execution")
-		
+
 		// Write stop message to log
 		if execution.LogWriter != nil {
 			rje.writeLog(execution.LogWriter, "info", "system", "Job execution stopped by user")
 			execution.LogWriter.Flush()
 		}
-		
+
 		// Cancel context and kill process
 		execution.Cancel()
 		if execution.Process != nil && execution.Process.Process != nil {
 			execution.Process.Process.Kill()
 		}
-		
+
 		execution.Status = "stopped"
 		execution.LastUpdate = time.Now()
 	}

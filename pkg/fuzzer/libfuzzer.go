@@ -328,6 +328,14 @@ func (lf *LibFuzzer) Start(ctx context.Context) error {
 	lf.status = StatusRunning
 	lf.stats.StartTime = time.Now()
 
+	// Log the command being executed for debugging
+	lf.logger.WithFields(logrus.Fields{
+		"command":      lf.config.Target,
+		"args":         args,
+		"work_dir":     lf.config.WorkDirectory,
+		"artifact_dir": lf.artifactDir,
+	}).Info("LibFuzzer process started")
+
 	// Start output monitoring
 	lf.wg.Add(2)
 	go lf.monitorOutput(stdout, "stdout")
@@ -816,15 +824,25 @@ func (lf *LibFuzzer) buildLibFuzzerArgs() []string {
 	// Corpus directory
 	args = append(args, lf.corpusDir)
 
-	// Add seed directory if different from corpus
+	// Add seed directory if different from corpus and it exists
 	if lf.config.SeedDirectory != "" && lf.config.SeedDirectory != lf.corpusDir {
-		args = append(args, lf.config.SeedDirectory)
+		// Only add seed directory if it exists
+		if _, err := os.Stat(lf.config.SeedDirectory); err == nil {
+			args = append(args, lf.config.SeedDirectory)
+		} else {
+			lf.logger.WithField("seed_dir", lf.config.SeedDirectory).Debug("Seed directory does not exist, skipping")
+		}
 	}
 
 	// Max total time
 	if lf.config.Duration > 0 {
 		seconds := int(lf.config.Duration.Seconds())
 		args = append(args, fmt.Sprintf("-max_total_time=%d", seconds))
+	} else if lf.config.MaxExecutions == 0 {
+		// If neither duration nor max executions is set, default to 60 seconds
+		// to prevent libfuzzer from running indefinitely or exiting immediately
+		lf.logger.Warn("No duration or max executions set, defaulting to 60 seconds")
+		args = append(args, "-max_total_time=60")
 	}
 
 	// Max runs
@@ -890,8 +908,12 @@ func (lf *LibFuzzer) monitorOutput(pipe io.Reader, name string) {
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		// Log output
-		lf.logger.WithField("stream", name).Debug(line)
+		// Log output - use Info for stderr to capture errors
+		if name == "stderr" {
+			lf.logger.WithField("stream", name).Info(line)
+		} else {
+			lf.logger.WithField("stream", name).Debug(line)
+		}
 
 		// Parse statistics from output
 		lf.parseStats(line)
@@ -903,7 +925,7 @@ func (lf *LibFuzzer) monitorOutput(pipe io.Reader, name string) {
 			lf.parseAndEmitCoverage(line)
 		}
 
-		if strings.Contains(line, "CRASH") || strings.Contains(line, "ERROR") {
+		if strings.Contains(line, "CRASH") || strings.Contains(line, "ERROR") || strings.Contains(line, "Test unit written to") {
 			lf.handleCrash(line)
 			// Detect and emit crash from output
 			lf.detectAndEmitCrash(line)
@@ -912,6 +934,10 @@ func (lf *LibFuzzer) monitorOutput(pipe io.Reader, name string) {
 		if strings.Contains(line, "DONE") || strings.Contains(line, "Done") {
 			lf.logger.Info("LibFuzzer completed execution")
 		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		lf.logger.WithError(err).WithField("stream", name).Error("Error reading fuzzer output")
 	}
 }
 
@@ -1027,14 +1053,46 @@ func (lf *LibFuzzer) handleCrash(line string) {
 func (lf *LibFuzzer) monitorProcess() {
 	defer lf.wg.Done()
 
+	// Log that we're monitoring the process
+	lf.logger.WithField("pid", lf.cmd.Process.Pid).Info("Monitoring LibFuzzer process")
+
 	// Wait for process to exit
 	err := lf.cmd.Wait()
+
+	// Log process exit immediately
+	if err != nil {
+		lf.logger.WithError(err).WithField("pid", lf.cmd.Process.Pid).Error("LibFuzzer process exited with error")
+	} else {
+		lf.logger.WithField("pid", lf.cmd.Process.Pid).Info("LibFuzzer process exited cleanly")
+	}
 
 	lf.mu.Lock()
 	defer lf.mu.Unlock()
 
+	// Check if this was a normal exit due to finding crashes
+	// LibFuzzer exits with non-zero status when it finds crashes, which is expected behavior
+	exitedDueToCrash := false
 	if err != nil {
-		lf.logger.WithError(err).Warn("LibFuzzer process exited with error")
+		// Check if crashes were found by looking at the artifact directory
+		if files, readErr := os.ReadDir(lf.artifactDir); readErr == nil {
+			for _, file := range files {
+				if strings.HasPrefix(file.Name(), "crash-") {
+					exitedDueToCrash = true
+					lf.logger.WithFields(logrus.Fields{
+						"crash_file": file.Name(),
+						"exit_error": err.Error(),
+					}).Info("LibFuzzer found crash and exited (expected behavior)")
+					break
+				}
+			}
+		} else {
+			lf.logger.WithError(readErr).WithField("artifact_dir", lf.artifactDir).Warn("Failed to check artifact directory")
+		}
+	}
+
+	if err != nil && !exitedDueToCrash {
+		// This is an actual error, not a crash detection
+		lf.logger.WithError(err).Error("LibFuzzer process exited with error (not a crash)")
 		lf.status = StatusError
 		if lf.eventHandler != nil {
 			lf.eventHandler.OnError(lf, err)
@@ -1042,13 +1100,21 @@ func (lf *LibFuzzer) monitorProcess() {
 		// Emit error event through base fuzzer
 		lf.EmitErrorEvent(lf.ctx, lf.config.Target, err)
 	} else {
+		// Either no error or exited due to crash (which is success)
 		lf.status = StatusCompleted
+		if exitedDueToCrash {
+			lf.logger.Info("LibFuzzer completed successfully (found crashes)")
+		} else {
+			lf.logger.Info("LibFuzzer completed successfully (no crashes)")
+		}
 	}
 
 	// Notify completion
 	if lf.eventHandler != nil {
 		reason := "completed"
-		if lf.ctx.Err() != nil {
+		if exitedDueToCrash {
+			reason = "completed_with_crashes"
+		} else if lf.ctx.Err() != nil {
 			reason = "cancelled"
 		}
 		lf.eventHandler.OnStop(lf, reason)
@@ -1056,7 +1122,9 @@ func (lf *LibFuzzer) monitorProcess() {
 
 	// Emit stopped event through base fuzzer
 	reason := "completed"
-	if lf.ctx.Err() != nil {
+	if exitedDueToCrash {
+		reason = "completed_with_crashes"
+	} else if lf.ctx.Err() != nil {
 		reason = "cancelled"
 	}
 	lf.EmitStoppedEvent(context.Background(), lf.config.Target, reason)

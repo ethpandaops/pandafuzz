@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -79,14 +78,8 @@ func (cs *corpusService) AddFile(ctx context.Context, file *common.CorpusFile) e
 		return fmt.Errorf("failed to store corpus file metadata: %w", err)
 	}
 
-	// Store actual file content if we have file storage
-	if cs.fileStorage != nil {
-		filePath := cs.getCorpusFilePath(file.CampaignID, file.Hash)
-		if err := cs.fileStorage.Store(ctx, filePath, file); err != nil {
-			cs.logger.WithError(err).Error("Failed to store corpus file content")
-			// Don't fail the operation, metadata is stored
-		}
-	}
+	// Note: File content should be stored separately using StoreFileContent method
+	// This method only handles metadata
 
 	// Track evolution if this file increased coverage
 	if file.NewCoverage > 0 {
@@ -104,6 +97,20 @@ func (cs *corpusService) AddFile(ctx context.Context, file *common.CorpusFile) e
 		"generation":   file.Generation,
 		"is_seed":      file.IsSeed,
 	}).Info("Added corpus file")
+
+	return nil
+}
+
+// StoreFileContent stores the actual content of a corpus file
+func (cs *corpusService) StoreFileContent(ctx context.Context, campaignID, hash string, data []byte) error {
+	if cs.fileStorage == nil {
+		return fmt.Errorf("file storage not configured")
+	}
+
+	filePath := cs.getCorpusFilePath(campaignID, hash)
+	if err := cs.fileStorage.SaveFile(ctx, filePath, data); err != nil {
+		return fmt.Errorf("failed to store corpus file content: %w", err)
+	}
 
 	return nil
 }
@@ -347,7 +354,7 @@ func (cs *corpusService) LoadCorpusFile(ctx context.Context, campaignID, hash st
 	filePath := cs.getCorpusFilePath(campaignID, hash)
 
 	// Try to load from file storage
-	data, err := cs.fileStorage.Load(ctx, filePath)
+	data, err := cs.fileStorage.ReadFile(ctx, filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load corpus file: %w", err)
 	}

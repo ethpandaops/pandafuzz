@@ -80,7 +80,7 @@ func (s *jobService) CreateJob(ctx context.Context, req CreateJobRequest) (*comm
 		Status:    common.JobStatusPending,
 		CreatedAt: now,
 		TimeoutAt: now.Add(duration),
-		WorkDir:   fmt.Sprintf("/tmp/pandafuzz/job_%s", jobID),
+		WorkDir:   fmt.Sprintf("job_%s", jobID), // Use relative path that bot will resolve
 		Config:    req.Config,
 		Progress:  0, // Initialize progress to 0
 	}

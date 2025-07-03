@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
@@ -11,7 +10,7 @@ import (
 
 // AddCorpusFile adds a new corpus file to the campaign
 func (s *SQLiteStorage) AddCorpusFile(ctx context.Context, cf *common.CorpusFile) error {
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO campaign_corpus_files (
 				id, campaign_id, job_id, bot_id, filename, hash, size,
@@ -27,7 +26,7 @@ func (s *SQLiteStorage) AddCorpusFile(ctx context.Context, cf *common.CorpusFile
 func (s *SQLiteStorage) GetCorpusFiles(ctx context.Context, campaignID string) ([]*common.CorpusFile, error) {
 	var files []*common.CorpusFile
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		rows, err := s.db.QueryContext(ctx, `
 			SELECT id, campaign_id, job_id, bot_id, filename, hash, size,
 				coverage, new_coverage, parent_hash, generation, created_at, synced_at, is_seed
@@ -70,7 +69,7 @@ func (s *SQLiteStorage) GetCorpusFileByHash(ctx context.Context, hash string) (*
 	cf := &common.CorpusFile{}
 	var syncedAt sql.NullTime
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		return s.db.QueryRowContext(ctx, `
 			SELECT id, campaign_id, job_id, bot_id, filename, hash, size,
 				coverage, new_coverage, parent_hash, generation, created_at, synced_at, is_seed
@@ -98,7 +97,7 @@ func (s *SQLiteStorage) GetCorpusFileByHash(ctx context.Context, hash string) (*
 
 // UpdateCorpusCoverage updates the coverage information for a corpus file
 func (s *SQLiteStorage) UpdateCorpusCoverage(ctx context.Context, id string, coverage, newCoverage int64) error {
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		result, err := s.db.ExecContext(ctx, `
 			UPDATE campaign_corpus_files
 			SET coverage = ?, new_coverage = ?
@@ -123,7 +122,7 @@ func (s *SQLiteStorage) UpdateCorpusCoverage(ctx context.Context, id string, cov
 
 // RecordCorpusEvolution records a snapshot of corpus evolution
 func (s *SQLiteStorage) RecordCorpusEvolution(ctx context.Context, ce *common.CorpusEvolution) error {
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO corpus_evolution (
 				campaign_id, timestamp, total_files, total_size,
@@ -153,7 +152,7 @@ func (s *SQLiteStorage) GetCorpusEvolution(ctx context.Context, campaignID strin
 		args = append(args, limit)
 	}
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return err
@@ -218,7 +217,7 @@ func (s *SQLiteStorage) GetUnsyncedCorpusFiles(ctx context.Context, campaignID, 
 
 	query += " ORDER BY cf.new_coverage DESC, cf.created_at ASC LIMIT 100"
 
-	err = s.ExecuteWithRetry(ctx, func() error {
+	err = ExecuteWithRetry(ctx, s.config, func() error {
 		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return err
@@ -256,7 +255,7 @@ func (s *SQLiteStorage) MarkCorpusFilesSynced(ctx context.Context, fileIDs []str
 		return nil
 	}
 
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -299,9 +298,9 @@ func (s *SQLiteStorage) MarkCorpusFilesSynced(ctx context.Context, fileIDs []str
 func (s *SQLiteStorage) GetCorpusStats(ctx context.Context, campaignID string) (map[string]interface{}, error) {
 	stats := make(map[string]interface{})
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		// Basic corpus statistics
-		err := s.db.QueryRowContext(ctx, `
+		row := s.db.QueryRowContext(ctx, `
 			SELECT 
 				COUNT(*) as total_files,
 				COALESCE(SUM(size), 0) as total_size,
@@ -311,19 +310,23 @@ func (s *SQLiteStorage) GetCorpusStats(ctx context.Context, campaignID string) (
 				MAX(generation) as max_generation
 			FROM campaign_corpus_files
 			WHERE campaign_id = ?
-		`, campaignID).Scan(
-			&stats["total_files"],
-			&stats["total_size"],
-			&stats["max_coverage"],
-			&stats["total_new_coverage"],
-			&stats["unique_parents"],
-			&stats["max_generation"])
+		`, campaignID)
+
+		var totalFiles, totalSize, maxCoverage, totalNewCoverage, uniqueParents, maxGeneration int64
+		err := row.Scan(&totalFiles, &totalSize, &maxCoverage, &totalNewCoverage, &uniqueParents, &maxGeneration)
 		if err != nil {
 			return err
 		}
 
+		stats["total_files"] = totalFiles
+		stats["total_size"] = totalSize
+		stats["max_coverage"] = maxCoverage
+		stats["total_new_coverage"] = totalNewCoverage
+		stats["unique_parents"] = uniqueParents
+		stats["max_generation"] = maxGeneration
+
 		// Files by generation
-		generationRows, err := s.db.QueryContext(ctx, `
+		rows, err := s.db.QueryContext(ctx, `
 			SELECT generation, COUNT(*) as count
 			FROM campaign_corpus_files
 			WHERE campaign_id = ?
@@ -333,12 +336,12 @@ func (s *SQLiteStorage) GetCorpusStats(ctx context.Context, campaignID string) (
 		if err != nil {
 			return err
 		}
-		defer generationRows.Close()
+		defer rows.Close()
 
 		generations := make(map[int]int)
-		for generationRows.Next() {
+		for rows.Next() {
 			var gen, count int
-			if err := generationRows.Scan(&gen, &count); err != nil {
+			if err := rows.Scan(&gen, &count); err != nil {
 				return err
 			}
 			generations[gen] = count
@@ -383,7 +386,7 @@ func (s *SQLiteStorage) GetCorpusStats(ctx context.Context, campaignID string) (
 func (s *SQLiteStorage) GetCoverageIncreasingFiles(ctx context.Context, campaignID string) ([]*common.CorpusFile, error) {
 	var files []*common.CorpusFile
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		rows, err := s.db.QueryContext(ctx, `
 			SELECT id, campaign_id, job_id, bot_id, filename, hash, size,
 				coverage, new_coverage, parent_hash, generation, created_at, synced_at, is_seed

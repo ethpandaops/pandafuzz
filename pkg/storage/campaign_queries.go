@@ -24,7 +24,7 @@ func (s *SQLiteStorage) CreateCampaign(ctx context.Context, c *common.Campaign) 
 	}
 
 	// Execute insert with retry logic
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO campaigns (
 				id, name, description, status, target_binary, binary_hash,
@@ -45,7 +45,7 @@ func (s *SQLiteStorage) GetCampaign(ctx context.Context, id string) (*common.Cam
 	var maxDurationSeconds sql.NullInt64
 	var jobTemplateJSON, tagsJSON string
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		return s.db.QueryRowContext(ctx, `
 			SELECT id, name, description, status, target_binary, binary_hash,
 				created_at, updated_at, completed_at, auto_restart, max_duration,
@@ -110,7 +110,7 @@ func (s *SQLiteStorage) ListCampaigns(ctx context.Context, limit, offset int, st
 	}
 
 	var campaigns []*common.Campaign
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return err
@@ -209,7 +209,7 @@ func (s *SQLiteStorage) UpdateCampaign(ctx context.Context, id string, updates m
 	query += " WHERE id = ?"
 	args = append(args, id)
 
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		result, err := s.db.ExecContext(ctx, query, args...)
 		if err != nil {
 			return err
@@ -230,7 +230,7 @@ func (s *SQLiteStorage) UpdateCampaign(ctx context.Context, id string, updates m
 
 // DeleteCampaign deletes a campaign and all related data
 func (s *SQLiteStorage) DeleteCampaign(ctx context.Context, id string) error {
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		result, err := s.db.ExecContext(ctx, "DELETE FROM campaigns WHERE id = ?", id)
 		if err != nil {
 			return err
@@ -253,7 +253,7 @@ func (s *SQLiteStorage) DeleteCampaign(ctx context.Context, id string) error {
 func (s *SQLiteStorage) GetCampaignJobs(ctx context.Context, campaignID string) ([]*common.Job, error) {
 	var jobs []*common.Job
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		rows, err := s.db.QueryContext(ctx, `
 			SELECT j.id, j.name, j.target, j.fuzzer, j.status, j.assigned_bot,
 				j.created_at, j.started_at, j.completed_at, j.timeout_at, j.work_dir, j.config, j.progress
@@ -283,7 +283,7 @@ func (s *SQLiteStorage) GetCampaignJobs(ctx context.Context, campaignID string) 
 
 // LinkJobToCampaign associates a job with a campaign
 func (s *SQLiteStorage) LinkJobToCampaign(ctx context.Context, campaignID, jobID string) error {
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO campaign_jobs (campaign_id, job_id) VALUES (?, ?)
 		`, campaignID, jobID)
@@ -299,7 +299,7 @@ func (s *SQLiteStorage) GetCampaignStatistics(ctx context.Context, campaignID st
 	}
 
 	// Get job statistics
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		return s.db.QueryRowContext(ctx, `
 			SELECT 
 				COUNT(*) as total_jobs,
@@ -314,7 +314,7 @@ func (s *SQLiteStorage) GetCampaignStatistics(ctx context.Context, campaignID st
 	}
 
 	// Get crash statistics
-	err = s.ExecuteWithRetry(ctx, func() error {
+	err = ExecuteWithRetry(ctx, s.config, func() error {
 		return s.db.QueryRowContext(ctx, `
 			SELECT 
 				COUNT(*) as total_crashes,
@@ -328,7 +328,7 @@ func (s *SQLiteStorage) GetCampaignStatistics(ctx context.Context, campaignID st
 	}
 
 	// Get coverage statistics
-	err = s.ExecuteWithRetry(ctx, func() error {
+	err = ExecuteWithRetry(ctx, s.config, func() error {
 		return s.db.QueryRowContext(ctx, `
 			SELECT 
 				COALESCE(MAX(edges), 0) as total_coverage
@@ -342,7 +342,7 @@ func (s *SQLiteStorage) GetCampaignStatistics(ctx context.Context, campaignID st
 	}
 
 	// Get corpus size
-	err = s.ExecuteWithRetry(ctx, func() error {
+	err = ExecuteWithRetry(ctx, s.config, func() error {
 		return s.db.QueryRowContext(ctx, `
 			SELECT 
 				COALESCE(SUM(size), 0) as corpus_size

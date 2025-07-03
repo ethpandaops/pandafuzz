@@ -162,23 +162,6 @@ func (s *Server) setupAPIRoutes(router *mux.Router) {
 	s.logger.Info("API v1 routes configured")
 }
 
-// setupAPIv2Routes configures API v2 routes
-func (s *Server) setupAPIv2Routes(router *mux.Router) {
-	// All v1 routes are available in v2
-	s.setupAPIRoutes(router)
-
-	// Additional v2 routes
-	router.HandleFunc("/campaigns/{id}/timeline", s.handleV2GetCampaignTimeline).Methods("GET")
-	router.HandleFunc("/bots/{id}/metrics/history", s.handleV2GetBotMetricsHistory).Methods("GET")
-	router.HandleFunc("/jobs/{id}/progress", s.handleV2StreamJobProgress).Methods("GET")
-	router.HandleFunc("/system/maintenance", s.handleV2SystemMaintenance).Methods("POST")
-
-	// WebSocket endpoint
-	router.HandleFunc("/ws", s.handleWebSocket).Methods("GET")
-
-	s.logger.Info("API v2 routes configured")
-}
-
 // setupStaticFileServing configures static file serving for the web UI
 func (s *Server) setupStaticFileServing() {
 	// Check if web UI directory exists

@@ -1585,7 +1585,7 @@ func (s *SQLiteStorage) CreateJob(ctx context.Context, job *common.Job) error {
 		return fmt.Errorf("failed to marshal job config: %w", err)
 	}
 
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO jobs (
 				id, name, target, fuzzer, status, assigned_bot,
@@ -1610,7 +1610,7 @@ func (s *SQLiteStorage) GetJob(ctx context.Context, id string) (*common.Job, err
 	var configJSON sql.NullString
 	var progress sql.NullInt64
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		return s.db.QueryRowContext(ctx, query, id).Scan(
 			&job.ID, &job.Name, &job.Target, &job.Fuzzer, &job.Status, &assignedBot,
 			&job.CreatedAt, &startedAt, &completedAt, &job.TimeoutAt, &job.WorkDir,
@@ -1686,7 +1686,7 @@ func (s *SQLiteStorage) UpdateJob(ctx context.Context, id string, updates map[st
 	query += " WHERE id = ?"
 	args = append(args, id)
 
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		result, err := s.db.ExecContext(ctx, query, args...)
 		if err != nil {
 			return err
@@ -1729,7 +1729,7 @@ func (s *SQLiteStorage) ListJobs(ctx context.Context, limit, offset int, status 
 	}
 
 	var jobs []*common.Job
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return err
@@ -1752,7 +1752,7 @@ func (s *SQLiteStorage) ListJobs(ctx context.Context, limit, offset int, status 
 
 // DeleteJob deletes a job from the database
 func (s *SQLiteStorage) DeleteJob(ctx context.Context, id string) error {
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		result, err := s.db.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", id)
 		if err != nil {
 			return err
@@ -1773,7 +1773,7 @@ func (s *SQLiteStorage) DeleteJob(ctx context.Context, id string) error {
 
 // CreateCrash creates a new crash result in the database
 func (s *SQLiteStorage) CreateCrash(ctx context.Context, crash *common.CrashResult) error {
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO crashes (
 				id, job_id, bot_id, hash, file_path, type, signal, exit_code,
@@ -1810,7 +1810,7 @@ func (s *SQLiteStorage) ListCrashes(ctx context.Context, jobID string, limit, of
 	}
 
 	var crashes []*common.CrashResult
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return err
@@ -1833,7 +1833,7 @@ func (s *SQLiteStorage) ListCrashes(ctx context.Context, jobID string, limit, of
 
 // CreateCoverage creates a new coverage result
 func (s *SQLiteStorage) CreateCoverage(ctx context.Context, coverage *common.CoverageResult) error {
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO coverage (
 				id, job_id, bot_id, edges, new_edges, timestamp, exec_count
@@ -1848,7 +1848,7 @@ func (s *SQLiteStorage) CreateCoverage(ctx context.Context, coverage *common.Cov
 func (s *SQLiteStorage) GetLatestCoverage(ctx context.Context, jobID string) (*common.CoverageResult, error) {
 	var coverage common.CoverageResult
 
-	err := s.ExecuteWithRetry(ctx, func() error {
+	err := ExecuteWithRetry(ctx, s.config, func() error {
 		return s.db.QueryRowContext(ctx, `
 			SELECT id, job_id, bot_id, edges, new_edges, timestamp, exec_count
 			FROM coverage
@@ -1878,7 +1878,7 @@ func (s *SQLiteStorage) RecordCorpusUpdate(ctx context.Context, update *common.C
 		return fmt.Errorf("failed to marshal files: %w", err)
 	}
 
-	return s.ExecuteWithRetry(ctx, func() error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO corpus_updates (
 				id, job_id, bot_id, files, timestamp, total_size
@@ -1959,14 +1959,4 @@ func (s *SQLiteStorage) Cleanup(ctx context.Context) error {
 	// Clean up old data based on configured retention
 	// This is a placeholder - implement based on retention policy
 	return nil
-}
-
-// Ping checks database connectivity
-func (s *SQLiteStorage) Ping(ctx context.Context) error {
-	return s.db.PingContext(ctx)
-}
-
-// Close closes the database connection
-func (s *SQLiteStorage) Close() error {
-	return s.db.Close()
 }

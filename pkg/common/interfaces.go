@@ -39,6 +39,11 @@ type FileStorage interface {
 	FileExists(ctx context.Context, path string) (bool, error)
 }
 
+// FuzzerEventHandler defines the interface for handling fuzzer events
+type FuzzerEventHandler interface {
+	HandleEvent(ctx context.Context, event FuzzerEvent) error
+}
+
 // WSHub defines the interface for WebSocket hub
 type WSHub interface {
 	BroadcastCampaignUpdate(campaignID string, update interface{})
@@ -107,6 +112,7 @@ type Storage interface {
 	CreateCrash(ctx context.Context, crash *CrashResult) error
 	GetCrash(ctx context.Context, id string) (*CrashResult, error)
 	ListCrashes(ctx context.Context, jobID string, limit, offset int) ([]*CrashResult, error)
+	UpdateCrashWithCampaign(ctx context.Context, crashID, campaignID string) error
 
 	CreateCoverage(ctx context.Context, coverage *CoverageResult) error
 	GetLatestCoverage(ctx context.Context, jobID string) (*CoverageResult, error)
@@ -125,12 +131,4 @@ type Storage interface {
 	// Health check
 	Ping(ctx context.Context) error
 	Close() error
-}
-
-// Transaction defines the interface for database transactions
-type Transaction interface {
-	Commit() error
-	Rollback() error
-	// All Storage methods should be available on Transaction as well
-	Storage
 }

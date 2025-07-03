@@ -339,6 +339,7 @@ const (
 	CampaignStatusCompleted CampaignStatus = "completed"
 	CampaignStatusFailed    CampaignStatus = "failed"
 	CampaignStatusPaused    CampaignStatus = "paused"
+	CampaignStatusCancelled CampaignStatus = "cancelled"
 )
 
 // StackFrame represents a single frame in a stack trace
