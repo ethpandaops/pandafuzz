@@ -39,3 +39,19 @@ func NewRetryExhaustedError(operation string, attempts int, lastError error) *Re
 		LastError: lastError,
 	}
 }
+
+// Campaign-related errors
+var (
+	ErrCampaignNotFound     = fmt.Errorf("campaign not found")
+	ErrCampaignRunning      = fmt.Errorf("campaign is already running")
+	ErrInvalidStackTrace    = fmt.Errorf("invalid stack trace format")
+	ErrCorpusFileTooLarge   = fmt.Errorf("corpus file exceeds size limit")
+	ErrDuplicateCorpusFile  = fmt.Errorf("corpus file already exists")
+	ErrCampaignCompleted    = fmt.Errorf("campaign is already completed")
+	ErrCampaignPaused       = fmt.Errorf("campaign is paused")
+	ErrNoCampaignJobs       = fmt.Errorf("no jobs found for campaign")
+	ErrInvalidCampaignState = fmt.Errorf("invalid campaign state transition")
+	ErrCrashGroupNotFound   = fmt.Errorf("crash group not found")
+	ErrCorpusFileNotFound   = fmt.Errorf("corpus file not found")
+	ErrBinaryHashMismatch   = fmt.Errorf("binary hash mismatch between campaigns")
+)

@@ -7,6 +7,7 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
+	"github.com/ethpandaops/pandafuzz/pkg/storage"
 	"github.com/sirupsen/logrus"
 )
 
@@ -73,31 +74,37 @@ func (rm *RecoveryManager) RecoverOnStartup(ctx context.Context) error {
 			return fmt.Errorf("failed to load persisted state: %w", err)
 		}
 
-		// Step 2: Check for orphaned jobs (assigned but bot offline)
+		// Step 2: Recover campaigns
+		rm.logger.Info("Recovering campaigns")
+		if err := rm.recoverCampaigns(ctx); err != nil {
+			return fmt.Errorf("failed to recover campaigns: %w", err)
+		}
+
+		// Step 3: Check for orphaned jobs (assigned but bot offline)
 		rm.logger.Info("Recovering orphaned jobs")
 		if err := rm.recoverOrphanedJobs(ctx); err != nil {
 			return fmt.Errorf("failed to recover orphaned jobs: %w", err)
 		}
 
-		// Step 3: Reset timed-out bots to idle
+		// Step 4: Reset timed-out bots to idle
 		rm.logger.Info("Resetting timed-out bots")
 		if err := rm.resetTimedOutBots(ctx); err != nil {
 			return fmt.Errorf("failed to reset timed-out bots: %w", err)
 		}
 
-		// Step 4: Resume pending jobs
+		// Step 5: Resume pending jobs
 		rm.logger.Info("Resuming pending jobs")
 		if err := rm.resumePendingJobs(ctx); err != nil {
 			return fmt.Errorf("failed to resume pending jobs: %w", err)
 		}
 
-		// Step 5: Cleanup stale data
+		// Step 6: Cleanup stale data
 		rm.logger.Info("Cleaning up stale data")
 		if err := rm.cleanupStaleData(ctx); err != nil {
 			return fmt.Errorf("failed to cleanup stale data: %w", err)
 		}
 
-		// Step 6: Validate system state
+		// Step 7: Validate system state
 		rm.logger.Info("Validating system state")
 		if err := rm.validateSystemState(ctx); err != nil {
 			return fmt.Errorf("system state validation failed: %w", err)
@@ -534,4 +541,71 @@ func (rm *RecoveryManager) GetStats() RecoveryStats {
 // ResetStats resets recovery statistics
 func (rm *RecoveryManager) ResetStats() {
 	rm.stats = RecoveryStats{}
+}
+
+// recoverCampaigns recovers campaign states on startup
+func (rm *RecoveryManager) recoverCampaigns(ctx context.Context) error {
+	// Get campaign manager if available
+	campaignManager := rm.state.GetCampaignManager()
+	if campaignManager == nil {
+		rm.logger.Debug("No campaign manager configured, skipping campaign recovery")
+		return nil
+	}
+
+	// Load campaigns from database using storage queries
+	if sqliteDB, ok := rm.state.db.(*storage.SQLiteStorage); ok {
+		campaigns, err := sqliteDB.ListCampaigns(ctx, 1000, 0, "")
+		if err != nil {
+			return fmt.Errorf("failed to list campaigns: %w", err)
+		}
+
+		recoveredCount := 0
+		for _, campaign := range campaigns {
+			// Recover running campaigns
+			if campaign.Status == common.CampaignStatusRunning {
+				// Check if all jobs are complete
+				jobs, err := sqliteDB.GetCampaignJobs(ctx, campaign.ID)
+				if err != nil {
+					rm.logger.WithError(err).WithField("campaign_id", campaign.ID).Error("Failed to get campaign jobs")
+					continue
+				}
+
+				allComplete := true
+				for _, job := range jobs {
+					if job.Status != common.JobStatusCompleted && job.Status != common.JobStatusFailed {
+						allComplete = false
+						break
+					}
+				}
+
+				if allComplete {
+					// Mark campaign as completed
+					campaign.Status = common.CampaignStatusCompleted
+					now := time.Now()
+					campaign.CompletedAt = &now
+					if err := sqliteDB.UpdateCampaign(ctx, campaign.ID, map[string]interface{}{
+						"status":       campaign.Status,
+						"completed_at": campaign.CompletedAt,
+					}); err != nil {
+						rm.logger.WithError(err).WithField("campaign_id", campaign.ID).Error("Failed to update campaign status")
+					} else {
+						rm.logger.WithField("campaign_id", campaign.ID).Info("Campaign marked as completed during recovery")
+						recoveredCount++
+					}
+				}
+			}
+
+			// Handle auto-restart campaigns
+			if campaign.AutoRestart && campaign.Status == common.CampaignStatusCompleted {
+				// In a real implementation, trigger restart through campaign service
+				rm.logger.WithField("campaign_id", campaign.ID).Info("Campaign eligible for auto-restart")
+			}
+		}
+
+		if recoveredCount > 0 {
+			rm.logger.WithField("count", recoveredCount).Info("Campaigns recovered")
+		}
+	}
+
+	return nil
 }

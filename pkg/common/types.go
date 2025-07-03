@@ -310,3 +310,161 @@ type CleanupPolicy struct {
 	MaxDiskUsage    int64         `json:"max_disk_usage" yaml:"max_disk_usage"`     // Maximum disk usage in bytes
 	CleanupInterval time.Duration `json:"cleanup_interval" yaml:"cleanup_interval"` // How often cleanup runs
 }
+
+// Campaign represents a fuzzing campaign that groups related jobs
+type Campaign struct {
+	ID           string         `json:"id" db:"id"`
+	Name         string         `json:"name" db:"name"`
+	Description  string         `json:"description" db:"description"`
+	Status       CampaignStatus `json:"status" db:"status"`
+	TargetBinary string         `json:"target_binary" db:"target_binary"`
+	BinaryHash   string         `json:"binary_hash" db:"binary_hash"`
+	CreatedAt    time.Time      `json:"created_at" db:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at" db:"updated_at"`
+	CompletedAt  *time.Time     `json:"completed_at" db:"completed_at"`
+	AutoRestart  bool           `json:"auto_restart" db:"auto_restart"`
+	MaxDuration  time.Duration  `json:"max_duration" db:"max_duration"`
+	MaxJobs      int            `json:"max_jobs" db:"max_jobs"`
+	JobTemplate  JobConfig      `json:"job_template" db:"job_template"`
+	SharedCorpus bool           `json:"shared_corpus" db:"shared_corpus"`
+	Tags         []string       `json:"tags" db:"tags"`
+}
+
+// CampaignStatus represents the status of a campaign
+type CampaignStatus string
+
+const (
+	CampaignStatusPending   CampaignStatus = "pending"
+	CampaignStatusRunning   CampaignStatus = "running"
+	CampaignStatusCompleted CampaignStatus = "completed"
+	CampaignStatusFailed    CampaignStatus = "failed"
+	CampaignStatusPaused    CampaignStatus = "paused"
+)
+
+// StackFrame represents a single frame in a stack trace
+type StackFrame struct {
+	Function string `json:"function" db:"function"`
+	File     string `json:"file" db:"file"`
+	Line     int    `json:"line" db:"line"`
+	Offset   uint64 `json:"offset" db:"offset"`
+}
+
+// StackTrace represents a parsed stack trace for crash deduplication
+type StackTrace struct {
+	Frames   []StackFrame `json:"frames" db:"frames"`
+	TopNHash string       `json:"top_n_hash" db:"top_n_hash"` // Hash of top N frames
+	FullHash string       `json:"full_hash" db:"full_hash"`   // Hash of complete trace
+	RawTrace string       `json:"raw_trace" db:"raw_trace"`
+}
+
+// CorpusFile represents a file in the fuzzing corpus
+type CorpusFile struct {
+	ID          string     `json:"id" db:"id"`
+	CampaignID  string     `json:"campaign_id" db:"campaign_id"`
+	JobID       string     `json:"job_id" db:"job_id"`
+	BotID       string     `json:"bot_id" db:"bot_id"`
+	Filename    string     `json:"filename" db:"filename"`
+	Hash        string     `json:"hash" db:"hash"`
+	Size        int64      `json:"size" db:"size"`
+	Coverage    int64      `json:"coverage" db:"coverage"`         // Edges covered
+	NewCoverage int64      `json:"new_coverage" db:"new_coverage"` // New edges this file found
+	ParentHash  string     `json:"parent_hash" db:"parent_hash"`   // File this was mutated from
+	Generation  int        `json:"generation" db:"generation"`     // Mutation generation
+	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+	SyncedAt    *time.Time `json:"synced_at" db:"synced_at"`
+	IsSeed      bool       `json:"is_seed" db:"is_seed"`
+}
+
+// CorpusEvolution tracks corpus growth over time
+type CorpusEvolution struct {
+	CampaignID    string    `json:"campaign_id" db:"campaign_id"`
+	Timestamp     time.Time `json:"timestamp" db:"timestamp"`
+	TotalFiles    int       `json:"total_files" db:"total_files"`
+	TotalSize     int64     `json:"total_size" db:"total_size"`
+	TotalCoverage int64     `json:"total_coverage" db:"total_coverage"`
+	NewFiles      int       `json:"new_files" db:"new_files"`
+	NewCoverage   int64     `json:"new_coverage" db:"new_coverage"`
+}
+
+// CrashGroup represents a group of similar crashes for deduplication
+type CrashGroup struct {
+	ID           string       `json:"id" db:"id"`
+	CampaignID   string       `json:"campaign_id" db:"campaign_id"`
+	StackHash    string       `json:"stack_hash" db:"stack_hash"`
+	FirstSeen    time.Time    `json:"first_seen" db:"first_seen"`
+	LastSeen     time.Time    `json:"last_seen" db:"last_seen"`
+	Count        int          `json:"count" db:"count"`
+	Severity     string       `json:"severity" db:"severity"`
+	StackFrames  []StackFrame `json:"stack_frames" db:"stack_frames"`
+	ExampleCrash string       `json:"example_crash" db:"example_crash"` // ID of representative crash
+}
+
+// CampaignStats represents aggregated statistics for a campaign
+type CampaignStats struct {
+	CampaignID    string    `json:"campaign_id"`
+	TotalJobs     int       `json:"total_jobs"`
+	CompletedJobs int       `json:"completed_jobs"`
+	TotalCrashes  int       `json:"total_crashes"`
+	UniqueCrashes int       `json:"unique_crashes"`
+	TotalCoverage int64     `json:"total_coverage"`
+	CorpusSize    int64     `json:"corpus_size"`
+	LastUpdated   time.Time `json:"last_updated"`
+}
+
+// CampaignFilters for listing campaigns
+type CampaignFilters struct {
+	Status     string   `json:"status"`
+	Tags       []string `json:"tags"`
+	BinaryHash string   `json:"binary_hash"`
+	Limit      int      `json:"limit"`
+	Offset     int      `json:"offset"`
+}
+
+// CampaignUpdates for partial campaign updates
+type CampaignUpdates struct {
+	Name         *string         `json:"name"`
+	Description  *string         `json:"description"`
+	Status       *CampaignStatus `json:"status"`
+	AutoRestart  *bool           `json:"auto_restart"`
+	MaxDuration  *time.Duration  `json:"max_duration"`
+	MaxJobs      *int            `json:"max_jobs"`
+	SharedCorpus *bool           `json:"shared_corpus"`
+	Tags         []string        `json:"tags"`
+}
+
+// CampaignMetrics for real-time monitoring
+type CampaignMetrics struct {
+	ExecutionsPerSecond int64     `json:"executions_per_second"`
+	CoverageRate        float64   `json:"coverage_rate"`
+	CrashRate           float64   `json:"crash_rate"`
+	MemoryUsage         int64     `json:"memory_usage"`
+	CPUUsage            float64   `json:"cpu_usage"`
+	LastUpdated         time.Time `json:"last_updated"`
+}
+
+// CampaignState for state management
+type CampaignState struct {
+	Campaign      *Campaign        `json:"campaign"`
+	ActiveJobs    map[string]*Job  `json:"active_jobs"`
+	CompletedJobs map[string]*Job  `json:"completed_jobs"`
+	LastUpdate    time.Time        `json:"last_update"`
+	Metrics       *CampaignMetrics `json:"metrics"`
+}
+
+// WebSocket message types
+type WSMessage struct {
+	Type      string      `json:"type"`
+	Timestamp time.Time   `json:"timestamp"`
+	Data      interface{} `json:"data"`
+}
+
+type WSMessageType string
+
+const (
+	WSMessageTypeCampaignUpdate WSMessageType = "campaign_update"
+	WSMessageTypeCrashFound     WSMessageType = "crash_found"
+	WSMessageTypeCorpusUpdate   WSMessageType = "corpus_update"
+	WSMessageTypeBotStatus      WSMessageType = "bot_status"
+	WSMessageTypeJobStatus      WSMessageType = "job_status"
+	WSMessageTypeMetrics        WSMessageType = "metrics"
+)

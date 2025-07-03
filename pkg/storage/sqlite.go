@@ -1512,3 +1512,461 @@ func (s *SQLiteStorage) GetDatabaseSize(ctx context.Context) (int64, error) {
 		return size, nil
 	})
 }
+
+// scanJob scans a job from a database row
+func (s *SQLiteStorage) scanJob(rows *sql.Rows) (*common.Job, error) {
+	job := &common.Job{}
+	var assignedBot sql.NullString
+	var startedAt, completedAt sql.NullTime
+	var configJSON sql.NullString
+	var progress sql.NullInt64
+
+	err := rows.Scan(
+		&job.ID, &job.Name, &job.Target, &job.Fuzzer, &job.Status, &assignedBot,
+		&job.CreatedAt, &startedAt, &completedAt, &job.TimeoutAt, &job.WorkDir, &configJSON, &progress)
+	if err != nil {
+		return nil, err
+	}
+
+	// Handle nullable fields
+	if assignedBot.Valid {
+		job.AssignedBot = &assignedBot.String
+	}
+	if startedAt.Valid {
+		job.StartedAt = &startedAt.Time
+	}
+	if completedAt.Valid {
+		job.CompletedAt = &completedAt.Time
+	}
+	if progress.Valid {
+		job.Progress = int(progress.Int64)
+	}
+
+	// Parse job config JSON
+	if configJSON.Valid && configJSON.String != "" {
+		if err := json.Unmarshal([]byte(configJSON.String), &job.Config); err != nil {
+			// Log error but don't fail - use default config
+			s.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to unmarshal job config")
+		}
+	}
+
+	return job, nil
+}
+
+// scanCrash scans a crash from a database row
+func (s *SQLiteStorage) scanCrash(rows *sql.Rows) (*common.CrashResult, error) {
+	crash := &common.CrashResult{}
+	var output, stackTrace sql.NullString
+
+	err := rows.Scan(
+		&crash.ID, &crash.JobID, &crash.BotID, &crash.Hash, &crash.FilePath,
+		&crash.Type, &crash.Signal, &crash.ExitCode, &crash.Timestamp, &crash.Size,
+		&crash.IsUnique, &output, &stackTrace)
+	if err != nil {
+		return nil, err
+	}
+
+	// Handle nullable fields
+	if output.Valid {
+		crash.Output = output.String
+	}
+	if stackTrace.Valid {
+		crash.StackTrace = stackTrace.String
+	}
+
+	return crash, nil
+}
+
+// CreateJob creates a new job in the database
+func (s *SQLiteStorage) CreateJob(ctx context.Context, job *common.Job) error {
+	// Serialize job config to JSON
+	configJSON, err := json.Marshal(job.Config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal job config: %w", err)
+	}
+
+	return s.ExecuteWithRetry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO jobs (
+				id, name, target, fuzzer, status, assigned_bot,
+				created_at, started_at, completed_at, timeout_at, work_dir, config, progress
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, job.ID, job.Name, job.Target, job.Fuzzer, job.Status, job.AssignedBot,
+			job.CreatedAt, job.StartedAt, job.CompletedAt, job.TimeoutAt, job.WorkDir,
+			string(configJSON), job.Progress)
+		return err
+	})
+}
+
+// GetJob retrieves a job by ID
+func (s *SQLiteStorage) GetJob(ctx context.Context, id string) (*common.Job, error) {
+	query := `SELECT id, name, target, fuzzer, status, assigned_bot,
+		created_at, started_at, completed_at, timeout_at, work_dir, config, progress
+		FROM jobs WHERE id = ?`
+
+	var job common.Job
+	var assignedBot sql.NullString
+	var startedAt, completedAt sql.NullTime
+	var configJSON sql.NullString
+	var progress sql.NullInt64
+
+	err := s.ExecuteWithRetry(ctx, func() error {
+		return s.db.QueryRowContext(ctx, query, id).Scan(
+			&job.ID, &job.Name, &job.Target, &job.Fuzzer, &job.Status, &assignedBot,
+			&job.CreatedAt, &startedAt, &completedAt, &job.TimeoutAt, &job.WorkDir,
+			&configJSON, &progress)
+	})
+
+	if err == sql.ErrNoRows {
+		return nil, common.ErrKeyNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Handle nullable fields
+	if assignedBot.Valid {
+		job.AssignedBot = &assignedBot.String
+	}
+	if startedAt.Valid {
+		job.StartedAt = &startedAt.Time
+	}
+	if completedAt.Valid {
+		job.CompletedAt = &completedAt.Time
+	}
+	if progress.Valid {
+		job.Progress = int(progress.Int64)
+	}
+
+	// Parse job config JSON
+	if configJSON.Valid && configJSON.String != "" {
+		if err := json.Unmarshal([]byte(configJSON.String), &job.Config); err != nil {
+			// Log error but don't fail - use default config
+			s.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to unmarshal job config")
+		}
+	}
+
+	return &job, nil
+}
+
+// UpdateJob updates a job with the provided fields
+func (s *SQLiteStorage) UpdateJob(ctx context.Context, id string, updates map[string]interface{}) error {
+	if len(updates) == 0 {
+		return nil
+	}
+
+	// Build dynamic update query
+	query := "UPDATE jobs SET updated_at = CURRENT_TIMESTAMP"
+	args := []interface{}{}
+
+	for field, value := range updates {
+		switch field {
+		case "name", "target", "fuzzer", "status", "work_dir":
+			query += fmt.Sprintf(", %s = ?", field)
+			args = append(args, value)
+		case "assigned_bot":
+			query += ", assigned_bot = ?"
+			args = append(args, value)
+		case "started_at", "completed_at", "timeout_at":
+			query += fmt.Sprintf(", %s = ?", field)
+			args = append(args, value)
+		case "progress":
+			query += ", progress = ?"
+			args = append(args, value)
+		case "config":
+			configJSON, err := json.Marshal(value)
+			if err != nil {
+				return fmt.Errorf("failed to marshal job config: %w", err)
+			}
+			query += ", config = ?"
+			args = append(args, string(configJSON))
+		}
+	}
+
+	query += " WHERE id = ?"
+	args = append(args, id)
+
+	return s.ExecuteWithRetry(ctx, func() error {
+		result, err := s.db.ExecContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+
+		if rowsAffected == 0 {
+			return common.ErrKeyNotFound
+		}
+
+		return nil
+	})
+}
+
+// ListJobs retrieves jobs with pagination and optional status filter
+func (s *SQLiteStorage) ListJobs(ctx context.Context, limit, offset int, status string) ([]*common.Job, error) {
+	query := `SELECT id, name, target, fuzzer, status, assigned_bot,
+		created_at, started_at, completed_at, timeout_at, work_dir, config, progress
+		FROM jobs`
+	args := []interface{}{}
+
+	if status != "" {
+		query += " WHERE status = ?"
+		args = append(args, status)
+	}
+
+	query += " ORDER BY created_at DESC"
+
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+		if offset > 0 {
+			query += " OFFSET ?"
+			args = append(args, offset)
+		}
+	}
+
+	var jobs []*common.Job
+	err := s.ExecuteWithRetry(ctx, func() error {
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			job, err := s.scanJob(rows)
+			if err != nil {
+				return err
+			}
+			jobs = append(jobs, job)
+		}
+
+		return rows.Err()
+	})
+
+	return jobs, err
+}
+
+// DeleteJob deletes a job from the database
+func (s *SQLiteStorage) DeleteJob(ctx context.Context, id string) error {
+	return s.ExecuteWithRetry(ctx, func() error {
+		result, err := s.db.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", id)
+		if err != nil {
+			return err
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+
+		if rowsAffected == 0 {
+			return common.ErrKeyNotFound
+		}
+
+		return nil
+	})
+}
+
+// CreateCrash creates a new crash result in the database
+func (s *SQLiteStorage) CreateCrash(ctx context.Context, crash *common.CrashResult) error {
+	return s.ExecuteWithRetry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO crashes (
+				id, job_id, bot_id, hash, file_path, type, signal, exit_code,
+				timestamp, size, is_unique, output, stack_trace
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, crash.ID, crash.JobID, crash.BotID, crash.Hash, crash.FilePath,
+			crash.Type, crash.Signal, crash.ExitCode, crash.Timestamp, crash.Size,
+			crash.IsUnique, crash.Output, crash.StackTrace)
+		return err
+	})
+}
+
+// ListCrashes retrieves crashes for a job with pagination
+func (s *SQLiteStorage) ListCrashes(ctx context.Context, jobID string, limit, offset int) ([]*common.CrashResult, error) {
+	query := `SELECT id, job_id, bot_id, hash, file_path, type, signal, exit_code, 
+		timestamp, size, is_unique, output, stack_trace 
+		FROM crashes`
+	args := []interface{}{}
+
+	if jobID != "" {
+		query += " WHERE job_id = ?"
+		args = append(args, jobID)
+	}
+
+	query += " ORDER BY timestamp DESC"
+
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+		if offset > 0 {
+			query += " OFFSET ?"
+			args = append(args, offset)
+		}
+	}
+
+	var crashes []*common.CrashResult
+	err := s.ExecuteWithRetry(ctx, func() error {
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			crash, err := s.scanCrash(rows)
+			if err != nil {
+				return err
+			}
+			crashes = append(crashes, crash)
+		}
+
+		return rows.Err()
+	})
+
+	return crashes, err
+}
+
+// CreateCoverage creates a new coverage result
+func (s *SQLiteStorage) CreateCoverage(ctx context.Context, coverage *common.CoverageResult) error {
+	return s.ExecuteWithRetry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO coverage (
+				id, job_id, bot_id, edges, new_edges, timestamp, exec_count
+			) VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, coverage.ID, coverage.JobID, coverage.BotID, coverage.Edges,
+			coverage.NewEdges, coverage.Timestamp, coverage.ExecCount)
+		return err
+	})
+}
+
+// GetLatestCoverage gets the latest coverage for a job
+func (s *SQLiteStorage) GetLatestCoverage(ctx context.Context, jobID string) (*common.CoverageResult, error) {
+	var coverage common.CoverageResult
+
+	err := s.ExecuteWithRetry(ctx, func() error {
+		return s.db.QueryRowContext(ctx, `
+			SELECT id, job_id, bot_id, edges, new_edges, timestamp, exec_count
+			FROM coverage
+			WHERE job_id = ?
+			ORDER BY timestamp DESC
+			LIMIT 1
+		`, jobID).Scan(
+			&coverage.ID, &coverage.JobID, &coverage.BotID, &coverage.Edges,
+			&coverage.NewEdges, &coverage.Timestamp, &coverage.ExecCount)
+	})
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &coverage, nil
+}
+
+// RecordCorpusUpdate records a corpus update
+func (s *SQLiteStorage) RecordCorpusUpdate(ctx context.Context, update *common.CorpusUpdate) error {
+	// Serialize files array to JSON
+	filesJSON, err := json.Marshal(update.Files)
+	if err != nil {
+		return fmt.Errorf("failed to marshal files: %w", err)
+	}
+
+	return s.ExecuteWithRetry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO corpus_updates (
+				id, job_id, bot_id, files, timestamp, total_size
+			) VALUES (?, ?, ?, ?, ?, ?)
+		`, update.ID, update.JobID, update.BotID, string(filesJSON),
+			update.Timestamp, update.TotalSize)
+		return err
+	})
+}
+
+// GetSystemStats returns system statistics
+func (s *SQLiteStorage) GetSystemStats(ctx context.Context) (map[string]interface{}, error) {
+	stats := make(map[string]interface{})
+
+	// Get bot statistics
+	var totalBots, onlineBots int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), SUM(CASE WHEN is_online = 1 THEN 1 ELSE 0 END)
+		FROM bots
+	`).Scan(&totalBots, &onlineBots)
+	if err != nil {
+		return nil, err
+	}
+	stats["total_bots"] = totalBots
+	stats["online_bots"] = onlineBots
+
+	// Get job statistics
+	var totalJobs, runningJobs, completedJobs int
+	err = s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*),
+			SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END),
+			SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)
+		FROM jobs
+	`).Scan(&totalJobs, &runningJobs, &completedJobs)
+	if err != nil {
+		return nil, err
+	}
+	stats["total_jobs"] = totalJobs
+	stats["running_jobs"] = runningJobs
+	stats["completed_jobs"] = completedJobs
+
+	// Get crash statistics
+	var totalCrashes, uniqueCrashes int
+	err = s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COUNT(DISTINCT hash) FROM crashes
+	`).Scan(&totalCrashes, &uniqueCrashes)
+	if err != nil {
+		return nil, err
+	}
+	stats["total_crashes"] = totalCrashes
+	stats["unique_crashes"] = uniqueCrashes
+
+	// Get database size
+	size, err := s.GetDatabaseSize(ctx)
+	if err == nil {
+		stats["database_size"] = size
+	}
+
+	return stats, nil
+}
+
+// BeginTx starts a new database transaction
+func (s *SQLiteStorage) BeginTx(ctx context.Context) (common.Transaction, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return &SQLiteTransaction{
+		tx:     tx,
+		logger: s.logger,
+		ctx:    ctx,
+	}, nil
+}
+
+// Cleanup performs database cleanup operations
+func (s *SQLiteStorage) Cleanup(ctx context.Context) error {
+	// Clean up old data based on configured retention
+	// This is a placeholder - implement based on retention policy
+	return nil
+}
+
+// Ping checks database connectivity
+func (s *SQLiteStorage) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
+// Close closes the database connection
+func (s *SQLiteStorage) Close() error {
+	return s.db.Close()
+}

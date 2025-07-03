@@ -11,7 +11,7 @@ api_port: 9049                       # Port for bot's API server
 
 # Bot capabilities
 capabilities:
-  - "afl++"               # AFL++ fuzzer support
+  - "aflplusplus"         # AFL++ fuzzer support
   - "libfuzzer"           # LibFuzzer support
   # - "honggfuzz"         # Honggfuzz support (if available)
   # - "custom"            # Custom fuzzer support

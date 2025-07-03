@@ -57,6 +57,10 @@ func (s *Server) setupRouter() error {
 	apiV1 := s.router.PathPrefix("/api/v1").Subrouter()
 	s.setupAPIRoutes(apiV1)
 
+	// API v2 routes
+	apiV2 := s.router.PathPrefix("/api/v2").Subrouter()
+	s.setupAPIv2Routes(apiV2)
+
 	// Health and metrics endpoints
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
 	s.router.HandleFunc("/status", s.handleStatus).Methods("GET")
@@ -133,31 +137,82 @@ func (s *Server) setupAPIRoutes(router *mux.Router) {
 	router.HandleFunc("/results/batch", s.handleBatchResults).Methods("POST")
 	router.HandleFunc("/bots/{id}/resources", s.handleResourceMetrics).Methods("GET")
 
+	// Campaign management routes (v1 for backward compatibility)
+	router.HandleFunc("/campaigns", s.handleCreateCampaign).Methods("POST")
+	router.HandleFunc("/campaigns", s.handleListCampaigns).Methods("GET")
+	router.HandleFunc("/campaigns/{id}", s.handleGetCampaign).Methods("GET")
+	router.HandleFunc("/campaigns/{id}", s.handleUpdateCampaign).Methods("PUT", "PATCH")
+	router.HandleFunc("/campaigns/{id}", s.handleDeleteCampaign).Methods("DELETE")
+	router.HandleFunc("/campaigns/{id}/restart", s.handleRestartCampaign).Methods("POST")
+	router.HandleFunc("/campaigns/{id}/stats", s.handleGetCampaignStats).Methods("GET")
+	router.HandleFunc("/campaigns/{id}/binary", s.handleUploadCampaignBinary).Methods("POST")
+	router.HandleFunc("/campaigns/{id}/corpus", s.handleUploadCampaignCorpus).Methods("POST")
+
+	// Corpus routes
+	router.HandleFunc("/campaigns/{id}/corpus/evolution", s.handleGetCorpusEvolution).Methods("GET")
+	router.HandleFunc("/campaigns/{id}/corpus/sync", s.handleSyncCorpus).Methods("POST")
+	router.HandleFunc("/campaigns/{id}/corpus/share", s.handleShareCorpus).Methods("POST")
+	router.HandleFunc("/campaigns/{id}/corpus/files", s.handleListCorpusFiles).Methods("GET")
+	router.HandleFunc("/campaigns/{id}/corpus/files/{hash}", s.handleDownloadCorpusFile).Methods("GET")
+
+	// Crash analysis routes
+	router.HandleFunc("/campaigns/{id}/crashes", s.handleGetCrashGroups).Methods("GET")
+	router.HandleFunc("/crashes/{id}/stacktrace", s.handleGetStackTrace).Methods("GET")
+
 	s.logger.Info("API v1 routes configured")
+}
+
+// setupAPIv2Routes configures API v2 routes
+func (s *Server) setupAPIv2Routes(router *mux.Router) {
+	// All v1 routes are available in v2
+	s.setupAPIRoutes(router)
+
+	// Additional v2 routes
+	router.HandleFunc("/campaigns/{id}/timeline", s.handleV2GetCampaignTimeline).Methods("GET")
+	router.HandleFunc("/bots/{id}/metrics/history", s.handleV2GetBotMetricsHistory).Methods("GET")
+	router.HandleFunc("/jobs/{id}/progress", s.handleV2StreamJobProgress).Methods("GET")
+	router.HandleFunc("/system/maintenance", s.handleV2SystemMaintenance).Methods("POST")
+
+	// WebSocket endpoint
+	router.HandleFunc("/ws", s.handleWebSocket).Methods("GET")
+
+	s.logger.Info("API v2 routes configured")
 }
 
 // setupStaticFileServing configures static file serving for the web UI
 func (s *Server) setupStaticFileServing() {
 	// Check if web UI directory exists
-	webDir := "./web/build"
-	if _, err := os.Stat(webDir); os.IsNotExist(err) {
-		s.logger.WithField("dir", webDir).Warn("Web UI build directory not found, skipping static file serving")
+	webStaticDir := "./web/static"
+	if _, err := os.Stat(webStaticDir); os.IsNotExist(err) {
+		s.logger.WithField("dir", webStaticDir).Warn("Web UI static directory not found, skipping static file serving")
 		return
 	}
 
-	// Create file server
-	fileServer := http.FileServer(http.Dir(webDir))
+	// Serve CSS files
+	cssDir := "./web/css"
+	if _, err := os.Stat(cssDir); err == nil {
+		s.router.PathPrefix("/css/").Handler(http.StripPrefix("/css/", http.FileServer(http.Dir(cssDir)))).Methods("GET")
+	}
 
-	// SPA handler - serves index.html for non-API routes
+	// Serve JS files
+	jsDir := "./web/js"
+	if _, err := os.Stat(jsDir); err == nil {
+		s.router.PathPrefix("/js/").Handler(http.StripPrefix("/js/", http.FileServer(http.Dir(jsDir)))).Methods("GET")
+	}
+
+	// Create file server for static HTML files
+	fileServer := http.FileServer(http.Dir(webStaticDir))
+
+	// SPA handler - serves HTML files
 	spaHandler := &spaFileHandler{
-		staticPath: webDir,
+		staticPath: webStaticDir,
 		fileServer: fileServer,
 	}
 
-	// Serve static files - match everything except /api and /metrics
+	// Serve static HTML files - match everything except /api, /metrics, /css, /js
 	s.router.PathPrefix("/").Handler(spaHandler).Methods("GET")
 
-	s.logger.WithField("dir", webDir).Info("Static file serving configured for web UI")
+	s.logger.WithField("dir", webStaticDir).Info("Static file serving configured for web UI")
 }
 
 // spaFileHandler serves static files and handles SPA routing
@@ -167,11 +222,13 @@ type spaFileHandler struct {
 }
 
 func (h *spaFileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Check if it's an API or metrics request
+	// Check if it's an API, metrics, CSS, or JS request
 	if strings.HasPrefix(r.URL.Path, "/api/") ||
 		strings.HasPrefix(r.URL.Path, "/metrics") ||
 		strings.HasPrefix(r.URL.Path, "/health") ||
-		strings.HasPrefix(r.URL.Path, "/status") {
+		strings.HasPrefix(r.URL.Path, "/status") ||
+		strings.HasPrefix(r.URL.Path, "/css/") ||
+		strings.HasPrefix(r.URL.Path, "/js/") {
 		// These are handled by other routes
 		http.NotFound(w, r)
 		return

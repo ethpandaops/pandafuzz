@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PandaFuzz Dashboard</title>
+    <link rel="stylesheet" href="/css/dashboard.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Navigation -->
+        <nav id="main-nav" class="navbar">
+            <div class="nav-brand">
+                <h1>PandaFuzz</h1>
+            </div>
+            <ul class="nav-links">
+                <li><a href="/" class="nav-link active">Dashboard</a></li>
+                <li><a href="/campaigns.html" class="nav-link">Campaigns</a></li>
+                <li><a href="/crashes.html" class="nav-link">Crashes</a></li>
+                <li><a href="#" class="nav-link" id="api-docs-link">API Docs</a></li>
+            </ul>
+            <div class="nav-status">
+                <span class="connection-status" id="ws-status">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Connecting...</span>
+                </span>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Summary Cards -->
+            <section id="summary-cards" class="summary-section">
+                <div class="card metric-card">
+                    <div class="card-header">
+                        <h3>Active Campaigns</h3>
+                        <span class="card-icon">📊</span>
+                    </div>
+                    <div class="card-body">
+                        <p class="metric" id="active-campaigns">0</p>
+                        <p class="metric-label">Running Now</p>
+                    </div>
+                </div>
+                
+                <div class="card metric-card">
+                    <div class="card-header">
+                        <h3>Total Coverage</h3>
+                        <span class="card-icon">📈</span>
+                    </div>
+                    <div class="card-body">
+                        <p class="metric" id="total-coverage">0</p>
+                        <p class="metric-label">Edges Found</p>
+                    </div>
+                </div>
+                
+                <div class="card metric-card">
+                    <div class="card-header">
+                        <h3>Unique Crashes</h3>
+                        <span class="card-icon">🐛</span>
+                    </div>
+                    <div class="card-body">
+                        <p class="metric" id="unique-crashes">0</p>
+                        <p class="metric-label">Deduplicated</p>
+                    </div>
+                </div>
+                
+                <div class="card metric-card">
+                    <div class="card-header">
+                        <h3>Active Bots</h3>
+                        <span class="card-icon">🤖</span>
+                    </div>
+                    <div class="card-body">
+                        <p class="metric" id="active-bots">0</p>
+                        <p class="metric-label">Online</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- System Overview -->
+            <section class="content-section">
+                <div class="section-header">
+                    <h2>System Overview</h2>
+                    <button class="btn btn-sm" id="refresh-btn">Refresh</button>
+                </div>
+                
+                <div class="overview-grid">
+                    <!-- Campaign Status -->
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Campaign Status</h3>
+                        </div>
+                        <div class="card-body">
+                            <canvas id="campaign-chart" width="300" height="200"></canvas>
+                            <div id="campaign-legend" class="chart-legend"></div>
+                        </div>
+                    </div>
+
+                    <!-- Recent Crashes -->
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Recent Crashes</h3>
+                        </div>
+                        <div class="card-body">
+                            <div id="recent-crashes-list" class="item-list">
+                                <p class="empty-state">No crashes found yet</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Bot Status -->
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Bot Fleet Status</h3>
+                        </div>
+                        <div class="card-body">
+                            <div id="bot-status-grid" class="bot-grid">
+                                <p class="empty-state">No bots connected</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Recent Activity -->
+            <section id="recent-activity" class="content-section">
+                <div class="section-header">
+                    <h2>Recent Activity</h2>
+                    <div class="activity-filters">
+                        <select id="activity-filter" class="form-select">
+                            <option value="all">All Events</option>
+                            <option value="campaigns">Campaigns</option>
+                            <option value="crashes">Crashes</option>
+                            <option value="corpus">Corpus</option>
+                            <option value="bots">Bots</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="activity-feed" class="activity-feed">
+                    <p class="empty-state">No recent activity</p>
+                </div>
+            </section>
+
+            <!-- Performance Metrics -->
+            <section class="content-section">
+                <div class="section-header">
+                    <h2>Performance Metrics</h2>
+                </div>
+                <div class="metrics-grid">
+                    <div class="metric-item">
+                        <span class="metric-value" id="exec-per-sec">0</span>
+                        <span class="metric-unit">exec/s</span>
+                        <span class="metric-name">Execution Rate</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-value" id="corpus-size">0</span>
+                        <span class="metric-unit">MB</span>
+                        <span class="metric-name">Corpus Size</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-value" id="coverage-rate">0</span>
+                        <span class="metric-unit">%</span>
+                        <span class="metric-name">Coverage Rate</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-value" id="crash-rate">0</span>
+                        <span class="metric-unit">/hour</span>
+                        <span class="metric-name">Crash Rate</span>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <div class="footer-content">
+                <p>&copy; 2024 PandaFuzz - Distributed Fuzzing Platform</p>
+                <p class="footer-stats">
+                    Server Time: <span id="server-time">--:--:--</span> | 
+                    Uptime: <span id="server-uptime">--</span>
+                </p>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Scripts -->
+    <script src="/js/api.js"></script>
+    <script src="/js/websocket.js"></script>
+    <script src="/js/dashboard.js"></script>
+    <script>
+        // Initialize dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            window.dashboard = new Dashboard();
+            window.dashboard.init();
+        });
+    </script>
+</body>
+</html>

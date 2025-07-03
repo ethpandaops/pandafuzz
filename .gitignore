@@ -4,3 +4,20 @@ configs/
 .idea/
 .claude/
 
+# Playwright test artifacts
+playwright-report/
+test-results/
+playwright/.cache/
+
+# NPM
+package-lock.json
+
+# Environment files
+.env
+.env.local
+
+# OS files
+.DS_Store
+*.swp
+*.swo
+

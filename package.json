@@ -1,0 +1,39 @@
+{
+  "name": "pandafuzz",
+  "version": "1.0.0",
+  "description": "A minimalist, self-hosted fuzzing orchestration tool written in Go. PandaFuzz strips down complex fuzzing infrastructure to its bare essentials, providing simple bot coordination and file-based result storage without any cloud dependencies.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "example": "examples",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:debug": "playwright test --debug",
+    "test:report": "playwright show-report",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "e2e": "npm run docker:up && npm test && npm run docker:down",
+    "e2e:ci": "docker compose up -d && npx wait-on http://localhost:8088/health && playwright test && docker compose down"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ethpandaops/pandafuzz.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/ethpandaops/pandafuzz/issues"
+  },
+  "homepage": "https://github.com/ethpandaops/pandafuzz#readme",
+  "dependencies": {
+    "@playwright/test": "^1.53.2"
+  },
+  "devDependencies": {
+    "wait-on": "^7.2.0"
+  }
+}

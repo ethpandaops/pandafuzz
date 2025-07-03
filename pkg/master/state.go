@@ -29,6 +29,9 @@ type PersistentState struct {
 	// Cache management
 	maxCacheSize    int
 	cacheAccessTime map[string]time.Time // Track last access time for cache eviction
+
+	// Campaign management
+	campaignManager *CampaignStateManager
 }
 
 // StateStats tracks statistics about the state manager
@@ -894,11 +897,30 @@ func (ps *PersistentState) HealthCheck(ctx context.Context) error {
 func (ps *PersistentState) Close(ctx context.Context) error {
 	ps.logger.Info("Shutting down persistent state manager")
 
+	// Stop campaign manager if running
+	if ps.campaignManager != nil {
+		ps.campaignManager.Stop()
+	}
+
 	if ps.db != nil {
 		return ps.db.Close(ctx)
 	}
 
 	return nil
+}
+
+// SetCampaignManager sets the campaign state manager
+func (ps *PersistentState) SetCampaignManager(manager *CampaignStateManager) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.campaignManager = manager
+}
+
+// GetCampaignManager returns the campaign state manager
+func (ps *PersistentState) GetCampaignManager() *CampaignStateManager {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.campaignManager
 }
 
 // GetCrashes retrieves crashes with pagination

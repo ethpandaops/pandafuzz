@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Campaigns - PandaFuzz</title>
+    <link rel="stylesheet" href="/css/dashboard.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Navigation -->
+        <nav id="main-nav" class="navbar">
+            <div class="nav-brand">
+                <h1>PandaFuzz</h1>
+            </div>
+            <ul class="nav-links">
+                <li><a href="/" class="nav-link">Dashboard</a></li>
+                <li><a href="/campaigns.html" class="nav-link active">Campaigns</a></li>
+                <li><a href="/crashes.html" class="nav-link">Crashes</a></li>
+                <li><a href="#" class="nav-link" id="api-docs-link">API Docs</a></li>
+            </ul>
+            <div class="nav-status">
+                <span class="connection-status" id="ws-status">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Connecting...</span>
+                </span>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Page Header -->
+            <div class="page-header">
+                <h1>Campaign Management</h1>
+                <div class="header-actions">
+                    <button class="btn btn-primary" id="create-campaign-btn">
+                        <span class="btn-icon">+</span>
+                        New Campaign
+                    </button>
+                </div>
+            </div>
+
+            <!-- Campaign Filters -->
+            <section class="filter-section">
+                <div class="filter-group">
+                    <label for="status-filter">Status:</label>
+                    <select id="status-filter" class="form-select">
+                        <option value="">All</option>
+                        <option value="running">Running</option>
+                        <option value="pending">Pending</option>
+                        <option value="completed">Completed</option>
+                        <option value="failed">Failed</option>
+                        <option value="paused">Paused</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="search-campaigns">Search:</label>
+                    <input type="text" id="search-campaigns" class="form-input" placeholder="Search campaigns...">
+                </div>
+                <button class="btn btn-secondary" id="refresh-campaigns-btn">Refresh</button>
+            </section>
+
+            <!-- Campaigns List -->
+            <section class="content-section">
+                <div class="table-container">
+                    <table class="data-table" id="campaigns-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Status</th>
+                                <th>Target Binary</th>
+                                <th>Jobs</th>
+                                <th>Coverage</th>
+                                <th>Crashes</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="campaigns-tbody">
+                            <tr>
+                                <td colspan="8" class="empty-state">No campaigns found</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Pagination -->
+                <div class="pagination" id="campaigns-pagination">
+                    <button class="btn btn-sm" id="prev-page" disabled>Previous</button>
+                    <span class="page-info">Page <span id="current-page">1</span> of <span id="total-pages">1</span></span>
+                    <button class="btn btn-sm" id="next-page" disabled>Next</button>
+                </div>
+            </section>
+        </main>
+
+        <!-- Create Campaign Modal -->
+        <div id="create-campaign-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Create New Campaign</h2>
+                    <button class="modal-close" id="close-modal">&times;</button>
+                </div>
+                <form id="create-campaign-form" class="modal-body">
+                    <div class="form-group">
+                        <label for="campaign-name">Campaign Name *</label>
+                        <input type="text" id="campaign-name" class="form-input" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="campaign-description">Description</label>
+                        <textarea id="campaign-description" class="form-input" rows="3"></textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="target-binary">Target Binary *</label>
+                        <input type="text" id="target-binary" class="form-input" required placeholder="/path/to/binary">
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="max-jobs">Max Jobs</label>
+                            <input type="number" id="max-jobs" class="form-input" value="10" min="1" max="100">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="job-duration">Job Duration (hours)</label>
+                            <input type="number" id="job-duration" class="form-input" value="24" min="1" max="168">
+                        </div>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="memory-limit">Memory Limit (MB)</label>
+                            <input type="number" id="memory-limit" class="form-input" value="2048" min="128" max="16384">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="timeout">Timeout (ms)</label>
+                            <input type="number" id="timeout" class="form-input" value="1000" min="100" max="60000">
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="fuzzer-type">Fuzzer Type</label>
+                        <select id="fuzzer-type" class="form-select">
+                            <option value="afl++">AFL++</option>
+                            <option value="libfuzzer">LibFuzzer</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="campaign-tags">Tags (comma-separated)</label>
+                        <input type="text" id="campaign-tags" class="form-input" placeholder="security, web, experimental">
+                    </div>
+                    
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" id="auto-restart" checked>
+                            Auto-restart on completion
+                        </label>
+                        <label>
+                            <input type="checkbox" id="shared-corpus" checked>
+                            Enable corpus sharing
+                        </label>
+                        <label>
+                            <input type="checkbox" id="start-immediately" checked>
+                            Start immediately
+                        </label>
+                    </div>
+                    
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancel-create">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Create Campaign</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Campaign Details Modal -->
+        <div id="campaign-details-modal" class="modal">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2>Campaign Details</h2>
+                    <button class="modal-close" id="close-details-modal">&times;</button>
+                </div>
+                <div class="modal-body" id="campaign-details-content">
+                    <!-- Campaign details will be loaded here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <div class="footer-content">
+                <p>&copy; 2024 PandaFuzz - Distributed Fuzzing Platform</p>
+                <p class="footer-stats">
+                    Campaigns: <span id="total-campaigns">0</span> | 
+                    Active: <span id="active-campaigns-count">0</span>
+                </p>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Scripts -->
+    <script src="/js/api.js"></script>
+    <script src="/js/websocket.js"></script>
+    <script src="/js/campaigns.js"></script>
+    <script>
+        // Initialize campaigns page
+        document.addEventListener('DOMContentLoaded', function() {
+            window.campaignsManager = new CampaignsManager();
+            window.campaignsManager.init();
+        });
+    </script>
+</body>
+</html>

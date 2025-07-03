@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crash Analysis - PandaFuzz</title>
+    <link rel="stylesheet" href="/css/dashboard.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Navigation -->
+        <nav id="main-nav" class="navbar">
+            <div class="nav-brand">
+                <h1>PandaFuzz</h1>
+            </div>
+            <ul class="nav-links">
+                <li><a href="/" class="nav-link">Dashboard</a></li>
+                <li><a href="/campaigns.html" class="nav-link">Campaigns</a></li>
+                <li><a href="/crashes.html" class="nav-link active">Crashes</a></li>
+                <li><a href="#" class="nav-link" id="api-docs-link">API Docs</a></li>
+            </ul>
+            <div class="nav-status">
+                <span class="connection-status" id="ws-status">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Connecting...</span>
+                </span>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Page Header -->
+            <div class="page-header">
+                <h1>Crash Analysis</h1>
+                <div class="header-actions">
+                    <button class="btn btn-secondary" id="export-crashes-btn">
+                        <span class="btn-icon">📥</span>
+                        Export
+                    </button>
+                </div>
+            </div>
+
+            <!-- Crash Statistics -->
+            <section id="crash-statistics" class="summary-section">
+                <div class="card metric-card">
+                    <div class="card-header">
+                        <h3>Total Crashes</h3>
+                        <span class="card-icon">💥</span>
+                    </div>
+                    <div class="card-body">
+                        <p class="metric" id="total-crashes">0</p>
+                        <p class="metric-label">All Time</p>
+                    </div>
+                </div>
+                
+                <div class="card metric-card">
+                    <div class="card-header">
+                        <h3>Unique Stacks</h3>
+                        <span class="card-icon">🔍</span>
+                    </div>
+                    <div class="card-body">
+                        <p class="metric" id="unique-stacks">0</p>
+                        <p class="metric-label">Deduplicated</p>
+                    </div>
+                </div>
+                
+                <div class="card metric-card">
+                    <div class="card-header">
+                        <h3>Critical Severity</h3>
+                        <span class="card-icon">🚨</span>
+                    </div>
+                    <div class="card-body">
+                        <p class="metric" id="critical-crashes">0</p>
+                        <p class="metric-label">High Priority</p>
+                    </div>
+                </div>
+                
+                <div class="card metric-card">
+                    <div class="card-header">
+                        <h3>Today's Crashes</h3>
+                        <span class="card-icon">📅</span>
+                    </div>
+                    <div class="card-body">
+                        <p class="metric" id="today-crashes">0</p>
+                        <p class="metric-label">Last 24h</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Crash Filters -->
+            <section class="filter-section">
+                <div class="filter-group">
+                    <label for="campaign-filter">Campaign:</label>
+                    <select id="campaign-filter" class="form-select">
+                        <option value="">All Campaigns</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="severity-filter">Severity:</label>
+                    <select id="severity-filter" class="form-select">
+                        <option value="">All</option>
+                        <option value="critical">Critical</option>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="type-filter">Type:</label>
+                    <select id="type-filter" class="form-select">
+                        <option value="">All Types</option>
+                        <option value="heap_overflow">Heap Overflow</option>
+                        <option value="stack_overflow">Stack Overflow</option>
+                        <option value="use_after_free">Use After Free</option>
+                        <option value="double_free">Double Free</option>
+                        <option value="null_deref">Null Dereference</option>
+                        <option value="segfault">Segmentation Fault</option>
+                        <option value="assertion">Assertion</option>
+                        <option value="timeout">Timeout</option>
+                        <option value="generic">Generic</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="min-count">Min Count:</label>
+                    <input type="number" id="min-count" class="form-input" value="1" min="1">
+                </div>
+                <button class="btn btn-secondary" id="refresh-crashes-btn">Refresh</button>
+            </section>
+
+            <!-- Crash Groups -->
+            <section class="content-section">
+                <div class="section-header">
+                    <h2>Crash Groups</h2>
+                    <span class="section-info">Grouped by stack trace similarity</span>
+                </div>
+                
+                <div class="table-container">
+                    <table class="data-table" id="crash-groups-table">
+                        <thead>
+                            <tr>
+                                <th>Stack Hash</th>
+                                <th>Campaign</th>
+                                <th>Count</th>
+                                <th>Severity</th>
+                                <th>First Seen</th>
+                                <th>Last Seen</th>
+                                <th>Top Frame</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="crash-groups-tbody">
+                            <tr>
+                                <td colspan="8" class="empty-state">No crash groups found</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Individual Crashes -->
+            <section class="content-section" id="individual-crashes-section" style="display: none;">
+                <div class="section-header">
+                    <h2>Individual Crashes</h2>
+                    <button class="btn btn-sm" id="back-to-groups">← Back to Groups</button>
+                </div>
+                
+                <div class="table-container">
+                    <table class="data-table" id="crashes-table">
+                        <thead>
+                            <tr>
+                                <th>Crash ID</th>
+                                <th>Job</th>
+                                <th>Bot</th>
+                                <th>Type</th>
+                                <th>Signal</th>
+                                <th>Timestamp</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="crashes-tbody">
+                            <tr>
+                                <td colspan="7" class="empty-state">Select a crash group to view individual crashes</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+
+        <!-- Stack Trace Modal -->
+        <div id="stack-trace-modal" class="modal">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2>Stack Trace Details</h2>
+                    <button class="modal-close" id="close-stack-modal">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="stack-trace-info">
+                        <div class="info-row">
+                            <span class="info-label">Crash ID:</span>
+                            <span id="modal-crash-id" class="info-value">-</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Type:</span>
+                            <span id="modal-crash-type" class="info-value">-</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Signal:</span>
+                            <span id="modal-crash-signal" class="info-value">-</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Stack Hash:</span>
+                            <span id="modal-stack-hash" class="info-value monospace">-</span>
+                        </div>
+                    </div>
+                    
+                    <h3>Stack Frames</h3>
+                    <div id="stack-frames-list" class="stack-frames">
+                        <!-- Stack frames will be loaded here -->
+                    </div>
+                    
+                    <h3>Raw Stack Trace</h3>
+                    <pre id="raw-stack-trace" class="code-block"></pre>
+                    
+                    <div class="modal-actions">
+                        <button class="btn btn-secondary" id="download-input-btn">
+                            <span class="btn-icon">📥</span>
+                            Download Input
+                        </button>
+                        <button class="btn btn-secondary" id="copy-stack-btn">
+                            <span class="btn-icon">📋</span>
+                            Copy Stack Trace
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <div class="footer-content">
+                <p>&copy; 2024 PandaFuzz - Distributed Fuzzing Platform</p>
+                <p class="footer-stats">
+                    Total Crashes: <span id="footer-total-crashes">0</span> | 
+                    Unique: <span id="footer-unique-crashes">0</span>
+                </p>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Scripts -->
+    <script src="/js/api.js"></script>
+    <script src="/js/websocket.js"></script>
+    <script src="/js/crashes.js"></script>
+    <script>
+        // Initialize crashes page
+        document.addEventListener('DOMContentLoaded', function() {
+            window.crashesManager = new CrashesManager();
+            window.crashesManager.init();
+        });
+    </script>
+</body>
+</html>

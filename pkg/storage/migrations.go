@@ -48,6 +48,12 @@ func GetMigrations() []Migration {
 			Up:          addJobProgressUp,
 			Down:        addJobProgressDown,
 		},
+		{
+			ID:          "006_add_campaign_tables",
+			Description: "Add campaign management tables for grouping jobs",
+			Up:          addCampaignTablesUp,
+			Down:        addCampaignTablesDown,
+		},
 	}
 }
 
@@ -378,5 +384,213 @@ func addJobProgressDown(tx *sql.Tx) error {
 	// SQLite doesn't support dropping columns directly
 	// We would need to recreate the table without the column
 	// For simplicity, we'll just leave the column as is
+	return nil
+}
+
+// addCampaignTablesUp creates all campaign-related tables
+func addCampaignTablesUp(tx *sql.Tx) error {
+	// Create campaigns table
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS campaigns (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			description TEXT,
+			status TEXT NOT NULL,
+			target_binary TEXT NOT NULL,
+			binary_hash TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			completed_at DATETIME,
+			auto_restart INTEGER DEFAULT 0,
+			max_duration INTEGER,
+			max_jobs INTEGER DEFAULT 10,
+			job_template TEXT NOT NULL, -- JSON
+			shared_corpus INTEGER DEFAULT 1,
+			tags TEXT -- JSON array
+		)
+	`); err != nil {
+		return fmt.Errorf("failed to create campaigns table: %w", err)
+	}
+
+	// Create campaign_jobs relationship table
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS campaign_jobs (
+			campaign_id TEXT NOT NULL,
+			job_id TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (campaign_id, job_id),
+			FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
+			FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+		)
+	`); err != nil {
+		return fmt.Errorf("failed to create campaign_jobs table: %w", err)
+	}
+
+	// Create corpus_files tracking table (different from the existing one)
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS campaign_corpus_files (
+			id TEXT PRIMARY KEY,
+			campaign_id TEXT NOT NULL,
+			job_id TEXT,
+			bot_id TEXT,
+			filename TEXT NOT NULL,
+			hash TEXT NOT NULL UNIQUE,
+			size INTEGER NOT NULL,
+			coverage INTEGER DEFAULT 0,
+			new_coverage INTEGER DEFAULT 0,
+			parent_hash TEXT,
+			generation INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			synced_at DATETIME,
+			is_seed INTEGER DEFAULT 0,
+			FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+		)
+	`); err != nil {
+		return fmt.Errorf("failed to create campaign_corpus_files table: %w", err)
+	}
+
+	// Create corpus evolution tracking table
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS corpus_evolution (
+			campaign_id TEXT NOT NULL,
+			timestamp DATETIME NOT NULL,
+			total_files INTEGER NOT NULL,
+			total_size INTEGER NOT NULL,
+			total_coverage INTEGER NOT NULL,
+			new_files INTEGER DEFAULT 0,
+			new_coverage INTEGER DEFAULT 0,
+			PRIMARY KEY (campaign_id, timestamp),
+			FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+		)
+	`); err != nil {
+		return fmt.Errorf("failed to create corpus_evolution table: %w", err)
+	}
+
+	// Create crash groups for deduplication
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS crash_groups (
+			id TEXT PRIMARY KEY,
+			campaign_id TEXT NOT NULL,
+			stack_hash TEXT NOT NULL,
+			first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+			last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+			count INTEGER DEFAULT 1,
+			severity TEXT,
+			stack_frames TEXT NOT NULL, -- JSON
+			example_crash TEXT,
+			UNIQUE(campaign_id, stack_hash),
+			FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+		)
+	`); err != nil {
+		return fmt.Errorf("failed to create crash_groups table: %w", err)
+	}
+
+	// Create stack traces table
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS stack_traces (
+			crash_id TEXT PRIMARY KEY,
+			top_n_hash TEXT NOT NULL,
+			full_hash TEXT NOT NULL,
+			frames TEXT NOT NULL, -- JSON
+			raw_trace TEXT,
+			FOREIGN KEY (crash_id) REFERENCES crashes(id) ON DELETE CASCADE
+		)
+	`); err != nil {
+		return fmt.Errorf("failed to create stack_traces table: %w", err)
+	}
+
+	// Add campaign_id to crashes table
+	var count int
+	err := tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('crashes') 
+		WHERE name = 'campaign_id'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for campaign_id column: %w", err)
+	}
+
+	if count == 0 {
+		if _, err := tx.Exec(`
+			ALTER TABLE crashes ADD COLUMN campaign_id TEXT
+		`); err != nil {
+			return fmt.Errorf("failed to add campaign_id column to crashes: %w", err)
+		}
+	}
+
+	// Add crash_group_id to crashes table
+	err = tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('crashes') 
+		WHERE name = 'crash_group_id'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for crash_group_id column: %w", err)
+	}
+
+	if count == 0 {
+		if _, err := tx.Exec(`
+			ALTER TABLE crashes ADD COLUMN crash_group_id TEXT
+		`); err != nil {
+			return fmt.Errorf("failed to add crash_group_id column to crashes: %w", err)
+		}
+	}
+
+	// Create indices for performance
+	indices := []string{
+		"CREATE INDEX IF NOT EXISTS idx_campaign_status ON campaigns(status)",
+		"CREATE INDEX IF NOT EXISTS idx_corpus_campaign ON campaign_corpus_files(campaign_id)",
+		"CREATE INDEX IF NOT EXISTS idx_corpus_hash ON campaign_corpus_files(hash)",
+		"CREATE INDEX IF NOT EXISTS idx_crash_group_campaign ON crash_groups(campaign_id)",
+		"CREATE INDEX IF NOT EXISTS idx_stack_trace_hash ON stack_traces(top_n_hash)",
+		"CREATE INDEX IF NOT EXISTS idx_crashes_campaign ON crashes(campaign_id)",
+		"CREATE INDEX IF NOT EXISTS idx_crashes_group ON crashes(crash_group_id)",
+	}
+
+	for _, index := range indices {
+		if _, err := tx.Exec(index); err != nil {
+			return fmt.Errorf("failed to create index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// addCampaignTablesDown removes all campaign-related tables
+func addCampaignTablesDown(tx *sql.Tx) error {
+	// Drop indices first
+	indices := []string{
+		"DROP INDEX IF EXISTS idx_campaign_status",
+		"DROP INDEX IF EXISTS idx_corpus_campaign",
+		"DROP INDEX IF EXISTS idx_corpus_hash",
+		"DROP INDEX IF EXISTS idx_crash_group_campaign",
+		"DROP INDEX IF EXISTS idx_stack_trace_hash",
+		"DROP INDEX IF EXISTS idx_crashes_campaign",
+		"DROP INDEX IF EXISTS idx_crashes_group",
+	}
+
+	for _, index := range indices {
+		if _, err := tx.Exec(index); err != nil {
+			return fmt.Errorf("failed to drop index: %w", err)
+		}
+	}
+
+	// Drop tables
+	tables := []string{
+		"corpus_evolution",
+		"campaign_corpus_files",
+		"stack_traces",
+		"crash_groups",
+		"campaign_jobs",
+		"campaigns",
+	}
+
+	for _, table := range tables {
+		if _, err := tx.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", table)); err != nil {
+			return fmt.Errorf("failed to drop table %s: %w", table, err)
+		}
+	}
+
+	// We can't easily remove columns from crashes table in SQLite
+	// So we'll leave campaign_id and crash_group_id columns
+
 	return nil
 }
