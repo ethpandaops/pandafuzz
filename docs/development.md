@@ -1,10 +1,10 @@
-# PandaFuzz Development Documentation
+# PandaFuzz Development Guide
 
-## Project Status
+## Prerequisites
 
-### 🎉 Project Complete!
-
-All components of the PandaFuzz distributed fuzzing platform have been successfully implemented and tested.
+- Go 1.21+
+- Docker and Docker Compose
+- AFL++ (for local development)
 
 ## Implementation Summary
 
@@ -158,30 +158,18 @@ defer func() {
 - Add distributed tracing
 - Create operational dashboards
 
-## Running the System
+## Building
 
-### Quick Start
 ```bash
-# Build and run with Docker
-docker-compose up -d
-
-# Or build locally
-make build
-
-# Run tests
-make test
-
-# Generate coverage report
-make test-coverage
+go mod download
+go build -o pandafuzz-master ./cmd/master
+go build -o pandafuzz-bot ./cmd/bot
 ```
 
-### Scaling
-```bash
-# Scale to 10 bots
-docker-compose up -d --scale bot=10
+## Running Tests
 
-# Monitor system
-docker-compose logs -f
+```bash
+go test ./...
 ```
 
 ## Project Structure

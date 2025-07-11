@@ -307,3 +307,11 @@ Key features:
 ## Conclusion
 
 PandaFuzz provides a robust, scalable platform for distributed fuzzing with high availability through recovery mechanisms, horizontal scalability with multiple bots, comprehensive crash analysis, and production-ready deployment options. The architecture is designed for reliability and fault tolerance while maintaining simplicity in deployment and operation.
+
+## Key Design Decisions
+
+- **Single Master**: Eliminates coordination complexity
+- **Master-Only Writes**: Prevents filesystem conflicts
+- **Persistent State**: Complete recovery from any failure
+- **Atomic Operations**: Race-condition-free job assignment
+- **Timeout Everything**: Assume all components can fail
