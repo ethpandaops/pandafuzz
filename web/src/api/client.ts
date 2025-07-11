@@ -84,6 +84,8 @@ export class PandaFuzzAPI {
     status?: string;
     limit?: number;
     offset?: number;
+    sort_by?: string;
+    sort_order?: 'asc' | 'desc';
   }): Promise<Job[]> {
     const response = await this.client.get<{jobs: Job[], count: number, total: number}>('/jobs', { params });
     // Handle both array response and object with jobs array
@@ -140,6 +142,8 @@ export class PandaFuzzAPI {
     job_id?: string;
     limit?: number;
     offset?: number;
+    sort_by?: string;
+    sort_order?: 'asc' | 'desc';
   }): Promise<CrashResult[]> {
     try {
       const response = await this.client.get<{

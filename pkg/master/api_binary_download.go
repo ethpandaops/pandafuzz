@@ -35,7 +35,7 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusForbidden, "Bot ID header required", nil)
 		return
 	}
-	
+
 	if job.AssignedBot == nil {
 		s.logger.WithFields(logrus.Fields{
 			"job_id": jobID,
@@ -44,12 +44,12 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusForbidden, "Job not assigned to any bot", nil)
 		return
 	}
-	
+
 	if *job.AssignedBot != botID {
 		s.logger.WithFields(logrus.Fields{
-			"job_id": jobID,
+			"job_id":         jobID,
 			"requesting_bot": botID,
-			"assigned_bot": *job.AssignedBot,
+			"assigned_bot":   *job.AssignedBot,
 		}).Error("Bot not authorized for this job")
 		s.writeErrorResponse(w, http.StatusForbidden, "Unauthorized to download binary for this job", nil)
 		return
@@ -58,36 +58,46 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 	// Get binary path
 	binaryPath := job.Target
 	originalPath := binaryPath
-	
+
 	// Log initial binary path
 	s.logger.WithFields(logrus.Fields{
-		"job_id": jobID,
-		"bot_id": botID,
+		"job_id":      jobID,
+		"bot_id":      botID,
 		"target_path": binaryPath,
 		"is_absolute": filepath.IsAbs(binaryPath),
 	}).Debug("Attempting to download binary")
-	
+
 	// If the path is relative, check in storage
 	if !filepath.IsAbs(binaryPath) {
-		// Check if it's a stored binary (e.g., storage/binaries/timestamp_filename)
-		storagePath := filepath.Join(s.config.Storage.BasePath, binaryPath)
-		if _, err := os.Stat(storagePath); err == nil {
-			binaryPath = storagePath
+		// First try binaries directory
+		binariesPath := filepath.Join(s.config.Storage.BasePath, "binaries", binaryPath)
+		if _, err := os.Stat(binariesPath); err == nil {
+			binaryPath = binariesPath
 			s.logger.WithFields(logrus.Fields{
 				"original_path": originalPath,
 				"resolved_path": binaryPath,
-			}).Debug("Resolved relative path to storage path")
+			}).Debug("Resolved to binaries directory")
 		} else {
-			// Try without storage prefix
-			if strings.HasPrefix(binaryPath, "storage/") {
-				trimmedPath := strings.TrimPrefix(binaryPath, "storage/")
-				storagePath = filepath.Join(s.config.Storage.BasePath, trimmedPath)
-				if _, err := os.Stat(storagePath); err == nil {
-					binaryPath = storagePath
-					s.logger.WithFields(logrus.Fields{
-						"original_path": originalPath,
-						"resolved_path": binaryPath,
-					}).Debug("Resolved storage-prefixed path")
+			// Check if it's a stored binary (e.g., storage/binaries/timestamp_filename)
+			storagePath := filepath.Join(s.config.Storage.BasePath, binaryPath)
+			if _, err := os.Stat(storagePath); err == nil {
+				binaryPath = storagePath
+				s.logger.WithFields(logrus.Fields{
+					"original_path": originalPath,
+					"resolved_path": binaryPath,
+				}).Debug("Resolved relative path to storage path")
+			} else {
+				// Try without storage prefix
+				if strings.HasPrefix(binaryPath, "storage/") {
+					trimmedPath := strings.TrimPrefix(binaryPath, "storage/")
+					storagePath = filepath.Join(s.config.Storage.BasePath, trimmedPath)
+					if _, err := os.Stat(storagePath); err == nil {
+						binaryPath = storagePath
+						s.logger.WithFields(logrus.Fields{
+							"original_path": originalPath,
+							"resolved_path": binaryPath,
+						}).Debug("Resolved storage-prefixed path")
+					}
 				}
 			}
 		}
@@ -97,13 +107,13 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 	file, err := os.Open(binaryPath)
 	if err != nil {
 		s.logger.WithError(err).WithFields(logrus.Fields{
-			"job_id": jobID,
-			"bot_id": botID,
-			"binary_path": binaryPath,
+			"job_id":        jobID,
+			"bot_id":        botID,
+			"binary_path":   binaryPath,
 			"original_path": originalPath,
-			"storage_base": s.config.Storage.BasePath,
+			"storage_base":  s.config.Storage.BasePath,
 		}).Error("Failed to open binary file")
-		
+
 		if os.IsNotExist(err) {
 			// Provide detailed error information
 			errorMsg := fmt.Sprintf("Binary file not found at path: %s", binaryPath)
@@ -135,8 +145,8 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, filepath.Base(binaryPath), fileInfo.ModTime(), file)
 
 	s.logger.WithFields(logrus.Fields{
-		"job_id": jobID,
-		"bot_id": botID,
+		"job_id":      jobID,
+		"bot_id":      botID,
 		"binary_size": fileInfo.Size(),
 		"binary_name": filepath.Base(binaryPath),
 	}).Info("Binary downloaded successfully")
@@ -168,21 +178,21 @@ func (s *Server) handleCorpusDownload(w http.ResponseWriter, r *http.Request) {
 
 	// Check if corpus exists for this job
 	corpusPath := filepath.Join(s.config.Storage.BasePath, "corpus", jobID, "seed_corpus.zip")
-	
+
 	// Try alternate path
 	if _, err := os.Stat(corpusPath); os.IsNotExist(err) {
 		corpusPath = filepath.Join(s.config.Storage.BasePath, "corpus", jobID, "corpus.zip")
 	}
-	
+
 	// Open corpus file
 	file, err := os.Open(corpusPath)
 	if err != nil {
 		s.logger.WithError(err).WithFields(logrus.Fields{
-			"job_id": jobID,
-			"bot_id": botID,
+			"job_id":      jobID,
+			"bot_id":      botID,
 			"corpus_path": corpusPath,
 		}).Error("Failed to open corpus file")
-		
+
 		if os.IsNotExist(err) {
 			s.writeErrorResponse(w, http.StatusNotFound, "No corpus file found for this job", nil)
 		} else {
@@ -208,8 +218,8 @@ func (s *Server) handleCorpusDownload(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, filepath.Base(corpusPath), fileInfo.ModTime(), file)
 
 	s.logger.WithFields(logrus.Fields{
-		"job_id": jobID,
-		"bot_id": botID,
+		"job_id":      jobID,
+		"bot_id":      botID,
 		"corpus_size": fileInfo.Size(),
 		"corpus_name": filepath.Base(corpusPath),
 	}).Info("Corpus downloaded successfully")

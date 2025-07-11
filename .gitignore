@@ -27,9 +27,15 @@ test_crash
 test_fuzzer
 libfuzzer_test
 *.test
+/a.out
+/bot
+/master
+/pandafuzz-bot
+/pandafuzz-master
 
 # Crash artifacts
 crash-*
+/crash-*
 
 # Go build artifacts
 /cmd/bot/bot
@@ -46,3 +52,15 @@ crash-*
 # Configuration files (keep examples only)
 bot.yaml
 bot-docker.yaml
+
+# Test scripts in root (temporary location)
+/test_*.sh
+/debug_*.sh
+
+# Temporary documentation
+/*_issue.md
+/fix_*.md
+/verify_*.md
+
+# IDE files
+.vscode/

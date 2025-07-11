@@ -313,6 +313,130 @@ func (ps *PersistentState) ListJobs(ctx context.Context) ([]*common.Job, error) 
 	return jobs, nil
 }
 
+// ListJobsSorted retrieves jobs with sorting from the database
+func (ps *PersistentState) ListJobsSorted(ctx context.Context, sortBy string, sortOrder string) ([]*common.Job, error) {
+	// Check if database supports advanced operations
+	advDB, isAdvanced := ps.db.(common.AdvancedDatabase)
+	if !isAdvanced {
+		// Fallback to unsorted list
+		return ps.ListJobs(ctx)
+	}
+
+	// Build the ORDER BY clause
+	orderClause := ""
+	switch sortBy {
+	case "created_at":
+		orderClause = "created_at"
+	case "started_at":
+		orderClause = "started_at"
+	case "completed_at":
+		orderClause = "completed_at"
+	case "name":
+		orderClause = "name"
+	case "status":
+		orderClause = "status"
+	case "fuzzer":
+		orderClause = "fuzzer"
+	default:
+		orderClause = "created_at" // Default sort
+	}
+
+	if sortOrder == "asc" {
+		orderClause += " ASC"
+	} else {
+		orderClause += " DESC"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, name, target, fuzzer, status, created_at, started_at, completed_at, 
+		       timeout_at, assigned_bot, work_dir, config, progress
+		FROM jobs 
+		ORDER BY %s
+	`, orderClause)
+
+	rows, err := advDB.Select(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	jobs := make([]*common.Job, 0, len(rows))
+	for _, row := range rows {
+		job := &common.Job{}
+
+		// Parse basic fields
+		if id, ok := row["id"].(string); ok {
+			job.ID = id
+		}
+		if name, ok := row["name"].(string); ok {
+			job.Name = name
+		}
+		if target, ok := row["target"].(string); ok {
+			job.Target = target
+		}
+		if fuzzer, ok := row["fuzzer"].(string); ok {
+			job.Fuzzer = fuzzer
+		}
+		if status, ok := row["status"].(string); ok {
+			job.Status = common.JobStatus(status)
+		}
+		if workDir, ok := row["work_dir"].(string); ok {
+			job.WorkDir = workDir
+		}
+		if progress, ok := row["progress"].(int64); ok {
+			job.Progress = int(progress)
+		}
+
+		// Parse time fields
+		if createdAt, ok := row["created_at"].(time.Time); ok {
+			job.CreatedAt = createdAt
+		} else if createdAt, ok := row["created_at"].(string); ok {
+			if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+				job.CreatedAt = t
+			}
+		}
+
+		if startedAt, ok := row["started_at"].(time.Time); ok {
+			job.StartedAt = &startedAt
+		} else if startedAt, ok := row["started_at"].(string); ok && startedAt != "" {
+			if t, err := time.Parse(time.RFC3339, startedAt); err == nil {
+				job.StartedAt = &t
+			}
+		}
+
+		if completedAt, ok := row["completed_at"].(time.Time); ok {
+			job.CompletedAt = &completedAt
+		} else if completedAt, ok := row["completed_at"].(string); ok && completedAt != "" {
+			if t, err := time.Parse(time.RFC3339, completedAt); err == nil {
+				job.CompletedAt = &t
+			}
+		}
+
+		if timeoutAt, ok := row["timeout_at"].(time.Time); ok {
+			job.TimeoutAt = timeoutAt
+		} else if timeoutAt, ok := row["timeout_at"].(string); ok {
+			if t, err := time.Parse(time.RFC3339, timeoutAt); err == nil {
+				job.TimeoutAt = t
+			}
+		}
+
+		// Parse assigned bot
+		if assignedBot, ok := row["assigned_bot"].(string); ok && assignedBot != "" {
+			job.AssignedBot = &assignedBot
+		}
+
+		// Parse config field
+		if configStr, ok := row["config"].(string); ok && configStr != "" {
+			if err := json.Unmarshal([]byte(configStr), &job.Config); err != nil {
+				ps.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to parse job config")
+			}
+		}
+
+		jobs = append(jobs, job)
+	}
+
+	return jobs, nil
+}
+
 // Atomic job assignment with retry logic
 func (ps *PersistentState) AtomicJobAssignmentWithRetry(ctx context.Context, botID string) (*common.Job, error) {
 	var assignedJob *common.Job
@@ -356,8 +480,8 @@ func (ps *PersistentState) AtomicJobAssignmentWithRetry(ctx context.Context, bot
 			job.AssignedBot = &botID
 			job.StartedAt = &now
 
-			// Set the work directory for the bot
-			job.WorkDir = fmt.Sprintf("/tmp/pandafuzz/job_%s", job.ID)
+			// Keep the relative work directory - bot will resolve it based on its config
+			// job.WorkDir is already set to a relative path during job creation
 
 			// Update bot status
 			bot.Status = common.BotStatusBusy
@@ -548,6 +672,23 @@ func (ps *PersistentState) ProcessCrashResultWithRetry(ctx context.Context, cras
 
 			// Store crash input separately if provided
 			hasInput := len(crash.Input) > 0
+
+			// Log crash input status
+			if hasInput {
+				ps.logger.WithFields(logrus.Fields{
+					"crash_id":   crash.ID,
+					"input_size": len(crash.Input),
+				}).Info("Received crash with input data")
+			} else if crash.InputBase64 != "" {
+				ps.logger.WithFields(logrus.Fields{
+					"crash_id": crash.ID,
+				}).Info("Received crash with base64 input")
+			} else {
+				ps.logger.WithFields(logrus.Fields{
+					"crash_id": crash.ID,
+				}).Warn("WARNING: Crash received without input data")
+			}
+
 			if hasInput {
 				// Check if we're using SQLiteStorage
 				if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
@@ -969,6 +1110,19 @@ func (ps *PersistentState) GetCrashes(ctx context.Context, limit, offset int) ([
 
 	// Basic database fallback - not efficient but functional
 	return nil, fmt.Errorf("database does not support efficient crash listing")
+}
+
+// GetCrashesSorted retrieves crashes with sorting support
+func (ps *PersistentState) GetCrashesSorted(ctx context.Context, limit, offset int, sortBy, sortOrder string) ([]*common.CrashResult, error) {
+	// Don't hold any locks - database has its own concurrency control
+	// Check if the database is SQLiteStorage and use its optimized methods
+	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
+		return sqliteDB.GetCrashesSorted(ctx, limit, offset, sortBy, sortOrder)
+	}
+
+	// Fallback to unsorted for other database implementations
+	// For now, just use the regular GetCrashes method
+	return ps.GetCrashes(ctx, limit, offset)
 }
 
 // GetCrash retrieves a specific crash by ID

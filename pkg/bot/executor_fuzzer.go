@@ -3,6 +3,8 @@ package bot
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -70,19 +72,65 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 		}
 	}()
 
+	// Ensure we have absolute paths
+	workDir := job.WorkDir
+	if !filepath.IsAbs(workDir) {
+		absWorkDir, err := filepath.Abs(workDir)
+		if err != nil {
+			fje.logger.WithError(err).Warn("Failed to get absolute work directory, using relative path")
+		} else {
+			workDir = absWorkDir
+		}
+	}
+
+	// Create log file for job output
+	logPath := filepath.Join(workDir, "job.log")
+	logFile, err := os.Create(logPath)
+	var logWriter io.Writer
+	if err != nil {
+		fje.logger.WithError(err).WithField("log_path", logPath).Error("Failed to create job log file")
+		// Continue without log file - don't fail the job
+		logWriter = nil
+	} else {
+		// Don't close the file yet - it needs to stay open for the fuzzer to write to it
+		// Write initial log entry
+		fmt.Fprintf(logFile, "%s Starting fuzzer job %s\n", time.Now().Format(time.RFC3339), job.ID)
+		fmt.Fprintf(logFile, "Fuzzer: %s\n", job.Fuzzer)
+		fmt.Fprintf(logFile, "Target: %s\n", job.Target)
+		fmt.Fprintf(logFile, "Duration: %d seconds\n", job.Config.Duration)
+		fmt.Fprintf(logFile, "WorkDir: %s\n", workDir)
+		fmt.Fprintf(logFile, "\n")
+		logWriter = logFile
+		fje.logger.WithField("log_path", logPath).Info("Successfully created log file for job output")
+	}
+
+	// Check if target binary exists and is executable
+	targetPath := filepath.Join(workDir, "target_binary")
+	if stat, err := os.Stat(targetPath); err != nil {
+		fje.logger.WithError(err).WithField("target", targetPath).Error("Target binary not found")
+	} else {
+		fje.logger.WithFields(logrus.Fields{
+			"target": targetPath,
+			"size":   stat.Size(),
+			"mode":   stat.Mode().String(),
+		}).Debug("Target binary details")
+	}
+
 	// Configure fuzzer
 	config := fuzzer.FuzzConfig{
-		Target:          filepath.Join(job.WorkDir, "target_binary"),
-		WorkDirectory:   job.WorkDir,
-		Duration:        job.Config.Duration,
-		Timeout:         job.Config.Timeout,
+		JobID:           job.ID, // Set the actual job ID
+		Target:          targetPath,
+		WorkDirectory:   workDir,
+		Duration:        time.Duration(job.Config.Duration) * time.Second,
+		Timeout:         time.Duration(job.Config.Timeout) * time.Second,
 		MemoryLimit:     job.Config.MemoryLimit,
-		SeedDirectory:   filepath.Join(job.WorkDir, "input"),
-		OutputDirectory: filepath.Join(job.WorkDir, "output"),
-		CrashDirectory:  filepath.Join(job.WorkDir, "crashes"),
-		CorpusDirectory: filepath.Join(job.WorkDir, "corpus"),
+		SeedDirectory:   filepath.Join(workDir, "input"),
+		OutputDirectory: filepath.Join(workDir, "output"),
+		CrashDirectory:  filepath.Join(workDir, "crashes"),
+		CorpusDirectory: filepath.Join(workDir, "corpus"),
 		StatsInterval:   10 * time.Second,
 		LogLevel:        fje.logger.Level.String(),
+		OutputWriter:    logWriter, // Set the log file writer
 	}
 
 	// Add dictionary if provided
@@ -116,18 +164,23 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 	var ctx context.Context
 	var cancel context.CancelFunc
 
+	// Use timeout if specified, otherwise use duration, otherwise default to 1 hour
+	timeout := time.Hour // Default
 	if job.Config.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), job.Config.Timeout)
-	} else {
-		// Use duration if no timeout specified
-		if job.Config.Duration > 0 {
-			ctx, cancel = context.WithTimeout(context.Background(), job.Config.Duration)
-		} else {
-			// Default to 1 hour
-			ctx, cancel = context.WithTimeout(context.Background(), time.Hour)
-		}
+		timeout = time.Duration(job.Config.Timeout) * time.Second
+	} else if job.Config.Duration > 0 {
+		// Add some buffer time for fuzzer to start/stop
+		timeout = time.Duration(job.Config.Duration)*time.Second + 30*time.Second
 	}
+
+	ctx, cancel = context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
+	fje.logger.WithFields(logrus.Fields{
+		"job_id":   job.ID,
+		"timeout":  timeout,
+		"duration": time.Duration(job.Config.Duration) * time.Second,
+	}).Debug("Created execution context")
 
 	// Start event handler goroutine
 	go fje.handleFuzzerEvents(job.ID)
@@ -135,20 +188,46 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 	// Start fuzzing
 	fje.logger.WithField("job_id", job.ID).Info("Starting fuzzer")
 	if err := fuzz.Start(ctx); err != nil {
-		// Check if it was a context cancellation
-		if ctx.Err() == context.DeadlineExceeded {
-			msg := fmt.Sprintf("%s job completed (timeout/duration reached)", job.Fuzzer)
-			fje.logger.WithField("job_id", job.ID).Info(msg)
-			return true, msg, nil
-		} else if ctx.Err() == context.Canceled {
-			msg := fmt.Sprintf("%s job was cancelled", job.Fuzzer)
-			fje.logger.WithField("job_id", job.ID).Info(msg)
-			return false, msg, nil
-		}
-
 		msg := fmt.Sprintf("Fuzzer execution failed: %v", err)
 		fje.logger.WithError(err).Error("Fuzzer execution failed")
 		return false, msg, err
+	}
+
+	// Wait for fuzzer to complete or context to be done
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Context cancelled/timeout
+			fje.logger.WithField("job_id", job.ID).Info("Context done, stopping fuzzer")
+			if err := fuzz.Stop(); err != nil {
+				fje.logger.WithError(err).Warn("Failed to stop fuzzer gracefully")
+			}
+
+			if ctx.Err() == context.DeadlineExceeded {
+				msg := fmt.Sprintf("%s job completed (timeout/duration reached)", job.Fuzzer)
+				fje.logger.WithField("job_id", job.ID).Info(msg)
+				return true, msg, nil
+			} else {
+				msg := fmt.Sprintf("%s job was cancelled", job.Fuzzer)
+				fje.logger.WithField("job_id", job.ID).Info(msg)
+				return false, msg, nil
+			}
+
+		case <-ticker.C:
+			// Check if fuzzer is still running
+			if !fuzz.IsRunning() {
+				fje.logger.WithField("job_id", job.ID).Info("Fuzzer completed")
+				break
+			}
+		}
+
+		// Break the loop if fuzzer is not running
+		if !fuzz.IsRunning() {
+			break
+		}
 	}
 
 	// Get final results
@@ -163,6 +242,11 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 			"coverage":         results.Summary.CoverageAchieved,
 			"new_inputs":       results.Summary.NewInputsFound,
 		}).Info("Fuzzing completed")
+	}
+
+	// Close the log file if it was opened
+	if logFile != nil {
+		logFile.Close()
 	}
 
 	msg := fmt.Sprintf("%s execution completed successfully", job.Fuzzer)
@@ -221,6 +305,11 @@ func (fje *FuzzerJobExecutor) createFuzzer(job *common.Job) (fuzzer.Fuzzer, erro
 		libFuzz := fuzzer.NewLibFuzzer(fje.logger)
 		libFuzz.SetBotID(fje.botID)
 		return libFuzz, nil
+
+	case "honggfuzz":
+		honggFuzz := fuzzer.NewHonggfuzz(fje.logger)
+		honggFuzz.SetBotID(fje.botID)
+		return honggFuzz, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported fuzzer type: %s", job.Fuzzer)

@@ -3,6 +3,7 @@ package fuzzer
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -607,15 +608,16 @@ func (afl *AFLPlusPlus) GetCrashes() ([]*common.CrashResult, error) {
 			crashHash := afl.hashInput(crashData)
 
 			crash := &common.CrashResult{
-				ID:        file.Name(),
-				JobID:     afl.config.Target,
-				BotID:     afl.botID,
-				Timestamp: info.ModTime(),
-				FilePath:  filepath.Join(afl.crashDir, file.Name()),
-				Size:      int64(len(crashData)),
-				Hash:      crashHash,
-				Type:      crashType,
-				Input:     crashData, // Include the crash input data
+				ID:          file.Name(),
+				JobID:       afl.config.Target,
+				BotID:       afl.botID,
+				Timestamp:   info.ModTime(),
+				FilePath:    filepath.Join(afl.crashDir, file.Name()),
+				Size:        int64(len(crashData)),
+				Hash:        crashHash,
+				Type:        crashType,
+				Input:       crashData,                                    // Include the crash input data
+				InputBase64: base64.StdEncoding.EncodeToString(crashData), // Base64 encode the crash data
 			}
 
 			afl.logger.WithFields(logrus.Fields{
@@ -1101,8 +1103,10 @@ func (afl *AFLPlusPlus) parseAndEmitStats(stats map[string]string) {
 func (afl *AFLPlusPlus) detectAndEmitCrash(crashOrLine interface{}) {
 	switch v := crashOrLine.(type) {
 	case *common.CrashResult:
-		// Emit crash event through base fuzzer
-		afl.EmitCrashFoundEvent(afl.ctx, afl.config.Target, v)
+		// Emit through event handler - this includes the full crash data
+		if afl.eventHandler != nil {
+			afl.eventHandler.OnCrash(afl, v)
+		}
 	case string:
 		// Parse crash info from output line
 		afl.logger.WithField("line", v).Debug("Detected crash in output")

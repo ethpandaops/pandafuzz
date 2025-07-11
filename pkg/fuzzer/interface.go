@@ -2,6 +2,7 @@ package fuzzer
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
@@ -14,33 +15,33 @@ type Fuzzer interface {
 	Type() FuzzerType
 	Version() string
 	GetCapabilities() []string
-	
+
 	// Configuration and initialization
 	Configure(config FuzzConfig) error
 	Initialize() error
 	Validate() error
-	
+
 	// Execution control
 	Start(ctx context.Context) error
 	Stop() error
 	Pause() error
 	Resume() error
-	
+
 	// Status and monitoring
 	GetStatus() FuzzerStatus
 	GetStats() FuzzerStats
 	GetProgress() FuzzerProgress
 	IsRunning() bool
-	
+
 	// Results and output
 	GetResults() (*FuzzerResults, error)
 	GetCrashes() ([]*common.CrashResult, error)
 	GetCoverage() (*common.CoverageResult, error)
 	GetCorpus() ([]*CorpusEntry, error)
-	
+
 	// Event handling
 	SetEventHandler(handler EventHandler)
-	
+
 	// Cleanup
 	Cleanup() error
 }
@@ -49,10 +50,10 @@ type Fuzzer interface {
 type FuzzerType string
 
 const (
-	FuzzerTypeAFL      FuzzerType = "afl++"
+	FuzzerTypeAFL       FuzzerType = "afl++"
 	FuzzerTypeLibFuzzer FuzzerType = "libfuzzer"
 	FuzzerTypeHonggfuzz FuzzerType = "honggfuzz"
-	FuzzerTypeCustom   FuzzerType = "custom"
+	FuzzerTypeCustom    FuzzerType = "custom"
 )
 
 // FuzzerStatus represents the current status of a fuzzer
@@ -72,55 +73,61 @@ const (
 
 // FuzzConfig holds configuration for fuzzer execution
 type FuzzConfig struct {
+	// Job identification
+	JobID string `json:"job_id" yaml:"job_id"`
+
 	// Target configuration
-	Target        string            `json:"target" yaml:"target"`
-	TargetArgs    []string          `json:"target_args" yaml:"target_args"`
-	WorkDirectory string            `json:"work_directory" yaml:"work_directory"`
-	
+	Target        string   `json:"target" yaml:"target"`
+	TargetArgs    []string `json:"target_args" yaml:"target_args"`
+	WorkDirectory string   `json:"work_directory" yaml:"work_directory"`
+
 	// Execution parameters
-	Duration      time.Duration     `json:"duration" yaml:"duration"`
-	Timeout       time.Duration     `json:"timeout" yaml:"timeout"`
-	MemoryLimit   int64             `json:"memory_limit" yaml:"memory_limit"`
-	
+	Duration    time.Duration `json:"duration" yaml:"duration"`
+	Timeout     time.Duration `json:"timeout" yaml:"timeout"`
+	MemoryLimit int64         `json:"memory_limit" yaml:"memory_limit"`
+
 	// Input configuration
-	SeedDirectory string            `json:"seed_directory" yaml:"seed_directory"`
-	Dictionary    string            `json:"dictionary" yaml:"dictionary"`
-	InputFormat   string            `json:"input_format" yaml:"input_format"`
-	
+	SeedDirectory string `json:"seed_directory" yaml:"seed_directory"`
+	Dictionary    string `json:"dictionary" yaml:"dictionary"`
+	InputFormat   string `json:"input_format" yaml:"input_format"`
+
 	// Fuzzing strategy
-	Strategy      FuzzStrategy      `json:"strategy" yaml:"strategy"`
-	Mutators      []string          `json:"mutators" yaml:"mutators"`
-	Coverage      CoverageType      `json:"coverage" yaml:"coverage"`
-	
+	Strategy FuzzStrategy `json:"strategy" yaml:"strategy"`
+	Mutators []string     `json:"mutators" yaml:"mutators"`
+	Coverage CoverageType `json:"coverage" yaml:"coverage"`
+
 	// Output configuration
-	OutputDirectory string           `json:"output_directory" yaml:"output_directory"`
-	CrashDirectory  string           `json:"crash_directory" yaml:"crash_directory"`
-	CorpusDirectory string           `json:"corpus_directory" yaml:"corpus_directory"`
-	
+	OutputDirectory string `json:"output_directory" yaml:"output_directory"`
+	CrashDirectory  string `json:"crash_directory" yaml:"crash_directory"`
+	CorpusDirectory string `json:"corpus_directory" yaml:"corpus_directory"`
+
 	// Fuzzer-specific options
 	FuzzerOptions map[string]any `json:"fuzzer_options" yaml:"fuzzer_options"`
-	
+
 	// Resource limits
-	MaxCrashes    int               `json:"max_crashes" yaml:"max_crashes"`
-	MaxCorpusSize int64             `json:"max_corpus_size" yaml:"max_corpus_size"`
-	MaxExecutions int64             `json:"max_executions" yaml:"max_executions"`
-	
+	MaxCrashes    int   `json:"max_crashes" yaml:"max_crashes"`
+	MaxCorpusSize int64 `json:"max_corpus_size" yaml:"max_corpus_size"`
+	MaxExecutions int64 `json:"max_executions" yaml:"max_executions"`
+
 	// Monitoring
-	StatsInterval time.Duration     `json:"stats_interval" yaml:"stats_interval"`
-	LogLevel      string            `json:"log_level" yaml:"log_level"`
-	EnableTracing bool              `json:"enable_tracing" yaml:"enable_tracing"`
+	StatsInterval time.Duration `json:"stats_interval" yaml:"stats_interval"`
+	LogLevel      string        `json:"log_level" yaml:"log_level"`
+	EnableTracing bool          `json:"enable_tracing" yaml:"enable_tracing"`
+
+	// Output writer for capturing fuzzer output
+	OutputWriter io.Writer `json:"-" yaml:"-"`
 }
 
 // FuzzStrategy represents different fuzzing strategies
 type FuzzStrategy string
 
 const (
-	StrategyRandom      FuzzStrategy = "random"
-	StrategyDictionary  FuzzStrategy = "dictionary"
-	StrategyGrammar     FuzzStrategy = "grammar"
+	StrategyRandom       FuzzStrategy = "random"
+	StrategyDictionary   FuzzStrategy = "dictionary"
+	StrategyGrammar      FuzzStrategy = "grammar"
 	StrategyEvolutionary FuzzStrategy = "evolutionary"
-	StrategyStructural  FuzzStrategy = "structural"
-	StrategyCoverage    FuzzStrategy = "coverage"
+	StrategyStructural   FuzzStrategy = "structural"
+	StrategyCoverage     FuzzStrategy = "coverage"
 )
 
 // CoverageType represents different coverage types
@@ -136,36 +143,36 @@ const (
 
 // FuzzerStats contains runtime statistics
 type FuzzerStats struct {
-	StartTime       time.Time     `json:"start_time"`
-	ElapsedTime     time.Duration `json:"elapsed_time"`
-	Executions      int64         `json:"executions"`
-	ExecPerSecond   float64       `json:"exec_per_second"`
-	
+	StartTime     time.Time     `json:"start_time"`
+	ElapsedTime   time.Duration `json:"elapsed_time"`
+	Executions    int64         `json:"executions"`
+	ExecPerSecond float64       `json:"exec_per_second"`
+
 	// Coverage statistics
-	TotalEdges      int           `json:"total_edges"`
-	CoveredEdges    int           `json:"covered_edges"`
-	CoveragePercent float64       `json:"coverage_percent"`
-	
+	TotalEdges      int     `json:"total_edges"`
+	CoveredEdges    int     `json:"covered_edges"`
+	CoveragePercent float64 `json:"coverage_percent"`
+
 	// Crash statistics
-	UniqueCrashes   int           `json:"unique_crashes"`
-	TotalCrashes    int           `json:"total_crashes"`
-	CrashRate       float64       `json:"crash_rate"`
-	
+	UniqueCrashes int     `json:"unique_crashes"`
+	TotalCrashes  int     `json:"total_crashes"`
+	CrashRate     float64 `json:"crash_rate"`
+
 	// Corpus statistics
-	CorpusSize      int           `json:"corpus_size"`
-	NewPaths        int           `json:"new_paths"`
-	PathsTotal      int           `json:"paths_total"`
-	
+	CorpusSize int `json:"corpus_size"`
+	NewPaths   int `json:"new_paths"`
+	PathsTotal int `json:"paths_total"`
+
 	// Performance metrics
-	CPUUsage        float64       `json:"cpu_usage"`
-	MemoryUsage     int64         `json:"memory_usage"`
-	DiskUsage       int64         `json:"disk_usage"`
-	
+	CPUUsage    float64 `json:"cpu_usage"`
+	MemoryUsage int64   `json:"memory_usage"`
+	DiskUsage   int64   `json:"disk_usage"`
+
 	// Quality metrics
-	Stability       float64       `json:"stability"`
-	FuzzingRatio    float64       `json:"fuzzing_ratio"`
-	LastNewPath     time.Time     `json:"last_new_path"`
-	LastCrash       time.Time     `json:"last_crash"`
+	Stability    float64   `json:"stability"`
+	FuzzingRatio float64   `json:"fuzzing_ratio"`
+	LastNewPath  time.Time `json:"last_new_path"`
+	LastCrash    time.Time `json:"last_crash"`
 }
 
 // FuzzerProgress tracks fuzzing progress
@@ -191,39 +198,39 @@ type FuzzerResults struct {
 
 // ResultSummary provides a high-level summary of results
 type ResultSummary struct {
-	TotalExecutions   int64         `json:"total_executions"`
-	ExecutionTime     time.Duration `json:"execution_time"`
-	UniqueCrashes     int           `json:"unique_crashes"`
-	CoverageAchieved  float64       `json:"coverage_achieved"`
-	NewInputsFound    int           `json:"new_inputs_found"`
-	Success           bool          `json:"success"`
-	ExitReason        string        `json:"exit_reason"`
+	TotalExecutions  int64         `json:"total_executions"`
+	ExecutionTime    time.Duration `json:"execution_time"`
+	UniqueCrashes    int           `json:"unique_crashes"`
+	CoverageAchieved float64       `json:"coverage_achieved"`
+	NewInputsFound   int           `json:"new_inputs_found"`
+	Success          bool          `json:"success"`
+	ExitReason       string        `json:"exit_reason"`
 }
 
 // CorpusEntry represents a single corpus entry
 type CorpusEntry struct {
-	ID          string            `json:"id"`
-	FileName    string            `json:"file_name"`
-	Size        int64             `json:"size"`
-	Hash        string            `json:"hash"`
-	Coverage    []int             `json:"coverage"`
-	Timestamp   time.Time         `json:"timestamp"`
-	Source      string            `json:"source"`
-	Energy      float64           `json:"energy"`
-	Executions  int64             `json:"executions"`
-	Metadata    map[string]any `json:"metadata"`
+	ID         string         `json:"id"`
+	FileName   string         `json:"file_name"`
+	Size       int64          `json:"size"`
+	Hash       string         `json:"hash"`
+	Coverage   []int          `json:"coverage"`
+	Timestamp  time.Time      `json:"timestamp"`
+	Source     string         `json:"source"`
+	Energy     float64        `json:"energy"`
+	Executions int64          `json:"executions"`
+	Metadata   map[string]any `json:"metadata"`
 }
 
 // PerformanceMetrics tracks performance during fuzzing
 type PerformanceMetrics struct {
-	AverageExecSpeed  float64       `json:"average_exec_speed"`
-	PeakExecSpeed     float64       `json:"peak_exec_speed"`
-	AverageCPU        float64       `json:"average_cpu"`
-	PeakMemory        int64         `json:"peak_memory"`
-	TotalDiskIO       int64         `json:"total_disk_io"`
-	NetworkTraffic    int64         `json:"network_traffic"`
-	StartupTime       time.Duration `json:"startup_time"`
-	ShutdownTime      time.Duration `json:"shutdown_time"`
+	AverageExecSpeed float64       `json:"average_exec_speed"`
+	PeakExecSpeed    float64       `json:"peak_exec_speed"`
+	AverageCPU       float64       `json:"average_cpu"`
+	PeakMemory       int64         `json:"peak_memory"`
+	TotalDiskIO      int64         `json:"total_disk_io"`
+	NetworkTraffic   int64         `json:"network_traffic"`
+	StartupTime      time.Duration `json:"startup_time"`
+	ShutdownTime     time.Duration `json:"shutdown_time"`
 }
 
 // Artifact represents an output artifact from fuzzing
@@ -241,12 +248,12 @@ type Artifact struct {
 type ArtifactType string
 
 const (
-	ArtifactCrash    ArtifactType = "crash"
-	ArtifactCorpus   ArtifactType = "corpus"
-	ArtifactLog      ArtifactType = "log"
-	ArtifactStats    ArtifactType = "stats"
-	ArtifactPlot     ArtifactType = "plot"
-	ArtifactReport   ArtifactType = "report"
+	ArtifactCrash  ArtifactType = "crash"
+	ArtifactCorpus ArtifactType = "corpus"
+	ArtifactLog    ArtifactType = "log"
+	ArtifactStats  ArtifactType = "stats"
+	ArtifactPlot   ArtifactType = "plot"
+	ArtifactReport ArtifactType = "report"
 )
 
 // EventHandler handles fuzzer events
@@ -263,7 +270,7 @@ type EventHandler interface {
 // DefaultEventHandler provides a default implementation
 type DefaultEventHandler struct{}
 
-func (h *DefaultEventHandler) OnStart(fuzzer Fuzzer)                              {}
+func (h *DefaultEventHandler) OnStart(fuzzer Fuzzer)                             {}
 func (h *DefaultEventHandler) OnStop(fuzzer Fuzzer, reason string)               {}
 func (h *DefaultEventHandler) OnCrash(fuzzer Fuzzer, crash *common.CrashResult)  {}
 func (h *DefaultEventHandler) OnNewPath(fuzzer Fuzzer, path *CorpusEntry)        {}
@@ -323,13 +330,13 @@ type Monitor interface {
 
 // Alert represents a monitoring alert
 type Alert struct {
-	ID          string      `json:"id"`
-	Type        AlertType   `json:"type"`
-	Threshold   float64     `json:"threshold"`
-	Condition   string      `json:"condition"`
-	Action      string      `json:"action"`
-	Enabled     bool        `json:"enabled"`
-	Description string      `json:"description"`
+	ID          string    `json:"id"`
+	Type        AlertType `json:"type"`
+	Threshold   float64   `json:"threshold"`
+	Condition   string    `json:"condition"`
+	Action      string    `json:"action"`
+	Enabled     bool      `json:"enabled"`
+	Description string    `json:"description"`
 }
 
 // AlertType represents different types of alerts

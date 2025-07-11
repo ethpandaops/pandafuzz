@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -794,11 +795,38 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 		dirsToCheck = append(dirsToCheck, corpusDir)
 	}
 
+	// Check LibFuzzer output directories
+	libfuzzerOutput := filepath.Join(job.WorkDir, "output", "libfuzzer_output")
+	if stat, err := os.Stat(libfuzzerOutput); err == nil && stat.IsDir() {
+		// Check artifacts directory where LibFuzzer writes crashes
+		artifactsDir := filepath.Join(libfuzzerOutput, "artifacts")
+		if stat, err := os.Stat(artifactsDir); err == nil && stat.IsDir() {
+			dirsToCheck = append(dirsToCheck, artifactsDir)
+		}
+
+		// Also check crashes directory
+		crashesDir := filepath.Join(libfuzzerOutput, "crashes")
+		if stat, err := os.Stat(crashesDir); err == nil && stat.IsDir() {
+			dirsToCheck = append(dirsToCheck, crashesDir)
+		}
+	}
+
+	a.logger.WithFields(logrus.Fields{
+		"job_id": job.ID,
+		"dirs":   dirsToCheck,
+	}).Debug("Checking directories for crash files")
+
 	for _, dir := range dirsToCheck {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
+			a.logger.WithError(err).WithField("dir", dir).Debug("Failed to read directory")
 			continue
 		}
+
+		a.logger.WithFields(logrus.Fields{
+			"dir":        dir,
+			"file_count": len(entries),
+		}).Debug("Checking directory for crashes")
 
 		for _, entry := range entries {
 			if entry.IsDir() {
@@ -831,15 +859,16 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 
 				// Create crash result
 				crash := &common.CrashResult{
-					ID:        fmt.Sprintf("%s_%s", job.ID, entry.Name()),
-					JobID:     job.ID,
-					BotID:     a.config.ID,
-					Timestamp: info.ModTime(),
-					FilePath:  crashPath,
-					Size:      info.Size(),
-					Hash:      a.hashCrashInput(crashData),
-					Type:      "libfuzzer",
-					Input:     crashData,
+					ID:          fmt.Sprintf("%s_%s", job.ID, entry.Name()),
+					JobID:       job.ID,
+					BotID:       a.config.ID,
+					Timestamp:   info.ModTime(),
+					FilePath:    crashPath,
+					Size:        info.Size(),
+					Hash:        a.hashCrashInput(crashData),
+					Type:        "libfuzzer",
+					Input:       crashData,
+					InputBase64: base64.StdEncoding.EncodeToString(crashData),
 				}
 
 				// Report crash to master

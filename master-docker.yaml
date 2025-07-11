@@ -1,0 +1,120 @@
+# PandaFuzz Master Configuration for Docker
+# This file configures the master server that coordinates fuzzing bots
+
+master:
+  # Server configuration
+  server:
+    host: "0.0.0.0"
+    port: 8080
+    read_timeout: "30s"
+    write_timeout: "30s"
+    idle_timeout: "60s"
+    max_header_bytes: 1048576
+    enable_tls: false
+    enable_cors: false
+    rate_limit_rps: 100
+    rate_limit_burst: 200
+
+  # Database configuration
+  database:
+    type: "sqlite"
+    path: "/app/data/pandafuzz.db"  # Use absolute path for Docker
+    max_conns: 1
+    idle_conns: 1
+    timeout: "30s"
+
+  # Storage configuration - Updated to use /app/data which has a volume mount
+  storage:
+    base_path: "/app/data"
+    corpus_path: "/app/data/corpus"
+    crash_path: "/app/data/crashes"
+    log_path: "/app/data/logs"
+    backup_path: "/app/data/backups"
+    temp_path: "/app/data/temp"
+    permissions: 0755
+
+  # Timeout configuration
+  timeouts:
+    bot_heartbeat: "60s"
+    job_execution: "3600s"
+    master_recovery: "300s"
+    database_op: "30s"
+    database_retries: 5
+    http_request: "30s"
+    bot_registration: "60s"
+    job_assignment: "30s"
+
+  # Security configuration
+  security:
+    enable_input_validation: true
+    max_request_size: 10485760  # 10MB
+    allowed_file_extensions: [".txt", ".bin", ".data", ".input"]
+    forbidden_paths: []
+    enable_sanitization: true
+    max_crash_file_size: 10485760  # 10MB
+    max_corpus_file_size: 1048576   # 1MB
+    process_isolation_level: "sandbox"
+
+  # Resource limits configuration
+  limits:
+    max_concurrent_jobs: 10
+    max_corpus_size: 1073741824  # 1GB in bytes
+    max_crash_size: 10485760      # 10MB in bytes
+    max_crash_count: 1000
+    max_job_duration: "24h"
+    max_cache_size: 1000
+  
+  # Retry configuration
+  retry:
+    database:
+      max_retries: 3
+      initial_delay: "1s"
+      max_delay: "30s"
+      multiplier: 2.0
+    bot_operation:
+      max_retries: 3
+      initial_delay: "1s"
+      max_delay: "10s"
+      multiplier: 2.0
+    file_system:
+      max_retries: 3
+      initial_delay: "100ms"
+      max_delay: "5s"
+      multiplier: 2.0
+    network:
+      max_retries: 5
+      initial_delay: "1s"
+      max_delay: "30s"
+      multiplier: 2.0
+  
+  # Circuit breaker configuration
+  circuit:
+    max_failures: 5
+    reset_timeout: "60s"
+    enabled: true
+
+
+  # Monitoring configuration
+  monitoring:
+    enabled: true
+    metrics_enabled: true
+    metrics_port: 9090
+    metrics_path: "/metrics"
+    health_enabled: true
+    health_path: "/health"
+    stats_interval: "30s"
+    profiler_enabled: false
+    profiler_port: 6060
+
+  # Logging configuration
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"
+    file_path: ""
+    max_size: 100
+    max_backups: 5
+    max_age: 7
+    compress: false
+    enable_trace: false
+

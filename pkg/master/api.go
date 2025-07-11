@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/model"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
@@ -418,6 +420,17 @@ func (s *Server) handleResultCrash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Convert InputBase64 to Input if provided
+	if crash.InputBase64 != "" {
+		decodedInput, err := base64.StdEncoding.DecodeString(crash.InputBase64)
+		if err != nil {
+			s.logger.WithError(err).Error("Failed to decode InputBase64")
+			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid base64 encoded input", err)
+			return
+		}
+		crash.Input = decodedInput
+	}
+
 	// Log crash details
 	s.logger.WithFields(logrus.Fields{
 		"crash_id": crash.ID,
@@ -633,7 +646,41 @@ func (s *Server) handleJobCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJobList(w http.ResponseWriter, r *http.Request) {
 	s.logger.Debug("handleJobList: Starting job list request")
 
-	jobs, err := s.state.ListJobs(r.Context())
+	// Parse sorting parameters
+	sortBy := r.URL.Query().Get("sort_by")
+	sortOrder := r.URL.Query().Get("sort_order")
+
+	// Validate sort parameters using the model types
+	var sortField model.JobSortField
+	switch sortBy {
+	case string(model.JobSortFieldCreatedAt):
+		sortField = model.JobSortFieldCreatedAt
+	case string(model.JobSortFieldStartedAt):
+		sortField = model.JobSortFieldStartedAt
+	case string(model.JobSortFieldCompletedAt):
+		sortField = model.JobSortFieldCompletedAt
+	case string(model.JobSortFieldName):
+		sortField = model.JobSortFieldName
+	case string(model.JobSortFieldStatus):
+		sortField = model.JobSortFieldStatus
+	case "fuzzer":
+		sortField = "fuzzer" // Not in the model constants
+	default:
+		sortField = model.JobSortFieldCreatedAt // Default sort
+	}
+
+	var order model.SortOrder
+	switch sortOrder {
+	case string(model.SortOrderAsc):
+		order = model.SortOrderAsc
+	case string(model.SortOrderDesc):
+		order = model.SortOrderDesc
+	default:
+		order = model.SortOrderDesc // Default order
+	}
+
+	// Get jobs with sorting
+	jobs, err := s.state.ListJobsSorted(r.Context(), string(sortField), string(order))
 	if err != nil {
 		s.logger.WithError(err).Error("handleJobList: Failed to list jobs")
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list jobs", err)
@@ -686,11 +733,13 @@ func (s *Server) handleJobList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]any{
-		"jobs":  filtered,
-		"count": len(filtered),
-		"page":  page,
-		"limit": limit,
-		"total": len(jobs),
+		"jobs":       filtered,
+		"count":      len(filtered),
+		"page":       page,
+		"limit":      limit,
+		"total":      len(jobs),
+		"sort_by":    string(sortField),
+		"sort_order": string(order),
 	}
 
 	s.writeJSONResponse(w, response)
@@ -984,26 +1033,63 @@ func (s *Server) handleGetCrashes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Parse sorting parameters
+	sortBy := r.URL.Query().Get("sort_by")
+	sortOrder := r.URL.Query().Get("sort_order")
+
+	// Validate sort parameters using the model types
+	var sortField model.CrashSortField
+	switch sortBy {
+	case string(model.CrashSortFieldTimestamp):
+		sortField = model.CrashSortFieldTimestamp
+	case string(model.CrashSortFieldType):
+		sortField = model.CrashSortFieldType
+	case string(model.CrashSortFieldSignal):
+		sortField = model.CrashSortFieldSignal
+	case string(model.CrashSortFieldSize):
+		sortField = model.CrashSortFieldSize
+	case string(model.CrashSortFieldJobID):
+		sortField = model.CrashSortFieldJobID
+	case string(model.CrashSortFieldBotID):
+		sortField = model.CrashSortFieldBotID
+	default:
+		sortField = model.CrashSortFieldTimestamp // Default sort
+	}
+
+	var order model.SortOrder
+	switch sortOrder {
+	case string(model.SortOrderAsc):
+		order = model.SortOrderAsc
+	case string(model.SortOrderDesc):
+		order = model.SortOrderDesc
+	default:
+		order = model.SortOrderDesc // Default order
+	}
+
 	// Create a context with timeout from config to prevent long-running queries
 	ctx, cancel := context.WithTimeout(r.Context(), s.config.Timeouts.DatabaseOp)
 	defer cancel()
 
-	// Get crashes from state with timeout context
-	crashes, err := s.state.GetCrashes(ctx, limit, offset)
+	// Get crashes from state with sorting
+	crashes, err := s.state.GetCrashesSorted(ctx, limit, offset, string(sortField), string(order))
 	if err != nil {
 		// Check if it was a context cancellation or timeout
 		if err == context.Canceled || err == context.DeadlineExceeded {
 			s.logger.WithError(err).WithFields(logrus.Fields{
-				"limit":  limit,
-				"offset": offset,
+				"limit":      limit,
+				"offset":     offset,
+				"sort_by":    string(sortField),
+				"sort_order": string(order),
 			}).Warn("Crash retrieval cancelled or timed out")
 			s.writeErrorResponse(w, http.StatusGatewayTimeout, "Database operation timed out", err)
 			return
 		}
 
 		s.logger.WithError(err).WithFields(logrus.Fields{
-			"limit":  limit,
-			"offset": offset,
+			"limit":      limit,
+			"offset":     offset,
+			"sort_by":    string(sortField),
+			"sort_order": string(order),
 		}).Error("Failed to retrieve crashes from database")
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve crashes", err)
 		return
@@ -1015,10 +1101,12 @@ func (s *Server) handleGetCrashes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]any{
-		"crashes": crashes,
-		"count":   len(crashes),
-		"limit":   limit,
-		"offset":  offset,
+		"crashes":    crashes,
+		"count":      len(crashes),
+		"limit":      limit,
+		"offset":     offset,
+		"sort_by":    string(sortField),
+		"sort_order": string(order),
 	}
 
 	s.writeJSONResponse(w, response)
@@ -1509,6 +1597,17 @@ func (s *Server) handleBatchResults(w http.ResponseWriter, r *http.Request) {
 		crash.JobID = req.JobID
 		if crash.Timestamp.IsZero() {
 			crash.Timestamp = time.Now()
+		}
+
+		// Convert InputBase64 to Input if provided
+		if crash.InputBase64 != "" && len(crash.Input) == 0 {
+			decodedInput, err := base64.StdEncoding.DecodeString(crash.InputBase64)
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("crash %d: failed to decode InputBase64: %v", i, err))
+				continue
+			}
+			crash.Input = decodedInput
+			crash.InputBase64 = "" // Clear after processing
 		}
 
 		if err := s.state.ProcessCrashResultWithRetry(ctx, crash); err != nil {

@@ -65,6 +65,7 @@ RUN apt-get update || apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates \
     libsqlite3-0 \
+    sqlite3 \
     curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -110,6 +111,7 @@ RUN apt-get update || apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates \
     libsqlite3-0 \
+    sqlite3 \
     bash \
     git \
     make \

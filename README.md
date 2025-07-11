@@ -74,7 +74,13 @@ PandaFuzz uses a reliable master-centric architecture:
 
 ## Configuration
 
-### Master Configuration (configs/master.yaml)
+### Master Configuration Files
+
+The project includes two master configuration files:
+- `master.yaml` - Default configuration for local development
+- `master-docker.yaml` - Docker-specific configuration with absolute paths and container-optimized settings
+
+### Master Configuration Example (master.yaml)
 ```yaml
 server:
   port: 8080

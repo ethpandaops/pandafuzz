@@ -86,20 +86,21 @@ type JobConfig struct {
 
 // Results and findings
 type CrashResult struct {
-	ID         string    `json:"id" db:"id"`
-	JobID      string    `json:"job_id" db:"job_id"`
-	BotID      string    `json:"bot_id" db:"bot_id"`
-	Hash       string    `json:"hash" db:"hash"`           // SHA256 for deduplication
-	FilePath   string    `json:"file_path" db:"file_path"` // Relative to job work dir
-	Type       string    `json:"type" db:"type"`           // "segfault", "assertion", "timeout"
-	Signal     int       `json:"signal" db:"signal"`       // Signal number if applicable
-	ExitCode   int       `json:"exit_code" db:"exit_code"`
-	Timestamp  time.Time `json:"timestamp" db:"timestamp"`
-	Size       int64     `json:"size" db:"size"`               // Crash input size
-	IsUnique   bool      `json:"is_unique" db:"is_unique"`     // Not a duplicate
-	Input      []byte    `json:"-" db:"-"`                     // Raw crash input (not persisted)
-	Output     string    `json:"output" db:"output"`           // Crash output/stderr
-	StackTrace string    `json:"stack_trace" db:"stack_trace"` // Raw stack trace
+	ID          string    `json:"id" db:"id"`
+	JobID       string    `json:"job_id" db:"job_id"`
+	BotID       string    `json:"bot_id" db:"bot_id"`
+	Hash        string    `json:"hash" db:"hash"`           // SHA256 for deduplication
+	FilePath    string    `json:"file_path" db:"file_path"` // Relative to job work dir
+	Type        string    `json:"type" db:"type"`           // "segfault", "assertion", "timeout"
+	Signal      int       `json:"signal" db:"signal"`       // Signal number if applicable
+	ExitCode    int       `json:"exit_code" db:"exit_code"`
+	Timestamp   time.Time `json:"timestamp" db:"timestamp"`
+	Size        int64     `json:"size" db:"size"`                // Crash input size
+	IsUnique    bool      `json:"is_unique" db:"is_unique"`      // Not a duplicate
+	Input       []byte    `json:"-" db:"-"`                      // Raw crash input (not persisted)
+	InputBase64 string    `json:"input_base64,omitempty" db:"-"` // Base64 encoded crash input for JSON serialization
+	Output      string    `json:"output" db:"output"`            // Crash output/stderr
+	StackTrace  string    `json:"stack_trace" db:"stack_trace"`  // Raw stack trace
 }
 
 type CoverageResult struct {

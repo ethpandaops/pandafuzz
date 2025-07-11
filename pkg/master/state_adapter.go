@@ -215,7 +215,7 @@ func (a *StateStoreAdapter) AtomicJobAssignmentOptimized(ctx context.Context, bo
 					Status:      common.JobStatusAssigned,
 					AssignedBot: &botID,
 					StartedAt:   &now,
-					WorkDir:     fmt.Sprintf("/tmp/pandafuzz/job_%s", jobID),
+					WorkDir:     fmt.Sprintf("job_%s", jobID), // Relative path for bot to resolve
 				}
 
 				// Update caches

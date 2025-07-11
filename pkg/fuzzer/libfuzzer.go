@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -164,9 +165,10 @@ func (lf *LibFuzzer) Configure(config FuzzConfig) error {
 	lf.status = StatusInitialized
 
 	lf.logger.WithFields(logrus.Fields{
-		"target":     config.Target,
-		"output_dir": lf.outputDir,
-		"duration":   config.Duration,
+		"target":            config.Target,
+		"output_dir":        lf.outputDir,
+		"duration":          config.Duration,
+		"has_output_writer": config.OutputWriter != nil,
 	}).Info("LibFuzzer configured")
 
 	return nil
@@ -208,6 +210,18 @@ func (lf *LibFuzzer) Initialize() error {
 	if lf.config.SeedDirectory != "" {
 		if err := lf.copySeedCorpus(); err != nil {
 			return err
+		}
+	}
+
+	// Ensure corpus has at least one file - libfuzzer needs at least one input
+	corpusFiles, err := os.ReadDir(lf.corpusDir)
+	if err == nil && len(corpusFiles) == 0 {
+		// Create a minimal seed file
+		seedFile := filepath.Join(lf.corpusDir, "seed_0")
+		if err := os.WriteFile(seedFile, []byte("test"), 0644); err != nil {
+			lf.logger.WithError(err).Warn("Failed to create default seed file")
+		} else {
+			lf.logger.Debug("Created default seed file for empty corpus")
 		}
 	}
 
@@ -291,6 +305,12 @@ func (lf *LibFuzzer) Start(ctx context.Context) error {
 	args := lf.buildLibFuzzerArgs()
 	lf.cmd = exec.CommandContext(lf.ctx, lf.config.Target, args...)
 
+	// Set working directory if specified
+	if lf.config.WorkDirectory != "" {
+		lf.cmd.Dir = lf.config.WorkDirectory
+		lf.logger.WithField("work_dir", lf.config.WorkDirectory).Debug("Set command working directory")
+	}
+
 	// Set up pipes for output
 	stdout, err := lf.cmd.StdoutPipe()
 	if err != nil {
@@ -314,9 +334,26 @@ func (lf *LibFuzzer) Start(ctx context.Context) error {
 		}
 	}
 
+	// Log binary path and existence
+	if _, err := os.Stat(lf.config.Target); err != nil {
+		lf.logger.WithError(err).WithField("target", lf.config.Target).Error("Target binary does not exist")
+	} else {
+		info, _ := os.Stat(lf.config.Target)
+		lf.logger.WithFields(logrus.Fields{
+			"target": lf.config.Target,
+			"size":   info.Size(),
+			"mode":   info.Mode().String(),
+		}).Debug("Target binary found")
+	}
+
 	// Start LibFuzzer
 	if err := lf.cmd.Start(); err != nil {
 		lf.status = StatusError
+		lf.logger.WithError(err).WithFields(logrus.Fields{
+			"target": lf.config.Target,
+			"args":   args,
+			"cwd":    lf.config.WorkDirectory,
+		}).Error("Failed to start LibFuzzer command")
 		return &FuzzerError{
 			Type:    ErrInternal,
 			Message: fmt.Sprintf("failed to start LibFuzzer: %v", err),
@@ -334,6 +371,11 @@ func (lf *LibFuzzer) Start(ctx context.Context) error {
 		"args":         args,
 		"work_dir":     lf.config.WorkDirectory,
 		"artifact_dir": lf.artifactDir,
+		"corpus_dir":   lf.corpusDir,
+		"duration":     lf.config.Duration,
+		"timeout":      lf.config.Timeout,
+		"pid":          lf.cmd.Process.Pid,
+		"job_id":       lf.config.JobID,
 	}).Info("LibFuzzer process started")
 
 	// Start output monitoring
@@ -347,7 +389,7 @@ func (lf *LibFuzzer) Start(ctx context.Context) error {
 	}
 
 	// Emit started event through base fuzzer
-	lf.EmitStartedEvent(lf.ctx, lf.config.Target, map[string]interface{}{
+	lf.EmitStartedEvent(lf.ctx, lf.config.JobID, map[string]interface{}{
 		"fuzzer": "LibFuzzer",
 		"pid":    lf.cmd.Process.Pid,
 		"bot_id": lf.botID,
@@ -398,7 +440,7 @@ func (lf *LibFuzzer) Stop() error {
 	}
 
 	// Emit stopped event through base fuzzer
-	lf.EmitStoppedEvent(lf.ctx, lf.config.Target, "user requested")
+	lf.EmitStoppedEvent(lf.ctx, lf.config.JobID, "user requested")
 
 	lf.logger.Info("LibFuzzer stopped")
 
@@ -539,7 +581,7 @@ func (lf *LibFuzzer) GetCrashes() ([]*common.CrashResult, error) {
 	lf.logger.WithFields(logrus.Fields{
 		"crash_dir":    lf.crashDir,
 		"artifact_dir": lf.artifactDir,
-		"job_id":       lf.config.Target,
+		"job_id":       lf.config.JobID,
 	}).Info("Scanning LibFuzzer directories for crashes")
 
 	// Read crashes from crash directory
@@ -578,15 +620,16 @@ func (lf *LibFuzzer) GetCrashes() ([]*common.CrashResult, error) {
 		crashHash := lf.hashInput(crashData)
 
 		crash := &common.CrashResult{
-			ID:        file.Name(),
-			JobID:     lf.config.Target,
-			BotID:     lf.botID,
-			Timestamp: info.ModTime(),
-			FilePath:  crashPath,
-			Size:      int64(len(crashData)),
-			Hash:      crashHash,
-			Type:      crashType,
-			Input:     crashData, // Include the crash input data
+			ID:          file.Name(),
+			JobID:       lf.config.JobID,
+			BotID:       lf.botID,
+			Timestamp:   info.ModTime(),
+			FilePath:    crashPath,
+			Size:        int64(len(crashData)),
+			Hash:        crashHash,
+			Type:        crashType,
+			Input:       crashData,                                    // Include the crash input data
+			InputBase64: base64.StdEncoding.EncodeToString(crashData), // Base64 encode the crash data
 		}
 
 		lf.logger.WithFields(logrus.Fields{
@@ -632,15 +675,16 @@ func (lf *LibFuzzer) GetCrashes() ([]*common.CrashResult, error) {
 			crashHash := lf.hashInput(crashData)
 
 			crash := &common.CrashResult{
-				ID:        file.Name(),
-				JobID:     lf.config.Target,
-				BotID:     lf.botID,
-				Timestamp: info.ModTime(),
-				FilePath:  artifactPath,
-				Size:      int64(len(crashData)),
-				Hash:      crashHash,
-				Type:      "artifact_crash",
-				Input:     crashData, // Include the crash input data
+				ID:          file.Name(),
+				JobID:       lf.config.JobID,
+				BotID:       lf.botID,
+				Timestamp:   info.ModTime(),
+				FilePath:    artifactPath,
+				Size:        int64(len(crashData)),
+				Hash:        crashHash,
+				Type:        "artifact_crash",
+				Input:       crashData,                                    // Include the crash input data
+				InputBase64: base64.StdEncoding.EncodeToString(crashData), // Base64 encode the crash data
 			}
 
 			lf.logger.WithFields(logrus.Fields{
@@ -659,7 +703,7 @@ func (lf *LibFuzzer) GetCrashes() ([]*common.CrashResult, error) {
 
 	lf.logger.WithFields(logrus.Fields{
 		"crash_count": len(crashes),
-		"job_id":      lf.config.Target,
+		"job_id":      lf.config.JobID,
 	}).Info("Completed LibFuzzer crash scan")
 
 	return crashes, nil
@@ -672,7 +716,7 @@ func (lf *LibFuzzer) GetCoverage() (*common.CoverageResult, error) {
 
 	coverage := &common.CoverageResult{
 		ID:        fmt.Sprintf("libfuzzer_%d", time.Now().Unix()),
-		JobID:     lf.config.Target,
+		JobID:     lf.config.JobID,
 		BotID:     lf.botID,
 		Timestamp: time.Now(),
 		Edges:     int(lf.stats.TotalEdges),
@@ -908,6 +952,17 @@ func (lf *LibFuzzer) monitorOutput(pipe io.Reader, name string) {
 	for scanner.Scan() {
 		line := scanner.Text()
 
+		// Write to output file if available
+		if lf.config.OutputWriter != nil {
+			timestamp := time.Now().Format("15:04:05")
+			_, err := fmt.Fprintf(lf.config.OutputWriter, "[%s] [%s] [%s] %s\n", timestamp, "info", "fuzzer", line)
+			if err != nil {
+				lf.logger.WithError(err).Error("Failed to write to OutputWriter")
+			}
+		} else {
+			lf.logger.Debug("OutputWriter is nil, not writing to log file")
+		}
+
 		// Log output - use Info for stderr to capture errors
 		if name == "stderr" {
 			lf.logger.WithField("stream", name).Info(line)
@@ -1031,7 +1086,7 @@ func (lf *LibFuzzer) handleCrash(line string) {
 		// Create a simple crash result
 		crash := &common.CrashResult{
 			ID:        fmt.Sprintf("crash_%d", lf.stats.TotalCrashes),
-			JobID:     lf.config.Target,
+			JobID:     lf.config.JobID,
 			Timestamp: time.Now(),
 			Type:      "libfuzzer_crash",
 		}
@@ -1042,11 +1097,11 @@ func (lf *LibFuzzer) handleCrash(line string) {
 	if lf.eventHandler != nil {
 		crash := &common.CrashResult{
 			ID:        fmt.Sprintf("crash_%d", lf.stats.TotalCrashes),
-			JobID:     lf.config.Target,
+			JobID:     lf.config.JobID,
 			Timestamp: time.Now(),
 			Type:      "libfuzzer_crash",
 		}
-		lf.EmitCrashFoundEvent(lf.ctx, lf.config.Target, crash)
+		lf.EmitCrashFoundEvent(lf.ctx, lf.config.JobID, crash)
 	}
 }
 
@@ -1056,14 +1111,24 @@ func (lf *LibFuzzer) monitorProcess() {
 	// Log that we're monitoring the process
 	lf.logger.WithField("pid", lf.cmd.Process.Pid).Info("Monitoring LibFuzzer process")
 
+	startTime := time.Now()
+
 	// Wait for process to exit
 	err := lf.cmd.Wait()
 
+	duration := time.Since(startTime)
+
 	// Log process exit immediately
 	if err != nil {
-		lf.logger.WithError(err).WithField("pid", lf.cmd.Process.Pid).Error("LibFuzzer process exited with error")
+		lf.logger.WithError(err).WithFields(logrus.Fields{
+			"pid":      lf.cmd.Process.Pid,
+			"duration": duration,
+		}).Error("LibFuzzer process exited with error")
 	} else {
-		lf.logger.WithField("pid", lf.cmd.Process.Pid).Info("LibFuzzer process exited cleanly")
+		lf.logger.WithFields(logrus.Fields{
+			"pid":      lf.cmd.Process.Pid,
+			"duration": duration,
+		}).Info("LibFuzzer process exited cleanly")
 	}
 
 	lf.mu.Lock()
@@ -1098,7 +1163,7 @@ func (lf *LibFuzzer) monitorProcess() {
 			lf.eventHandler.OnError(lf, err)
 		}
 		// Emit error event through base fuzzer
-		lf.EmitErrorEvent(lf.ctx, lf.config.Target, err)
+		lf.EmitErrorEvent(lf.ctx, lf.config.JobID, err)
 	} else {
 		// Either no error or exited due to crash (which is success)
 		lf.status = StatusCompleted
@@ -1127,7 +1192,7 @@ func (lf *LibFuzzer) monitorProcess() {
 	} else if lf.ctx.Err() != nil {
 		reason = "cancelled"
 	}
-	lf.EmitStoppedEvent(context.Background(), lf.config.Target, reason)
+	lf.EmitStoppedEvent(context.Background(), lf.config.JobID, reason)
 }
 
 func (lf *LibFuzzer) getPhase() string {
@@ -1252,7 +1317,7 @@ func (lf *LibFuzzer) parseAndEmitCoverage(output string) {
 	if lf.stats.CoveredEdges > 0 || lf.stats.NewPaths > 0 {
 		coverage := &common.CoverageResult{
 			ID:        fmt.Sprintf("libfuzzer_cov_%d", time.Now().Unix()),
-			JobID:     lf.config.Target,
+			JobID:     lf.config.JobID,
 			BotID:     lf.botID,
 			Timestamp: time.Now(),
 			Edges:     lf.stats.TotalEdges,
@@ -1261,7 +1326,7 @@ func (lf *LibFuzzer) parseAndEmitCoverage(output string) {
 		}
 
 		// Emit coverage event through base fuzzer
-		lf.EmitCoverageEvent(lf.ctx, lf.config.Target, coverage)
+		lf.EmitCoverageEvent(lf.ctx, lf.config.JobID, coverage)
 	}
 }
 
@@ -1311,31 +1376,29 @@ func (lf *LibFuzzer) detectAndEmitCrash(output string) {
 
 		// Create crash result with input data
 		crash := &common.CrashResult{
-			ID:        filepath.Base(crashPath),
-			JobID:     lf.config.Target,
-			BotID:     lf.botID, // Use the bot ID from the struct
-			Timestamp: info.ModTime(),
-			FilePath:  crashPath,
-			Size:      info.Size(),
-			Hash:      lf.hashCrashInput(crashData),
-			Type:      "libfuzzer",
-			Input:     crashData, // Include the actual crash input
+			ID:          filepath.Base(crashPath),
+			JobID:       lf.config.JobID, // Use the actual job ID
+			BotID:       lf.botID,        // Use the bot ID from the struct
+			Timestamp:   info.ModTime(),
+			FilePath:    crashPath,
+			Size:        info.Size(),
+			Hash:        lf.hashCrashInput(crashData),
+			Type:        "libfuzzer",
+			Input:       crashData,                                    // Include the actual crash input
+			InputBase64: base64.StdEncoding.EncodeToString(crashData), // Base64 encode the crash data
 		}
 
-		// Emit through event handler
+		// Emit through event handler - this is the primary path that includes the full crash data
 		if lf.eventHandler != nil {
 			lf.eventHandler.OnCrash(lf, crash)
 		}
-
-		// Also emit through base fuzzer
-		lf.EmitCrashFoundEvent(lf.ctx, lf.config.Target, crash)
 	}
 }
 
 // emitPeriodicStats emits periodic stats events
 func (lf *LibFuzzer) emitPeriodicStats() {
 	// Emit stats event through base fuzzer
-	lf.EmitStatsEvent(lf.ctx, lf.config.Target, lf.stats)
+	lf.EmitStatsEvent(lf.ctx, lf.config.JobID, lf.stats)
 }
 
 // hashCrashInput computes SHA256 hash of crash input for deduplication

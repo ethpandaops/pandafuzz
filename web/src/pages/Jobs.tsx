@@ -50,6 +50,7 @@ import {
 } from '@mui/icons-material';
 import api from '../api/client';
 import { Job, JobStatus, JobPriority, Bot } from '../types';
+import { SortableTableHeader, useSort } from '../components/SortableTableHeader';
 
 const statusColors: Record<JobStatus, 'default' | 'primary' | 'success' | 'error' | 'warning'> = {
   [JobStatus.Pending]: 'default',
@@ -90,6 +91,9 @@ function Jobs() {
   const [jobLogs, setJobLogs] = useState<any>(null);
   const [logsLoading, setLogsLoading] = useState(false);
   
+  // Sort state - default to created_at desc
+  const { sortState, handleSort } = useSort({ key: 'created_at', direction: 'desc' });
+  
   // Snackbar state
   const [snackbar, setSnackbar] = useState<{
     open: boolean;
@@ -122,7 +126,11 @@ function Jobs() {
       } else {
         setIsRefreshing(true);
       }
-      const data = await api.getJobs({ limit: 100 });
+      const data = await api.getJobs({ 
+        limit: 100,
+        sort_by: sortState?.key,
+        sort_order: sortState?.direction
+      });
       
       // Only update if data has actually changed
       setJobs(prevJobs => {
@@ -143,7 +151,7 @@ function Jobs() {
         setIsRefreshing(false);
       }
     }
-  }, []);
+  }, [sortState]);
 
   const fetchBots = async () => {
     try {
@@ -165,7 +173,14 @@ function Jobs() {
     }, 10000); // Update every 10 seconds instead of 5
     
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchJobs]);
+  
+  // Refetch when sort changes
+  useEffect(() => {
+    if (sortState) {
+      fetchJobs(false);
+    }
+  }, [sortState, fetchJobs]);
 
   const getBotName = useCallback((botId: string | undefined): string => {
     if (!botId) return '-';
@@ -331,13 +346,38 @@ function Jobs() {
         <Table>
           <TableHead>
             <TableRow>
-              <TableCell>Name</TableCell>
-              <TableCell>Status</TableCell>
-              <TableCell>Priority</TableCell>
-              <TableCell>Fuzzer</TableCell>
+              <SortableTableHeader
+                label="Name"
+                sortKey="name"
+                currentSort={sortState}
+                onSort={handleSort}
+              />
+              <SortableTableHeader
+                label="Status"
+                sortKey="status"
+                currentSort={sortState}
+                onSort={handleSort}
+              />
+              <SortableTableHeader
+                label="Priority"
+                sortKey="priority"
+                currentSort={sortState}
+                onSort={handleSort}
+              />
+              <SortableTableHeader
+                label="Fuzzer"
+                sortKey="fuzzer"
+                currentSort={sortState}
+                onSort={handleSort}
+              />
               <TableCell>Target</TableCell>
               <TableCell>Bot</TableCell>
-              <TableCell>Duration</TableCell>
+              <SortableTableHeader
+                label="Created"
+                sortKey="created_at"
+                currentSort={sortState}
+                onSort={handleSort}
+              />
               <TableCell>Actions</TableCell>
             </TableRow>
           </TableHead>

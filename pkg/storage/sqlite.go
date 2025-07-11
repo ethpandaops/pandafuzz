@@ -1163,6 +1163,69 @@ func (s *SQLiteStorage) GetCrashes(ctx context.Context, limit, offset int) ([]*c
 	}, limit, offset)
 }
 
+// GetCrashesSorted retrieves crashes with sorting support
+func (s *SQLiteStorage) GetCrashesSorted(ctx context.Context, limit, offset int, sortBy, sortOrder string) ([]*common.CrashResult, error) {
+	// Check if context is already cancelled
+	if err := ctx.Err(); err != nil {
+		s.logger.WithError(err).Debug("Context cancelled before querying crashes")
+		return nil, err
+	}
+
+	// Map sort field names to database columns
+	columnMap := map[string]string{
+		"timestamp": "timestamp",
+		"type":      "type",
+		"signal":    "signal",
+		"size":      "size",
+		"job_id":    "job_id",
+		"bot_id":    "bot_id",
+	}
+
+	// Default to timestamp if invalid sort field
+	sortColumn, ok := columnMap[sortBy]
+	if !ok {
+		sortColumn = "timestamp"
+	}
+
+	// Validate sort order
+	if sortOrder != "asc" && sortOrder != "desc" {
+		sortOrder = "desc"
+	}
+
+	// Build query with dynamic ORDER BY clause
+	query := fmt.Sprintf(`SELECT id, job_id, bot_id, hash, file_path, type, signal, exit_code, timestamp, size, is_unique, output, stack_trace 
+	          FROM crashes 
+	          ORDER BY %s %s 
+	          LIMIT ? OFFSET ?`, sortColumn, sortOrder)
+
+	return RetryableQuery(ctx, s.db, s.config, query, func(rows *sql.Rows) (*common.CrashResult, error) {
+		// Check context during iteration
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		crash := &common.CrashResult{}
+		var output, stackTrace sql.NullString
+		err := rows.Scan(&crash.ID, &crash.JobID, &crash.BotID, &crash.Hash, &crash.FilePath,
+			&crash.Type, &crash.Signal, &crash.ExitCode, &crash.Timestamp, &crash.Size, &crash.IsUnique,
+			&output, &stackTrace)
+		if err != nil {
+			return nil, err
+		}
+		crash.Output = output.String
+		crash.StackTrace = stackTrace.String
+
+		// Load crash input data from separate table if context not cancelled
+		if ctx.Err() == nil {
+			if input, err := s.GetCrashInput(ctx, crash.ID); err == nil && input != nil {
+				crash.Input = input
+			}
+		}
+
+		return crash, nil
+	}, limit, offset)
+}
+
 // GetCrash retrieves a specific crash by ID
 func (s *SQLiteStorage) GetCrash(ctx context.Context, crashID string) (*common.CrashResult, error) {
 	query := `SELECT id, job_id, bot_id, hash, file_path, type, signal, exit_code, timestamp, size, is_unique, output, stack_trace 

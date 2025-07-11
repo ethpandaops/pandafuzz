@@ -30,6 +30,7 @@ import {
 } from '@mui/icons-material';
 import api from '../api/client';
 import { CrashResult } from '../types';
+import { SortableTableHeader, useSort } from '../components/SortableTableHeader';
 
 function Crashes() {
   const [crashes, setCrashes] = useState<CrashResult[]>([]);
@@ -40,12 +41,27 @@ function Crashes() {
     job_id: '',
     type: '',
   });
+  
+  // Initialize sort with timestamp descending by default
+  const { sortState, handleSort } = useSort({ key: 'timestamp', direction: 'desc' });
 
   const fetchCrashes = async () => {
     try {
       setLoading(true);
-      const params = filter.job_id ? { job_id: filter.job_id } : undefined;
-      const data = await api.getCrashes({ ...params, limit: 200 });
+      const params: any = { limit: 200 };
+      
+      // Add filter params
+      if (filter.job_id) {
+        params.job_id = filter.job_id;
+      }
+      
+      // Add sort params
+      if (sortState) {
+        params.sort_by = sortState.key;
+        params.sort_order = sortState.direction;
+      }
+      
+      const data = await api.getCrashes(params);
       const filtered = filter.type
         ? data.filter((c) => c.type === filter.type)
         : data;
@@ -60,7 +76,7 @@ function Crashes() {
 
   useEffect(() => {
     fetchCrashes();
-  }, [filter]);
+  }, [filter, sortState]);
 
   const downloadCrash = async (crash: CrashResult) => {
     try {
@@ -200,12 +216,27 @@ function Crashes() {
           <TableHead>
             <TableRow>
               <TableCell>Hash</TableCell>
-              <TableCell>Type</TableCell>
+              <SortableTableHeader
+                label="Type"
+                sortKey="type"
+                currentSort={sortState}
+                onSort={handleSort}
+              />
               <TableCell>Job ID</TableCell>
               <TableCell>Bot ID</TableCell>
-              <TableCell>Size</TableCell>
+              <SortableTableHeader
+                label="Size"
+                sortKey="size"
+                currentSort={sortState}
+                onSort={handleSort}
+              />
               <TableCell>Count</TableCell>
-              <TableCell>First Seen</TableCell>
+              <SortableTableHeader
+                label="First Seen"
+                sortKey="timestamp"
+                currentSort={sortState}
+                onSort={handleSort}
+              />
               <TableCell>Actions</TableCell>
             </TableRow>
           </TableHead>
