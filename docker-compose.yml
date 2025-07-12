@@ -13,7 +13,7 @@ services:
     container_name: pandafuzz-master
     restart: unless-stopped
     ports:
-      - "8088:8080"  # Web UI and API port (changed from 8080 to avoid conflicts)
+      - "8080:8080"  # Web UI and API port (changed from 8080 to avoid conflicts)
       - "9090:9090"  # Metrics port
     volumes:
       - master-data:/app/data

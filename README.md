@@ -13,6 +13,9 @@ cd pandafuzz
 docker-compose up -d
 
 # Access the web dashboard at http://localhost:8080
+
+# Create a fuzzing job with crash detection (see examples/)
+cd examples && ./create-fuzzing-job.sh
 ```
 
 ### Docker Compose Example
@@ -52,6 +55,13 @@ services:
     deploy:
       replicas: 1
 ```
+
+## Examples
+
+Check out the [examples/](examples/) directory for:
+- `create-fuzzing-job.sh` - Complete example that compiles and fuzzes a vulnerable binary
+- `web-ui-job-example.md` - Guide for using the web UI
+- `FUZZER_CONFIGURATION.md` - Advanced fuzzer configuration
 
 ## Documentation
 
