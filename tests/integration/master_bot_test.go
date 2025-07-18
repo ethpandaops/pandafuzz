@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -18,13 +19,13 @@ import (
 // TestMasterBotRegistration tests bot registration with master
 func TestMasterBotRegistration(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
 
 	// Create bot client
-	client, err := bot.NewRetryClient(env.botConfig)
+	client, err := bot.NewRetryClient(env.botConfig, env.logger)
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -36,7 +37,7 @@ func TestMasterBotRegistration(t *testing.T) {
 	assert.Equal(t, "registered", response.Status)
 
 	// Verify bot is registered in database
-	registeredBot, err := env.state.GetBot(env.botConfig.ID)
+	registeredBot, err := env.state.GetBot(context.Background(), env.botConfig.ID)
 	require.NoError(t, err)
 	assert.Equal(t, env.botConfig.ID, registeredBot.ID)
 	assert.Equal(t, common.BotStatusIdle, registeredBot.Status)
@@ -46,13 +47,13 @@ func TestMasterBotRegistration(t *testing.T) {
 // TestMasterBotHeartbeat tests heartbeat mechanism
 func TestMasterBotHeartbeat(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
 
 	// Create bot client
-	client, err := bot.NewRetryClient(env.botConfig)
+	client, err := bot.NewRetryClient(env.botConfig, env.logger)
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -65,7 +66,7 @@ func TestMasterBotHeartbeat(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify bot last seen is updated
-	bot, err := env.state.GetBot(env.botConfig.ID)
+	bot, err := env.state.GetBot(context.Background(), env.botConfig.ID)
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now(), bot.LastSeen, 2*time.Second)
 
@@ -75,7 +76,7 @@ func TestMasterBotHeartbeat(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify bot status is updated
-	bot, err = env.state.GetBot(env.botConfig.ID)
+	bot, err = env.state.GetBot(context.Background(), env.botConfig.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.BotStatusBusy, bot.Status)
 	assert.NotNil(t, bot.CurrentJob)
@@ -85,13 +86,13 @@ func TestMasterBotHeartbeat(t *testing.T) {
 // TestMasterBotDeregistration tests bot deregistration
 func TestMasterBotDeregistration(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
 
 	// Create bot client
-	client, err := bot.NewRetryClient(env.botConfig)
+	client, err := bot.NewRetryClient(env.botConfig, env.logger)
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -100,7 +101,7 @@ func TestMasterBotDeregistration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify bot exists
-	_, err = env.state.GetBot(env.botConfig.ID)
+	_, err = env.state.GetBot(context.Background(), env.botConfig.ID)
 	require.NoError(t, err)
 
 	// Deregister bot
@@ -108,20 +109,20 @@ func TestMasterBotDeregistration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify bot is removed
-	_, err = env.state.GetBot(env.botConfig.ID)
+	_, err = env.state.GetBot(context.Background(), env.botConfig.ID)
 	assert.Error(t, err)
 }
 
 // TestBotAgent tests the bot agent lifecycle
 func TestBotAgent(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
 
 	// Create bot agent
-	agent, err := bot.NewAgent(env.botConfig)
+	agent, err := bot.NewAgent(env.botConfig, env.logger)
 	require.NoError(t, err)
 
 	// Start agent
@@ -131,7 +132,7 @@ func TestBotAgent(t *testing.T) {
 
 	// Wait for registration
 	AssertEventually(t, func() bool {
-		_, err := env.state.GetBot(env.botConfig.ID)
+		_, err := env.state.GetBot(context.Background(), env.botConfig.ID)
 		return err == nil
 	}, 5*time.Second, "Bot should be registered")
 
@@ -152,11 +153,11 @@ func TestBotAgent(t *testing.T) {
 // TestHeartbeatTimeout tests bot timeout handling
 func TestHeartbeatTimeout(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Use shorter timeout for testing
 	env.masterConfig.Timeouts.BotHeartbeat = 1 * time.Second
 	// env.masterConfig.Timeouts.BotIdle = 2 * time.Second // TODO: BotIdle doesn't exist
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -176,7 +177,7 @@ func TestHeartbeatTimeout(t *testing.T) {
 // TestMultipleBots tests multiple bots connecting to master
 func TestMultipleBots(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -188,13 +189,13 @@ func TestMultipleBots(t *testing.T) {
 	for i := 0; i < numBots; i++ {
 		config := *env.botConfig
 		config.ID = fmt.Sprintf("bot-%d", i)
-		
-		agent, err := bot.NewAgent(&config)
+
+		agent, err := bot.NewAgent(&config, env.logger)
 		require.NoError(t, err)
-		
+
 		err = agent.Start()
 		require.NoError(t, err)
-		
+
 		agents[i] = agent
 	}
 
@@ -207,14 +208,14 @@ func TestMultipleBots(t *testing.T) {
 
 	// Wait for all bots to register
 	AssertEventually(t, func() bool {
-		bots, err := env.state.ListBots()
+		bots, err := env.state.ListBots(context.Background())
 		return err == nil && len(bots) == numBots
 	}, 10*time.Second, "All bots should be registered")
 
 	// Verify all bots are idle
-	bots, err := env.state.ListBots()
+	bots, err := env.state.ListBots(context.Background())
 	require.NoError(t, err)
-	
+
 	for _, bot := range bots {
 		assert.Equal(t, common.BotStatusIdle, bot.Status)
 	}
@@ -223,13 +224,13 @@ func TestMultipleBots(t *testing.T) {
 // TestBotReconnection tests bot reconnection after network failure
 func TestBotReconnection(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
 
 	// Create bot client with retry
-	client, err := bot.NewRetryClient(env.botConfig)
+	client, err := bot.NewRetryClient(env.botConfig, env.logger)
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -245,7 +246,7 @@ func TestBotReconnection(t *testing.T) {
 	assert.Error(t, err)
 
 	// Restart server
-	env.server = master.NewServer(env.masterConfig, env.state, env.timeoutMgr)
+	env.server = master.NewServer(env.masterConfig, env.state, env.timeoutMgr, nil, env.logger)
 	err = env.StartMaster()
 	require.NoError(t, err)
 
@@ -261,7 +262,7 @@ func TestBotReconnection(t *testing.T) {
 // TestAPIEndpoints tests the master API endpoints directly
 func TestAPIEndpoints(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -276,7 +277,7 @@ func TestAPIEndpoints(t *testing.T) {
 	resp, err = env.httpClient.Get(env.masterURL + "/api/v1/system/status")
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	
+
 	var status map[string]any
 	err = json.NewDecoder(resp.Body).Decode(&status)
 	resp.Body.Close()
@@ -288,7 +289,7 @@ func TestAPIEndpoints(t *testing.T) {
 	resp, err = env.httpClient.Get(env.masterURL + "/api/v1/bots")
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	
+
 	var bots []common.Bot
 	err = json.NewDecoder(resp.Body).Decode(&bots)
 	resp.Body.Close()
@@ -299,7 +300,7 @@ func TestAPIEndpoints(t *testing.T) {
 	resp, err = env.httpClient.Get(env.masterURL + "/api/v1/jobs")
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	
+
 	var jobs []common.Job
 	err = json.NewDecoder(resp.Body).Decode(&jobs)
 	resp.Body.Close()
@@ -310,27 +311,27 @@ func TestAPIEndpoints(t *testing.T) {
 // TestConcurrentBotRegistrations tests concurrent bot registrations
 func TestConcurrentBotRegistrations(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
 
 	numBots := 10
 	errChan := make(chan error, numBots)
-	
+
 	// Register bots concurrently
 	for i := 0; i < numBots; i++ {
 		go func(id int) {
 			config := *env.botConfig
 			config.ID = fmt.Sprintf("concurrent-bot-%d", id)
-			
-			client, err := bot.NewRetryClient(&config)
+
+			client, err := bot.NewRetryClient(&config, env.logger)
 			if err != nil {
 				errChan <- err
 				return
 			}
 			defer client.Close()
-			
+
 			_, err = client.RegisterBot(config.ID, config.Capabilities, "http://localhost:9000")
 			errChan <- err
 		}(i)
@@ -343,7 +344,7 @@ func TestConcurrentBotRegistrations(t *testing.T) {
 	}
 
 	// Verify all bots are registered
-	bots, err := env.state.ListBots()
+	bots, err := env.state.ListBots(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, numBots, len(bots))
 }
@@ -351,19 +352,19 @@ func TestConcurrentBotRegistrations(t *testing.T) {
 // TestBotMetrics tests bot metrics collection
 func TestBotMetrics(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Enable metrics
 	// env.masterConfig.Server.EnableMetrics = true // TODO: EnableMetrics doesn't exist
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
 
 	// Register a bot
-	client, err := bot.NewRetryClient(env.botConfig)
+	client, err := bot.NewRetryClient(env.botConfig, env.logger)
 	require.NoError(t, err)
 	defer client.Close()
-	
+
 	_, err = client.RegisterBot(env.botConfig.ID, env.botConfig.Capabilities, "http://localhost:9000")
 	require.NoError(t, err)
 
@@ -379,7 +380,7 @@ func TestBotMetrics(t *testing.T) {
 	// resp, err := env.httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/metrics", env.masterConfig.Server.MetricsPort))
 	// require.NoError(t, err)
 	// defer resp.Body.Close()
-	// 
+	//
 	// // Metrics endpoint should return text
 	// assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
@@ -387,7 +388,7 @@ func TestBotMetrics(t *testing.T) {
 // TestInvalidBotRequests tests error handling for invalid requests
 func TestInvalidBotRequests(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -397,12 +398,12 @@ func TestInvalidBotRequests(t *testing.T) {
 	payload := map[string]any{
 		"status": "idle",
 	}
-	
+
 	body, _ := json.Marshal(payload)
 	resp, err := env.httpClient.Post(url, "application/json", bytes.NewBuffer(body))
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	// Should return not found
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 
@@ -412,12 +413,12 @@ func TestInvalidBotRequests(t *testing.T) {
 		"hostname":     "test",
 		"capabilities": []string{},
 	}
-	
+
 	body, _ = json.Marshal(payload)
 	resp, err = env.httpClient.Post(url, "application/json", bytes.NewBuffer(body))
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	// Should return bad request
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }

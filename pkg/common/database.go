@@ -58,6 +58,13 @@ type DatabaseConfig struct {
 	BackupPath string            `json:"backup_path" yaml:"backup_path"` // Backup directory
 	BackupFreq string            `json:"backup_freq" yaml:"backup_freq"` // Backup frequency
 
+	// Connection pool configuration
+	MaxOpenConns        int           `json:"max_open_conns" yaml:"max_open_conns"`               // Maximum open connections
+	MaxIdleConns        int           `json:"max_idle_conns" yaml:"max_idle_conns"`               // Maximum idle connections
+	ConnMaxLifetime     time.Duration `json:"conn_max_lifetime" yaml:"conn_max_lifetime"`         // Maximum connection lifetime
+	ConnMaxIdleTime     time.Duration `json:"conn_max_idle_time" yaml:"conn_max_idle_time"`       // Maximum connection idle time
+	HealthCheckInterval time.Duration `json:"health_check_interval" yaml:"health_check_interval"` // Health check interval
+
 	// Retry configuration
 	MaxRetries      int           `json:"max_retries" yaml:"max_retries"`           // Maximum number of retries
 	RetryDelay      time.Duration `json:"retry_delay" yaml:"retry_delay"`           // Initial delay between retries

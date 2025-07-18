@@ -53,10 +53,10 @@ func (s *Server) handleJobCreateWithUpload(w http.ResponseWriter, r *http.Reques
 	// Sanitize filename
 	filename := filepath.Base(header.Filename)
 	filename = strings.ReplaceAll(filename, "..", "")
-	
+
 	// Create binaries storage directory if it doesn't exist
 	// Ensure we have an absolute path
-	basePath := s.config.Storage.BasePath
+	basePath := s.getStorageBasePath()
 	if !filepath.IsAbs(basePath) {
 		// If relative, make it absolute based on current working directory
 		if absPath, err := filepath.Abs(basePath); err == nil {
@@ -66,7 +66,7 @@ func (s *Server) handleJobCreateWithUpload(w http.ResponseWriter, r *http.Reques
 			basePath = "/storage"
 		}
 	}
-	
+
 	binariesDir := filepath.Join(basePath, "binaries")
 	if err := os.MkdirAll(binariesDir, 0755); err != nil {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create binaries directory", err)
@@ -107,11 +107,11 @@ func (s *Server) handleJobCreateWithUpload(w http.ResponseWriter, r *http.Reques
 		absBinaryPath = binaryPath // Fallback to original if absolute conversion fails
 	}
 	req.Target = absBinaryPath
-	
+
 	// Log the binary path for debugging
 	s.logger.WithFields(map[string]any{
-		"binary_path": absBinaryPath,
-		"base_path": basePath,
+		"binary_path":       absBinaryPath,
+		"base_path":         basePath,
 		"original_filename": filename,
 	}).Info("Binary uploaded and stored")
 
@@ -164,11 +164,15 @@ func (s *Server) handleJobCreateWithUpload(w http.ResponseWriter, r *http.Reques
 
 	// Create job using service layer
 	jobReq := service.CreateJobRequest{
-		Name:     req.Name,
-		Target:   req.Target,
-		Fuzzer:   req.Fuzzer,
-		Duration: req.Duration,
-		Config:   req.Config,
+		Name:              req.Name,
+		Target:            req.Target,
+		Fuzzer:            req.Fuzzer,
+		Duration:          req.Duration,
+		Config:            req.Config,
+		CampaignID:        req.CampaignID,
+		CorpusID:          req.CorpusID,
+		CollectionID:      req.CollectionID,
+		UseCampaignCorpus: req.UseCampaignCorpus,
 	}
 
 	job, err := s.services.Job.CreateJob(r.Context(), jobReq)
@@ -182,12 +186,19 @@ func (s *Server) handleJobCreateWithUpload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.logger.WithFields(map[string]any{
-		"job_id":      job.ID,
-		"binary_path": binaryPath,
-		"binary_size": written,
+	logFields := map[string]any{
+		"job_id":       job.ID,
+		"binary_path":  binaryPath,
+		"binary_size":  written,
 		"corpus_count": len(seedCorpusPaths),
-	}).Info("Job created with uploaded binary")
+	}
+	if req.CollectionID != "" {
+		logFields["collection_id"] = req.CollectionID
+	}
+	if req.CampaignID != "" {
+		logFields["campaign_id"] = req.CampaignID
+	}
+	s.logger.WithFields(logFields).Info("Job created with uploaded binary")
 
 	// Add additional info to response
 	response := struct {

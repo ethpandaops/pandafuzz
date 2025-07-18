@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -25,7 +26,7 @@ import (
 func TestBotReceiveJob(t *testing.T) {
 	botID := "test-bot-123"
 	jobID := "job-456"
-	
+
 	// Mock job data
 	mockJob := &common.Job{
 		ID:          jobID,
@@ -63,7 +64,7 @@ func TestBotReceiveJob(t *testing.T) {
 			// Update job status
 			var req map[string]any
 			json.NewDecoder(r.Body).Decode(&req)
-			
+
 			status, ok := req["status"].(string)
 			assert.True(t, ok, "Status should be a string")
 			assert.Contains(t, []string{
@@ -80,22 +81,22 @@ func TestBotReceiveJob(t *testing.T) {
 			var crash common.CrashResult
 			err := json.NewDecoder(r.Body).Decode(&crash)
 			require.NoError(t, err)
-			
+
 			assert.Equal(t, jobID, crash.JobID)
 			assert.NotEmpty(t, crash.Hash)
-			
+
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]string{"status": "crash_received"})
-			
+
 		case "/api/v1/results/coverage":
 			// Receive coverage results
 			var coverage common.CoverageResult
 			err := json.NewDecoder(r.Body).Decode(&coverage)
 			require.NoError(t, err)
-			
+
 			assert.Equal(t, jobID, coverage.JobID)
 			assert.NotZero(t, coverage.Edges)
-			
+
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]string{"status": "coverage_received"})
 
@@ -117,7 +118,8 @@ func TestBotReceiveJob(t *testing.T) {
 	}
 
 	// Create bot client
-	client, err := bot.NewRetryClient(cfg); require.NoError(t, err)
+	logger := logrus.New()
+	client, err := bot.NewRetryClient(cfg, logger); require.NoError(t, err)
 	ctx := context.Background()
 
 	// Test 1: Fetch pending job
@@ -125,7 +127,7 @@ func TestBotReceiveJob(t *testing.T) {
 		job, err := client.GetJob(botID)
 		require.NoError(t, err)
 		require.NotNil(t, job)
-		
+
 		assert.Equal(t, jobID, job.ID)
 		assert.Equal(t, botID, job.BotID)
 		assert.Equal(t, "afl++", job.FuzzerType)
@@ -136,7 +138,7 @@ func TestBotReceiveJob(t *testing.T) {
 	t.Run("update job status to running", func(t *testing.T) {
 		err := client.UpdateJobStatus(ctx, jobID, common.JobStatusRunning, "")
 		require.NoError(t, err)
-		
+
 		mu.Lock()
 		assert.Equal(t, 1, apiCalls[fmt.Sprintf("/api/v1/jobs/%s/status", jobID)])
 		mu.Unlock()
@@ -166,7 +168,7 @@ func TestBotReceiveJob(t *testing.T) {
 
 		err := client.SubmitJobResults(ctx, jobID, results)
 		require.NoError(t, err)
-		
+
 		mu.Lock()
 		assert.Equal(t, 1, apiCalls[fmt.Sprintf("/api/v1/jobs/%s/results", jobID)])
 		mu.Unlock()
@@ -187,7 +189,7 @@ func TestBotReceiveJob(t *testing.T) {
 func TestBotJobExecutionFlow(t *testing.T) {
 	botID := "executor-bot"
 	jobID := "exec-job-1"
-	
+
 	jobStates := make(map[string]string)
 	var stateMu sync.Mutex
 
@@ -213,7 +215,7 @@ func TestBotJobExecutionFlow(t *testing.T) {
 					},
 				}
 				json.NewEncoder(w).Encode(job)
-				
+
 				stateMu.Lock()
 				jobStates[jobID] = "assigned"
 				stateMu.Unlock()
@@ -225,32 +227,32 @@ func TestBotJobExecutionFlow(t *testing.T) {
 		case fmt.Sprintf("/api/v1/jobs/%s/status", jobID):
 			var req map[string]any
 			json.NewDecoder(r.Body).Decode(&req)
-			
+
 			stateMu.Lock()
 			jobStates[jobID] = req["status"].(string)
 			stateMu.Unlock()
-			
+
 			w.WriteHeader(http.StatusOK)
 
 		case fmt.Sprintf("/api/v1/jobs/%s/progress", jobID):
 			// Progress update
 			var progress common.JobProgress
 			json.NewDecoder(r.Body).Decode(&progress)
-			
+
 			assert.NotZero(t, progress.CurrentExecs)
 			assert.NotZero(t, progress.Coverage)
-			
+
 			w.WriteHeader(http.StatusOK)
 
 		case fmt.Sprintf("/api/v1/jobs/%s/results", jobID):
 			// Final results
 			var results common.JobResult
 			json.NewDecoder(r.Body).Decode(&results)
-			
+
 			stateMu.Lock()
 			jobStates[jobID] = "completed"
 			stateMu.Unlock()
-			
+
 			w.WriteHeader(http.StatusOK)
 
 		case fmt.Sprintf("/api/v1/bots/%s/heartbeat", botID):
@@ -277,7 +279,8 @@ func TestBotJobExecutionFlow(t *testing.T) {
 	}
 
 	// Simulate job execution flow
-	client, err := bot.NewRetryClient(cfg); require.NoError(t, err)
+	logger := logrus.New()
+	client, err := bot.NewRetryClient(cfg, logger); require.NoError(t, err)
 	ctx := context.Background()
 
 	// Step 1: Get pending job
@@ -303,10 +306,10 @@ func TestBotJobExecutionFlow(t *testing.T) {
 			CrashesFound: uint64(i),
 			UpdatedAt:    time.Now(),
 		}
-		
+
 		err = client.UpdateJobProgress(ctx, job.ID, progress)
 		require.NoError(t, err)
-		
+
 		time.Sleep(50 * time.Millisecond) // Simulate work
 	}
 
@@ -359,7 +362,9 @@ func TestBotHandleNoJobs(t *testing.T) {
 		},
 	}
 
-	client, err := bot.NewRetryClient(cfg); require.NoError(t, err)
+	logger := logrus.New()
+	client, err := bot.NewRetryClient(cfg, logger)
+	require.NoError(t, err)
 
 	// Try to get a job - should return nil without error
 	job, err := client.GetJob(botID)
@@ -382,16 +387,16 @@ func TestBotJobTimeout(t *testing.T) {
 		case fmt.Sprintf("/api/v1/jobs/%s/status", jobID):
 			var req map[string]any
 			json.NewDecoder(r.Body).Decode(&req)
-			
+
 			mu.Lock()
 			statusUpdates = append(statusUpdates, req["status"].(string))
 			mu.Unlock()
-			
+
 			// Check if error message is provided for timeout
 			if req["status"] == string(common.JobStatusFailed) {
 				assert.Contains(t, req["error"], "timeout")
 			}
-			
+
 			w.WriteHeader(http.StatusOK)
 		}
 	}))
@@ -406,8 +411,9 @@ func TestBotJobTimeout(t *testing.T) {
 		},
 	}
 
-	client, err := bot.NewRetryClient(cfg); require.NoError(t, err)
-	
+	logger := logrus.New()
+	client, err := bot.NewRetryClient(cfg, logger); require.NoError(t, err)
+
 	// Create a context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeouts.JobExecution)
 	defer cancel()
@@ -443,24 +449,24 @@ func TestBotCrashReporting(t *testing.T) {
 			// Verify multipart form data
 			err := r.ParseMultipartForm(10 << 20) // 10MB
 			require.NoError(t, err)
-			
+
 			// Check crash metadata
 			crashData := r.FormValue("metadata")
 			var metadata common.CrashResult
 			err = json.Unmarshal([]byte(crashData), &metadata)
 			require.NoError(t, err)
-			
+
 			assert.Equal(t, crashID, metadata.ID)
 			assert.Equal(t, 11, metadata.Signal) // SIGSEGV = 11
 			assert.NotEmpty(t, metadata.StackTrace)
-			
+
 			// Check crash file
 			file, header, err := r.FormFile("crash_file")
 			require.NoError(t, err)
 			defer file.Close()
-			
+
 			assert.Equal(t, "crash_001.bin", header.Filename)
-			
+
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]string{
 				"crash_id": crashID,
@@ -478,7 +484,9 @@ func TestBotCrashReporting(t *testing.T) {
 		},
 	}
 
-	client, err := bot.NewRetryClient(cfg); require.NoError(t, err)
+	logger := logrus.New()
+	client, err := bot.NewRetryClient(cfg, logger)
+	require.NoError(t, err)
 
 	// Create crash info
 	crashInfo := &common.CrashResult{
@@ -513,10 +521,10 @@ func BenchmarkJobProcessing(b *testing.B) {
 				FuzzerType: "afl++",
 			}
 			json.NewEncoder(w).Encode(job)
-			
+
 		case strings.Contains(r.URL.Path, "/status"):
 			w.WriteHeader(http.StatusOK)
-			
+
 		case strings.Contains(r.URL.Path, "/results"):
 			w.WriteHeader(http.StatusOK)
 		}
@@ -531,7 +539,8 @@ func BenchmarkJobProcessing(b *testing.B) {
 		},
 	}
 
-	client, err := bot.NewRetryClient(cfg); require.NoError(t, err)
+	logger := logrus.New()
+	client, err := bot.NewRetryClient(cfg, logger); require.NoError(t, err)
 	ctx := context.Background()
 
 	b.ResetTimer()
@@ -541,7 +550,7 @@ func BenchmarkJobProcessing(b *testing.B) {
 		if job != nil {
 			// Update status
 			client.UpdateJobStatus(ctx, job.ID, common.JobStatusRunning, "")
-			
+
 			// Submit results
 			results := &common.JobResult{
 				JobID:      job.ID,

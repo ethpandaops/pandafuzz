@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
@@ -23,24 +24,32 @@ import (
 
 // LibFuzzer implements the Fuzzer interface for LibFuzzer
 type LibFuzzer struct {
-	*BaseFuzzer  // Embed base fuzzer for event handling
-	config       FuzzConfig
-	status       FuzzerStatus
-	logger       *logrus.Logger
-	cmd          *exec.Cmd
-	ctx          context.Context
-	cancel       context.CancelFunc
-	eventHandler EventHandler
-	stats        FuzzerStats
-	outputDir    string
-	crashDir     string
-	corpusDir    string
-	artifactDir  string
-	mu           sync.RWMutex
-	wg           sync.WaitGroup
-	lastStats    time.Time
-	statsRegex   map[string]*regexp.Regexp
-	botID        string
+	*BaseFuzzer      // Embed base fuzzer for event handling
+	config           FuzzConfig
+	status           FuzzerStatus
+	logger           *logrus.Logger
+	cmd              *exec.Cmd
+	ctx              context.Context
+	cancel           context.CancelFunc
+	eventHandler     EventHandler
+	stats            FuzzerStats
+	outputDir        string
+	crashDir         string
+	corpusDir        string
+	artifactDir      string
+	mu               sync.RWMutex
+	wg               sync.WaitGroup
+	lastStats        time.Time
+	statsRegex       map[string]*regexp.Regexp
+	botID            string
+	metricsCollector common.MetricsCollector
+
+	// Performance tracking
+	lastExecCount   int64
+	lastStatsUpdate time.Time
+	execHistory     []float64
+	peakExecSpeed   float64
+	peakMemoryMB    float64
 }
 
 // Compile-time interface compliance check
@@ -53,7 +62,7 @@ func NewLibFuzzer(logger *logrus.Logger) *LibFuzzer {
 		logger.SetLevel(logrus.InfoLevel)
 	}
 
-	return &LibFuzzer{
+	lf := &LibFuzzer{
 		BaseFuzzer:   NewBaseFuzzer(logger),
 		status:       StatusUninitialized,
 		logger:       logger,
@@ -61,8 +70,18 @@ func NewLibFuzzer(logger *logrus.Logger) *LibFuzzer {
 		stats: FuzzerStats{
 			StartTime: time.Now(),
 		},
-		statsRegex: compileStatsRegexes(),
+		statsRegex:      compileStatsRegexes(),
+		execHistory:     make([]float64, 0, 100),
+		lastStatsUpdate: time.Now(),
 	}
+
+	// Create metrics collector
+	lf.metricsCollector = NewDefaultMetricsCollector(
+		logger.WithField("component", "libfuzzer_metrics"),
+		5*time.Second,
+	)
+
+	return lf
 }
 
 // compileStatsRegexes compiles regular expressions for parsing LibFuzzer output
@@ -383,6 +402,11 @@ func (lf *LibFuzzer) Start(ctx context.Context) error {
 	go lf.monitorOutput(stdout, "stdout")
 	go lf.monitorOutput(stderr, "stderr")
 
+	// Start metrics collector
+	if err := lf.metricsCollector.Start(lf.ctx); err != nil {
+		lf.logger.WithError(err).Warn("Failed to start metrics collector")
+	}
+
 	// Notify event handler
 	if lf.eventHandler != nil {
 		lf.eventHandler.OnStart(lf)
@@ -420,19 +444,47 @@ func (lf *LibFuzzer) Stop() error {
 		lf.cancel()
 	}
 
+	// Stop metrics collector
+	if lf.metricsCollector != nil {
+		if err := lf.metricsCollector.Stop(); err != nil {
+			lf.logger.WithError(err).Warn("Failed to stop metrics collector")
+		}
+	}
+
 	// Send SIGINT to LibFuzzer (graceful shutdown)
 	if lf.cmd != nil && lf.cmd.Process != nil {
 		if err := lf.cmd.Process.Signal(os.Interrupt); err != nil {
 			lf.logger.WithError(err).Warn("Failed to send interrupt signal")
-			// Force kill if interrupt fails
-			lf.cmd.Process.Kill()
+		}
+
+		// Give it a moment to exit gracefully
+		time.Sleep(100 * time.Millisecond)
+
+		// Force kill if still running
+		if lf.cmd.Process != nil {
+			if err := lf.cmd.Process.Kill(); err != nil {
+				lf.logger.WithError(err).Debug("Process may have already exited")
+			}
 		}
 	}
 
-	// Wait for goroutines to finish
-	lf.wg.Wait()
-
+	// Update status immediately so IsRunning() returns false
 	lf.status = StatusStopped
+
+	// Wait for goroutines to finish (with timeout to avoid hanging)
+	done := make(chan struct{})
+	go func() {
+		lf.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Goroutines finished normally
+	case <-time.After(5 * time.Second):
+		// Timeout waiting for goroutines
+		lf.logger.Warn("Timeout waiting for fuzzer goroutines to finish")
+	}
 
 	// Notify event handler
 	if lf.eventHandler != nil {
@@ -1032,6 +1084,15 @@ func (lf *LibFuzzer) parseStats(line string) {
 	if match := lf.statsRegex["exec_speed"].FindStringSubmatch(line); len(match) > 1 {
 		if val, err := strconv.ParseFloat(match[1], 64); err == nil {
 			lf.stats.ExecPerSecond = val
+			// Track peak execution speed
+			if val > lf.peakExecSpeed {
+				lf.peakExecSpeed = val
+			}
+			// Add to history
+			lf.execHistory = append(lf.execHistory, val)
+			if len(lf.execHistory) > 100 {
+				lf.execHistory = lf.execHistory[1:]
+			}
 		}
 	}
 
@@ -1039,11 +1100,30 @@ func (lf *LibFuzzer) parseStats(line string) {
 	if match := lf.statsRegex["rss_mb"].FindStringSubmatch(line); len(match) > 1 {
 		if val, err := strconv.ParseInt(match[1], 10, 64); err == nil {
 			lf.stats.MemoryUsage = val
+			// Track peak memory usage
+			if float64(val) > lf.peakMemoryMB {
+				lf.peakMemoryMB = float64(val)
+			}
 		}
 	}
 
 	lf.stats.ElapsedTime = time.Since(lf.stats.StartTime)
 	lf.lastStats = time.Now()
+
+	// Collect enhanced metrics
+	lf.collectEnhancedMetrics(line)
+
+	// Record execution for performance tracking
+	if lf.lastExecCount > 0 {
+		execDiff := lf.stats.Executions - lf.lastExecCount
+		timeDiff := time.Since(lf.lastStatsUpdate)
+		if timeDiff > 0 && execDiff > 0 {
+			avgExecTime := timeDiff / time.Duration(execDiff)
+			lf.metricsCollector.RecordExecution(avgExecTime)
+		}
+	}
+	lf.lastExecCount = lf.stats.Executions
+	lf.lastStatsUpdate = time.Now()
 
 	// Notify event handler periodically
 	if time.Since(lf.lastStats) > 5*time.Second {
@@ -1405,6 +1485,352 @@ func (lf *LibFuzzer) emitPeriodicStats() {
 func (lf *LibFuzzer) hashCrashInput(data []byte) string {
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
+}
+
+// ReproduceCrash attempts to reproduce a crash with the given input
+func (lf *LibFuzzer) ReproduceCrash(ctx context.Context, crashInput []byte, config ReproductionConfig) (*common.ReproductionResult, error) {
+	lf.logger.WithFields(logrus.Fields{
+		"crash_size": len(crashInput),
+		"attempts":   config.Attempts,
+		"timeout":    config.Timeout,
+	}).Info("Starting crash reproduction with LibFuzzer")
+
+	// Default attempts if not specified
+	if config.Attempts <= 0 {
+		config.Attempts = 3
+	}
+
+	// Default timeout if not specified
+	if config.Timeout <= 0 {
+		config.Timeout = 30 * time.Second
+	}
+
+	// Create temporary directory for reproduction
+	tempDir, err := os.MkdirTemp("", "libfuzzer_reproduce_*")
+	if err != nil {
+		return nil, &FuzzerError{
+			Type:    ErrInternal,
+			Message: fmt.Sprintf("failed to create temp directory: %v", err),
+			Fuzzer:  lf.Name(),
+			Code:    100,
+		}
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Save crash input to file
+	crashFile := filepath.Join(tempDir, "crash_input")
+	if err := os.WriteFile(crashFile, crashInput, 0644); err != nil {
+		return nil, &FuzzerError{
+			Type:    ErrInternal,
+			Message: fmt.Sprintf("failed to write crash input: %v", err),
+			Fuzzer:  lf.Name(),
+			Code:    101,
+		}
+	}
+
+	// Try to reproduce the crash multiple times
+	for attempt := 1; attempt <= config.Attempts; attempt++ {
+		lf.logger.WithField("attempt", attempt).Debug("Attempting crash reproduction")
+
+		// Create a context with timeout for this attempt
+		attemptCtx, cancel := context.WithTimeout(ctx, config.Timeout)
+		defer cancel()
+
+		// Build LibFuzzer command for single input execution
+		// LibFuzzer can run a single input by passing it as an argument
+		args := []string{
+			crashFile,           // The crash input file
+			"-max_total_time=0", // No time limit for single run
+			"-runs=1",           // Run only once
+			"-timeout=" + strconv.Itoa(int(config.Timeout.Seconds())), // Individual run timeout
+		}
+
+		// Add artifact prefix to capture any additional outputs
+		artifactDir := filepath.Join(tempDir, fmt.Sprintf("artifacts_%d", attempt))
+		os.MkdirAll(artifactDir, 0755)
+		args = append(args, fmt.Sprintf("-artifact_prefix=%s/", artifactDir))
+
+		// If collect debug info is requested, add more verbosity
+		if config.CollectDebugInfo {
+			args = append(args, "-print_final_stats=1")
+			args = append(args, "-print_coverage=1")
+		}
+
+		cmd := exec.CommandContext(attemptCtx, lf.config.Target, args...)
+
+		// Set environment variables if provided
+		if config.Environment != nil {
+			env := os.Environ()
+			for k, v := range config.Environment {
+				env = append(env, fmt.Sprintf("%s=%s", k, v))
+			}
+			cmd.Env = env
+		}
+
+		// LibFuzzer specific environment variables
+		cmd.Env = append(cmd.Env, "ASAN_OPTIONS=print_stats=1:atexit=1")
+
+		// Start timing
+		startTime := time.Now()
+
+		// Capture output
+		output, err := cmd.CombinedOutput()
+
+		// Calculate execution time
+		executionTime := time.Since(startTime)
+
+		// Determine if crash was reproduced
+		reproduced := false
+		var signal int
+		var exitCode int
+		crashType := ""
+
+		// LibFuzzer exits with specific codes
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+
+				// LibFuzzer exit codes:
+				// 77 - crash found
+				// 78 - leak found
+				// 79 - timeout
+				switch exitCode {
+				case 77:
+					reproduced = true
+					crashType = "crash"
+				case 78:
+					reproduced = true
+					crashType = "leak"
+				case 79:
+					reproduced = true
+					crashType = "timeout"
+				default:
+					// Check if it's a signal-based crash
+					if exitCode == -1 {
+						if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+							if status.Signaled() {
+								signal = int(status.Signal())
+								reproduced = true
+								crashType = "signal"
+							}
+						}
+					} else if exitCode != 0 {
+						// Other non-zero exit codes might indicate crash
+						reproduced = true
+						crashType = "unknown"
+					}
+				}
+			}
+		}
+
+		// Extract stack trace from output
+		stackTrace := extractLibFuzzerStackTrace(string(output))
+		stackHash := lf.hashCrashInput([]byte(stackTrace))
+
+		// Build environment info
+		envInfo := make(map[string]string)
+		envInfo["fuzzer"] = "LibFuzzer"
+		envInfo["version"] = lf.Version()
+		envInfo["bot_id"] = lf.botID
+		envInfo["attempt"] = strconv.Itoa(attempt)
+		envInfo["crash_type"] = crashType
+
+		result := &common.ReproductionResult{
+			ID:              fmt.Sprintf("libfuzzer_repro_%d_%d", time.Now().Unix(), attempt),
+			RequestID:       config.OriginalCrashID,
+			CrashID:         config.OriginalCrashID,
+			BotID:           lf.botID,
+			AttemptNumber:   attempt,
+			Status:          common.ReproducibilityStatusConfirmed,
+			Reproduced:      reproduced,
+			ExecutionTime:   executionTime,
+			Signal:          signal,
+			ExitCode:        exitCode,
+			Output:          string(output),
+			StackTrace:      stackTrace,
+			StackHash:       stackHash,
+			MatchesOriginal: true, // This would need to be compared with original crash
+			EnvironmentInfo: envInfo,
+			Timestamp:       time.Now(),
+		}
+
+		if reproduced {
+			lf.logger.WithFields(logrus.Fields{
+				"attempt":    attempt,
+				"signal":     signal,
+				"exit_code":  exitCode,
+				"crash_type": crashType,
+				"stack_hash": stackHash,
+			}).Info("Successfully reproduced crash with LibFuzzer")
+			return result, nil
+		}
+
+		lf.logger.WithField("attempt", attempt).Debug("Crash not reproduced in this attempt")
+
+		// If this was the last attempt and we didn't reproduce
+		if attempt == config.Attempts {
+			result.Status = common.ReproducibilityStatusFailed
+			return result, nil
+		}
+	}
+
+	// Should not reach here, but just in case
+	return &common.ReproductionResult{
+		ID:              fmt.Sprintf("libfuzzer_repro_%d_failed", time.Now().Unix()),
+		RequestID:       config.OriginalCrashID,
+		CrashID:         config.OriginalCrashID,
+		BotID:           lf.botID,
+		Status:          common.ReproducibilityStatusFailed,
+		Reproduced:      false,
+		EnvironmentInfo: map[string]string{"fuzzer": "LibFuzzer"},
+		Timestamp:       time.Now(),
+	}, nil
+}
+
+// Helper function to extract stack trace from LibFuzzer output
+func extractLibFuzzerStackTrace(output string) string {
+	// Look for common stack trace indicators in LibFuzzer output
+	lines := strings.Split(output, "\n")
+	var stackLines []string
+	inStack := false
+
+	for _, line := range lines {
+		// LibFuzzer stack trace patterns
+		if strings.Contains(line, "ERROR: AddressSanitizer") ||
+			strings.Contains(line, "ERROR: LeakSanitizer") ||
+			strings.Contains(line, "ERROR: MemorySanitizer") ||
+			strings.Contains(line, "ERROR: UndefinedBehaviorSanitizer") ||
+			strings.Contains(line, "#0 0x") ||
+			strings.Contains(line, "    #") {
+			inStack = true
+		}
+
+		if inStack {
+			stackLines = append(stackLines, line)
+			// Stop at summary line or empty line after stack
+			if strings.Contains(line, "SUMMARY:") ||
+				(line == "" && len(stackLines) > 5) ||
+				strings.Contains(line, "==") && strings.Contains(line, "==") {
+				if strings.Contains(line, "SUMMARY:") {
+					// Include the summary line
+					stackLines = append(stackLines, line)
+				}
+				break
+			}
+		}
+	}
+
+	return strings.Join(stackLines, "\n")
+}
+
+// collectEnhancedMetrics collects and updates enhanced metrics
+func (lf *LibFuzzer) collectEnhancedMetrics(line string) {
+	// Coverage metrics
+	coverage := common.CoverageMetrics{
+		LineCoverage:     float64(lf.stats.CoveredEdges) / float64(lf.stats.TotalEdges) * 100,
+		BranchCoverage:   float64(lf.stats.CoveredEdges) / float64(lf.stats.TotalEdges) * 100,
+		NewEdgesFound:    int64(lf.stats.NewPaths),
+		TotalEdges:       int64(lf.stats.TotalEdges),
+		CoverageByModule: make(map[string]float64),
+	}
+
+	// Calculate coverage percentage
+	if lf.stats.TotalEdges > 0 {
+		lf.stats.CoveragePercent = float64(lf.stats.CoveredEdges) / float64(lf.stats.TotalEdges) * 100
+		coverage.LineCoverage = lf.stats.CoveragePercent
+		coverage.BranchCoverage = lf.stats.CoveragePercent
+	}
+
+	// Calculate coverage growth rate
+	if lf.stats.ElapsedTime.Seconds() > 0 {
+		coverage.CoverageGrowth = float64(lf.stats.NewPaths) / lf.stats.ElapsedTime.Seconds()
+	}
+
+	// Performance metrics
+	performance := common.PerformanceMetrics{
+		ExecutionsPerSecond: lf.stats.ExecPerSecond,
+		ThroughputMBps:      lf.calculateThroughput(),
+		InputGenerationRate: lf.stats.ExecPerSecond, // Same as exec/s for LibFuzzer
+	}
+
+	// Calculate mutation efficiency based on new coverage
+	if lf.stats.Executions > 0 {
+		performance.MutationEfficiency = float64(lf.stats.NewPaths) / float64(lf.stats.Executions)
+	}
+
+	// Update metrics collector
+	lf.metricsCollector.UpdateCoverageMetrics(coverage)
+	lf.metricsCollector.UpdatePerformanceMetrics(performance)
+
+	// Parse and add LibFuzzer specific metrics from output line
+	lf.extractFuzzerSpecificMetrics(line)
+}
+
+// extractFuzzerSpecificMetrics extracts LibFuzzer-specific metrics from output
+func (lf *LibFuzzer) extractFuzzerSpecificMetrics(line string) {
+	// Parse various LibFuzzer-specific metrics
+	if strings.Contains(line, "pulse:") {
+		lf.metricsCollector.UpdateFuzzerSpecificMetrics("pulse", line)
+	}
+	if strings.Contains(line, "reduce:") {
+		lf.metricsCollector.UpdateFuzzerSpecificMetrics("reduce", line)
+	}
+	if strings.Contains(line, "cross_over:") {
+		lf.metricsCollector.UpdateFuzzerSpecificMetrics("cross_over", line)
+	}
+	if strings.Contains(line, "mutate:") {
+		lf.metricsCollector.UpdateFuzzerSpecificMetrics("mutate", line)
+	}
+	if strings.Contains(line, "custom:") {
+		lf.metricsCollector.UpdateFuzzerSpecificMetrics("custom", line)
+	}
+	if strings.Contains(line, "dictionary:") {
+		lf.metricsCollector.UpdateFuzzerSpecificMetrics("dictionary", line)
+	}
+	if strings.Contains(line, "manual:") {
+		lf.metricsCollector.UpdateFuzzerSpecificMetrics("manual", line)
+	}
+	if strings.Contains(line, "persistent:") {
+		lf.metricsCollector.UpdateFuzzerSpecificMetrics("persistent", line)
+	}
+
+	// Extract additional stats
+	if strings.Contains(line, "units:") {
+		if match := regexp.MustCompile(`units: (\d+)`).FindStringSubmatch(line); len(match) > 1 {
+			lf.metricsCollector.UpdateFuzzerSpecificMetrics("units", match[1])
+		}
+	}
+	if strings.Contains(line, "max_len:") {
+		if match := regexp.MustCompile(`max_len: (\d+)`).FindStringSubmatch(line); len(match) > 1 {
+			lf.metricsCollector.UpdateFuzzerSpecificMetrics("max_len", match[1])
+		}
+	}
+}
+
+// calculateThroughput calculates throughput in MB/s
+func (lf *LibFuzzer) calculateThroughput() float64 {
+	if lf.stats.ElapsedTime.Seconds() == 0 {
+		return 0
+	}
+
+	// Estimate average input size (would need actual tracking)
+	avgInputSize := 1024.0 // 1KB average estimate
+	totalBytes := float64(lf.stats.Executions) * avgInputSize
+	totalMB := totalBytes / (1024 * 1024)
+
+	return totalMB / lf.stats.ElapsedTime.Seconds()
+}
+
+// GetEnhancedMetrics returns enhanced metrics from the fuzzer
+func (lf *LibFuzzer) GetEnhancedMetrics() *common.EnhancedMetrics {
+	lf.mu.RLock()
+	defer lf.mu.RUnlock()
+
+	if lf.metricsCollector != nil {
+		return lf.metricsCollector.GetMetrics()
+	}
+
+	return nil
 }
 
 // CreateLibFuzzer creates a new LibFuzzer instance with optional logger

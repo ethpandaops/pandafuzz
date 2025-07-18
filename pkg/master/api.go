@@ -46,11 +46,15 @@ type BotHeartbeatRequest struct {
 
 // JobRequest represents a job creation request
 type JobRequest struct {
-	Name     string           `json:"name" validate:"required"`
-	Target   string           `json:"target" validate:"required"`
-	Fuzzer   string           `json:"fuzzer" validate:"required"`
-	Duration time.Duration    `json:"duration"`
-	Config   common.JobConfig `json:"config"`
+	Name              string           `json:"name" validate:"required"`
+	Target            string           `json:"target" validate:"required"`
+	Fuzzer            string           `json:"fuzzer" validate:"required"`
+	Duration          time.Duration    `json:"duration"`
+	Config            common.JobConfig `json:"config"`
+	CampaignID        string           `json:"campaign_id,omitempty"`         // Link to existing campaign
+	CorpusID          string           `json:"corpus_id,omitempty"`           // Use standalone corpus
+	CollectionID      string           `json:"collection_id,omitempty"`       // Use corpus collection
+	UseCampaignCorpus bool             `json:"use_campaign_corpus,omitempty"` // Whether to inherit corpus from campaign
 }
 
 // JobCompleteRequest represents a job completion request
@@ -625,11 +629,15 @@ func (s *Server) handleJobCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Use service layer
 	jobReq := service.CreateJobRequest{
-		Name:     req.Name,
-		Target:   req.Target,
-		Fuzzer:   req.Fuzzer,
-		Duration: req.Duration,
-		Config:   req.Config,
+		Name:              req.Name,
+		Target:            req.Target,
+		Fuzzer:            req.Fuzzer,
+		Duration:          req.Duration,
+		Config:            req.Config,
+		CampaignID:        req.CampaignID,
+		CorpusID:          req.CorpusID,
+		CollectionID:      req.CollectionID,
+		UseCampaignCorpus: req.UseCampaignCorpus,
 	}
 
 	job, err := s.services.Job.CreateJob(r.Context(), jobReq)
@@ -1805,7 +1813,7 @@ func (s *Server) performCleanup(ctx context.Context, target string, force bool) 
 
 // cleanupOldLogs removes old log files
 func (s *Server) cleanupOldLogs(ctx context.Context) error {
-	logDir := filepath.Join(s.config.Storage.BasePath, "logs")
+	logDir := filepath.Join(s.getStorageBasePath(), "logs")
 	cutoffTime := time.Now().Add(-7 * 24 * time.Hour) // 7 days
 
 	return filepath.Walk(logDir, func(path string, info os.FileInfo, err error) error {
@@ -1822,7 +1830,7 @@ func (s *Server) cleanupOldLogs(ctx context.Context) error {
 // cleanupStorage cleans the storage directory
 func (s *Server) cleanupStorage(ctx context.Context) error {
 	// Clean crash inputs older than 30 days
-	crashDir := filepath.Join(s.config.Storage.BasePath, "crashes")
+	crashDir := filepath.Join(s.getStorageBasePath(), "crashes")
 	cutoffTime := time.Now().Add(-30 * 24 * time.Hour)
 
 	return filepath.Walk(crashDir, func(path string, info os.FileInfo, err error) error {
@@ -1841,7 +1849,7 @@ func (s *Server) performBackup(ctx context.Context, config map[string]string) er
 	// This is a placeholder - implement actual backup logic
 	backupPath := config["path"]
 	if backupPath == "" {
-		backupPath = filepath.Join(s.config.Storage.BasePath, "backups", fmt.Sprintf("backup_%s", time.Now().Format("20060102_150405")))
+		backupPath = filepath.Join(s.getStorageBasePath(), "backups", fmt.Sprintf("backup_%s", time.Now().Format("20060102_150405")))
 	}
 
 	// Create backup directory

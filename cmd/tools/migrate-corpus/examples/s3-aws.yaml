@@ -1,0 +1,31 @@
+# AWS S3 storage configuration
+type: s3
+s3:
+  region: us-east-1
+  
+  # Bucket names
+  corpus_bucket: pandafuzz-corpus-prod
+  quarantine_bucket: pandafuzz-quarantine-prod
+  backup_bucket: pandafuzz-backup-prod
+  
+  # Authentication (can also use environment variables or IAM roles)
+  # access_key_id: YOUR_ACCESS_KEY
+  # secret_access_key: YOUR_SECRET_KEY
+  # session_token: OPTIONAL_SESSION_TOKEN
+  
+  # S3 settings
+  use_ssl: true
+  use_path_style: false  # Virtual-hosted-style URLs
+  
+  # Performance tuning for large files
+  part_size: 134217728     # 128MB parts
+  concurrency: 8           # Higher concurrency for AWS
+  
+  # Retry configuration
+  max_retries: 5
+  retry_delay: 2s
+
+# Common settings
+max_file_size: 1073741824  # 1GB
+enable_dedup: true
+enable_compression: false

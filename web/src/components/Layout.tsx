@@ -48,7 +48,7 @@ const menuItems = [
   { text: 'Dashboard', icon: <DashboardIcon />, path: '/dashboard' },
   { text: 'Bots', icon: <BotsIcon />, path: '/bots' },
   { text: 'Jobs', icon: <JobsIcon />, path: '/jobs' },
-  { text: 'Corpus', icon: <CorpusIcon />, path: '/corpus' },
+  { text: 'Corpus Collection', icon: <CorpusIcon />, path: '/corpus-collection' },
   { text: 'Crashes', icon: <CrashesIcon />, path: '/crashes' },
   { text: 'Coverage', icon: <CoverageIcon />, path: '/coverage' },
 ];

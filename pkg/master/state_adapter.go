@@ -91,6 +91,18 @@ func (a *StateStoreAdapter) HealthCheck() error {
 
 // Optimized bot operations
 func (a *StateStoreAdapter) UpdateBotHeartbeat(ctx context.Context, botID string, status common.BotStatus, currentJob *string) error {
+	// Check context cancellation
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("context cancelled: %w", ctx.Err())
+	default:
+	}
+
+	// Validate input
+	if botID == "" {
+		return common.NewValidationError("update_bot_heartbeat", fmt.Errorf("bot ID is required"))
+	}
+
 	// Check if the underlying implementation has this method
 	if updater, ok := a.ps.db.(interface {
 		Execute(ctx context.Context, query string, args ...any) (int64, error)
@@ -107,7 +119,7 @@ func (a *StateStoreAdapter) UpdateBotHeartbeat(ctx context.Context, botID string
 		query := `UPDATE bots SET last_seen = ?, status = ?, current_job = ?, is_online = ?, timeout_at = ? WHERE id = ?`
 		rowsAffected, err := updater.Execute(ctx, query, now, status, currentJob, true, timeout, botID)
 		if err != nil {
-			return err
+			return common.NewStorageError("update_bot_heartbeat", err)
 		}
 		if rowsAffected == 0 {
 			return errors.NewNotFoundError("update_bot_heartbeat", "bot")
@@ -283,4 +295,15 @@ func (a *StateStoreAdapter) CompleteJobOptimized(ctx context.Context, jobID, bot
 		})
 	}
 	return errors.New(errors.ErrorTypeMethodNotFound, "complete_job_optimized", "Method not implemented")
+}
+
+// GetStorage returns the underlying storage interface
+// This is needed for services that require direct storage access
+func (a *StateStoreAdapter) GetStorage() common.Storage {
+	// Check if the database implements the Storage interface
+	if storage, ok := a.ps.db.(common.Storage); ok {
+		return storage
+	}
+	// Return nil if not a Storage implementation
+	return nil
 }

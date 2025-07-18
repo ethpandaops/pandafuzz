@@ -1,0 +1,24 @@
+# MinIO storage configuration (local development)
+type: minio
+minio:
+  endpoint: localhost:9000
+  access_key_id: pandafuzz
+  secret_access_key: pandafuzz123
+  corpus_bucket: corpus
+  quarantine_bucket: quarantine
+  backup_bucket: backup
+  use_ssl: false
+  use_path_style: true
+  
+  # Performance tuning
+  part_size: 67108864      # 64MB parts for multipart upload
+  concurrency: 4           # Parallel parts per file
+  
+  # Retry configuration
+  max_retries: 3
+  retry_delay: 1s
+
+# Common settings
+max_file_size: 104857600  # 100MB
+enable_dedup: true
+enable_compression: false

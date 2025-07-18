@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -1029,6 +1030,16 @@ func (ps *PersistentState) GetDatabaseStatsTyped(ctx context.Context) common.Dat
 	return ps.db.Stats(ctx)
 }
 
+// GetRawDB returns the underlying SQL database connection
+// This should only be used for direct SQL operations when necessary
+func (ps *PersistentState) GetRawDB() *sql.DB {
+	// Check if the database is SQLiteStorage type which has the raw DB
+	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
+		return sqliteDB.GetDB()
+	}
+	return nil
+}
+
 // Health check
 func (ps *PersistentState) HealthCheck(ctx context.Context) error {
 	return ps.db.Ping(ctx)
@@ -1525,4 +1536,145 @@ type CoverageStats struct {
 	TotalBlocks   int    `json:"total_blocks"`
 	TotalFeatures int    `json:"total_features"`
 	ReportCount   int    `json:"report_count"`
+	ExecCount     int64  `json:"exec_count"`
+}
+
+// Analytics methods for data retrieval
+
+// GetJobCoverageHistory retrieves coverage history for a job within a time range
+func (ps *PersistentState) GetJobCoverageHistory(ctx context.Context, jobID string, startTime, endTime time.Time) ([]*common.CoverageResult, error) {
+	// TODO: Implement coverage history retrieval
+	// This requires either extending the Database interface or using Storage interface
+	return []*common.CoverageResult{}, nil
+}
+
+// GetCampaignCoverageHistory retrieves coverage history for a campaign within a time range
+func (ps *PersistentState) GetCampaignCoverageHistory(ctx context.Context, campaignID string, startTime, endTime time.Time) ([]*common.CoverageResult, error) {
+	var coverage []*common.CoverageResult
+
+	// Get all jobs for this campaign
+	jobs, err := ps.GetCampaignJobs(ctx, campaignID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get coverage for each job
+	for _, job := range jobs {
+		jobCoverage, err := ps.GetJobCoverageHistory(ctx, job.ID, startTime, endTime)
+		if err != nil {
+			ps.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to get job coverage history")
+			continue
+		}
+		coverage = append(coverage, jobCoverage...)
+	}
+
+	return coverage, nil
+}
+
+// GetJobCrashesInTimeRange retrieves crashes for a job within a time range
+func (ps *PersistentState) GetJobCrashesInTimeRange(ctx context.Context, jobID string, startTime, endTime time.Time) ([]*common.CrashResult, error) {
+	crashes, err := ps.GetJobCrashes(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter by time range
+	var filtered []*common.CrashResult
+	for _, crash := range crashes {
+		if crash.Timestamp.After(startTime) && crash.Timestamp.Before(endTime) {
+			filtered = append(filtered, crash)
+		}
+	}
+
+	return filtered, nil
+}
+
+// GetCampaignCrashesInTimeRange retrieves crashes for a campaign within a time range
+func (ps *PersistentState) GetCampaignCrashesInTimeRange(ctx context.Context, campaignID string, startTime, endTime time.Time) ([]*common.CrashResult, error) {
+	var crashes []*common.CrashResult
+
+	// Get all jobs for this campaign
+	jobs, err := ps.GetCampaignJobs(ctx, campaignID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get crashes for each job
+	for _, job := range jobs {
+		jobCrashes, err := ps.GetJobCrashesInTimeRange(ctx, job.ID, startTime, endTime)
+		if err != nil {
+			ps.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to get job crashes")
+			continue
+		}
+		crashes = append(crashes, jobCrashes...)
+	}
+
+	return crashes, nil
+}
+
+// GetCrashesInTimeRange retrieves all crashes within a time range
+func (ps *PersistentState) GetCrashesInTimeRange(ctx context.Context, startTime, endTime time.Time) ([]*common.CrashResult, error) {
+	// TODO: Implement crash retrieval within time range
+	// This requires either extending the Database interface or using Storage interface
+	return []*common.CrashResult{}, nil
+}
+
+// GetJobsInTimeRange retrieves all jobs created within a time range
+func (ps *PersistentState) GetJobsInTimeRange(ctx context.Context, startTime, endTime time.Time) ([]*common.Job, error) {
+	jobs, err := ps.ListJobs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter by time range
+	var filtered []*common.Job
+	for _, job := range jobs {
+		if job.CreatedAt.After(startTime) && job.CreatedAt.Before(endTime) {
+			filtered = append(filtered, job)
+		}
+	}
+
+	return filtered, nil
+}
+
+// GetCampaignJobs retrieves all jobs for a campaign
+func (ps *PersistentState) GetCampaignJobs(ctx context.Context, campaignID string) ([]*common.Job, error) {
+	jobs, err := ps.ListJobs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter by campaign ID
+	var filtered []*common.Job
+	for _, job := range jobs {
+		if job.CampaignID != nil && *job.CampaignID == campaignID {
+			filtered = append(filtered, job)
+		}
+	}
+
+	return filtered, nil
+}
+
+// GetJobCoverageStats is now implemented above (line 1338)
+
+// GetCampaignCorpusUpdates retrieves corpus updates for a campaign
+func (ps *PersistentState) GetCampaignCorpusUpdates(ctx context.Context, campaignID string) ([]*common.CorpusUpdate, error) {
+	// TODO: Implement corpus updates retrieval
+	// This requires either extending the Database interface or using Storage interface
+	return []*common.CorpusUpdate{}, nil
+}
+
+// GetBotCompletedJobs is now implemented above (line 1382)
+
+// Helper function to sort corpus updates by timestamp
+func sortCorpusUpdatesByTimestamp(updates []*common.CorpusUpdate) {
+	// Simple bubble sort since corpus updates are typically small
+	n := len(updates)
+	for i := 0; i < n-1; i++ {
+		for j := 0; j < n-i-1; j++ {
+			if updates[j].Timestamp.After(updates[j+1].Timestamp) {
+				updates[j], updates[j+1] = updates[j+1], updates[j]
+			}
+		}
+	}
 }

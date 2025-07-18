@@ -54,6 +54,18 @@ func GetMigrations() []Migration {
 			Up:          addCampaignTablesUp,
 			Down:        addCampaignTablesDown,
 		},
+		{
+			ID:          "007_reproducibility",
+			Description: "Add reproducibility tracking for crashes and campaign-based job execution",
+			Up:          addReproducibilityUp,
+			Down:        addReproducibilityDown,
+		},
+		{
+			ID:          "008_corpus_collections",
+			Description: "Add corpus collections for reusable corpus management",
+			Up:          addCorpusCollectionsUp,
+			Down:        addCorpusCollectionsDown,
+		},
 	}
 }
 
@@ -591,6 +603,213 @@ func addCampaignTablesDown(tx *sql.Tx) error {
 
 	// We can't easily remove columns from crashes table in SQLite
 	// So we'll leave campaign_id and crash_group_id columns
+
+	return nil
+}
+
+// addReproducibilityUp adds reproducibility tracking features
+func addReproducibilityUp(tx *sql.Tx) error {
+	// Add reproducibility fields to crashes table
+	columnsToAdd := []struct {
+		table  string
+		column string
+		def    string
+	}{
+		{"crashes", "reproducible", "INTEGER DEFAULT NULL"}, // NULL=unknown, 1=yes, 0=no
+		{"crashes", "reproducibility_score", "REAL DEFAULT 0.0"},
+		{"crashes", "reproduction_attempts", "INTEGER DEFAULT 0"},
+		{"crashes", "last_reproduction_at", "DATETIME"},
+		{"jobs", "campaign_id", "TEXT"},
+		{"jobs", "use_campaign_corpus", "INTEGER DEFAULT 0"},
+		{"campaign_corpus_files", "source_type", "TEXT DEFAULT 'fuzzing'"},
+		{"campaign_corpus_files", "source_crash_id", "TEXT"},
+	}
+
+	for _, col := range columnsToAdd {
+		// Check if column already exists
+		var count int
+		err := tx.QueryRow(fmt.Sprintf(`
+			SELECT COUNT(*) FROM pragma_table_info('%s') 
+			WHERE name = '%s'
+		`, col.table, col.column)).Scan(&count)
+		if err != nil {
+			return fmt.Errorf("failed to check for %s.%s column: %w", col.table, col.column, err)
+		}
+
+		if count == 0 {
+			// Add the column
+			if _, err := tx.Exec(fmt.Sprintf(`
+				ALTER TABLE %s ADD COLUMN %s %s
+			`, col.table, col.column, col.def)); err != nil {
+				return fmt.Errorf("failed to add %s.%s column: %w", col.table, col.column, err)
+			}
+		}
+	}
+
+	// Create reproduction_results table for tracking individual reproduction attempts
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS reproduction_results (
+			id TEXT PRIMARY KEY,
+			crash_id TEXT NOT NULL,
+			campaign_id TEXT,
+			job_id TEXT,
+			bot_id TEXT,
+			attempt_number INTEGER NOT NULL,
+			success INTEGER NOT NULL, -- 1=reproduced, 0=not reproduced
+			execution_time INTEGER, -- milliseconds
+			output TEXT,
+			stack_trace TEXT,
+			stack_hash TEXT,
+			matches_original INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			test_binary_hash TEXT,
+			corpus_used TEXT, -- 'original', 'campaign', 'minimal'
+			notes TEXT,
+			FOREIGN KEY (crash_id) REFERENCES crashes(id) ON DELETE CASCADE,
+			FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE SET NULL,
+			FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+			FOREIGN KEY (bot_id) REFERENCES bots(id) ON DELETE SET NULL
+		)
+	`); err != nil {
+		return fmt.Errorf("failed to create reproduction_results table: %w", err)
+	}
+
+	// Create indices for performance
+	indices := []string{
+		"CREATE INDEX IF NOT EXISTS idx_crashes_reproducible ON crashes(reproducible)",
+		"CREATE INDEX IF NOT EXISTS idx_crashes_reproducibility_score ON crashes(reproducibility_score)",
+		"CREATE INDEX IF NOT EXISTS idx_reproduction_crash ON reproduction_results(crash_id)",
+		"CREATE INDEX IF NOT EXISTS idx_reproduction_campaign ON reproduction_results(campaign_id)",
+		"CREATE INDEX IF NOT EXISTS idx_reproduction_success ON reproduction_results(success)",
+		"CREATE INDEX IF NOT EXISTS idx_reproduction_created ON reproduction_results(created_at)",
+		"CREATE INDEX IF NOT EXISTS idx_jobs_campaign ON jobs(campaign_id)",
+		"CREATE INDEX IF NOT EXISTS idx_corpus_source_crash ON campaign_corpus_files(source_crash_id)",
+	}
+
+	for _, index := range indices {
+		if _, err := tx.Exec(index); err != nil {
+			return fmt.Errorf("failed to create index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// addReproducibilityDown removes reproducibility tracking features
+func addReproducibilityDown(tx *sql.Tx) error {
+	// Drop indices first
+	indices := []string{
+		"DROP INDEX IF EXISTS idx_crashes_reproducible",
+		"DROP INDEX IF EXISTS idx_crashes_reproducibility_score",
+		"DROP INDEX IF EXISTS idx_reproduction_crash",
+		"DROP INDEX IF EXISTS idx_reproduction_campaign",
+		"DROP INDEX IF EXISTS idx_reproduction_success",
+		"DROP INDEX IF EXISTS idx_reproduction_created",
+		"DROP INDEX IF EXISTS idx_jobs_campaign",
+		"DROP INDEX IF EXISTS idx_corpus_source_crash",
+	}
+
+	for _, index := range indices {
+		if _, err := tx.Exec(index); err != nil {
+			return fmt.Errorf("failed to drop index: %w", err)
+		}
+	}
+
+	// Drop reproduction_results table
+	if _, err := tx.Exec("DROP TABLE IF EXISTS reproduction_results"); err != nil {
+		return fmt.Errorf("failed to drop reproduction_results table: %w", err)
+	}
+
+	// We can't easily remove columns from existing tables in SQLite
+	// So we'll leave the added columns in place
+
+	return nil
+}
+
+// addCorpusCollectionsUp adds corpus collections tables
+func addCorpusCollectionsUp(tx *sql.Tx) error {
+	// Create corpus collections table
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS corpus_collections (
+			id VARCHAR(255) PRIMARY KEY,
+			name VARCHAR(255) NOT NULL,
+			description TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			file_count INTEGER DEFAULT 0,
+			total_size BIGINT DEFAULT 0,
+			tags TEXT,
+			UNIQUE(name)
+		)`); err != nil {
+		return fmt.Errorf("failed to create corpus_collections table: %w", err)
+	}
+
+	// Create corpus collection files table
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS corpus_collection_files (
+			id VARCHAR(255) PRIMARY KEY,
+			collection_id VARCHAR(255) NOT NULL,
+			filename VARCHAR(255) NOT NULL,
+			hash VARCHAR(64) NOT NULL,
+			size BIGINT NOT NULL,
+			uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (collection_id) REFERENCES corpus_collections(id) ON DELETE CASCADE,
+			UNIQUE(collection_id, hash)
+		)`); err != nil {
+		return fmt.Errorf("failed to create corpus_collection_files table: %w", err)
+	}
+
+	// Create indexes
+	indices := []string{
+		"CREATE INDEX IF NOT EXISTS idx_corpus_collections_name ON corpus_collections(name)",
+		"CREATE INDEX IF NOT EXISTS idx_corpus_collection_files_collection_id ON corpus_collection_files(collection_id)",
+		"CREATE INDEX IF NOT EXISTS idx_corpus_collection_files_hash ON corpus_collection_files(hash)",
+	}
+
+	for _, index := range indices {
+		if _, err := tx.Exec(index); err != nil {
+			return fmt.Errorf("failed to create index: %w", err)
+		}
+	}
+
+	// Add collection_id to jobs table
+	if _, err := tx.Exec(`
+		ALTER TABLE jobs ADD COLUMN collection_id VARCHAR(255)
+	`); err != nil {
+		// Ignore error if column already exists
+		// SQLite doesn't have IF NOT EXISTS for ALTER TABLE
+		// The error will be "duplicate column name: collection_id"
+	}
+
+	return nil
+}
+
+// addCorpusCollectionsDown removes corpus collections tables
+func addCorpusCollectionsDown(tx *sql.Tx) error {
+	// Drop indexes
+	indices := []string{
+		"DROP INDEX IF EXISTS idx_corpus_collection_files_hash",
+		"DROP INDEX IF EXISTS idx_corpus_collection_files_collection_id",
+		"DROP INDEX IF EXISTS idx_corpus_collections_name",
+	}
+
+	for _, index := range indices {
+		if _, err := tx.Exec(index); err != nil {
+			return fmt.Errorf("failed to drop index: %w", err)
+		}
+	}
+
+	// Drop tables
+	if _, err := tx.Exec("DROP TABLE IF EXISTS corpus_collection_files"); err != nil {
+		return fmt.Errorf("failed to drop corpus_collection_files table: %w", err)
+	}
+
+	if _, err := tx.Exec("DROP TABLE IF EXISTS corpus_collections"); err != nil {
+		return fmt.Errorf("failed to drop corpus_collections table: %w", err)
+	}
+
+	// We can't easily remove the collection_id column from jobs table in SQLite
+	// So we'll leave it in place
 
 	return nil
 }

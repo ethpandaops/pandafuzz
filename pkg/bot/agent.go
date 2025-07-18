@@ -51,6 +51,12 @@ type Agent struct {
 	resourceMonitor *SystemResourceMonitor
 	cleanupManager  *JobCleanupManager
 	resultCollector *ResultCollector
+
+	// Reproducibility executor for crash reproduction
+	reproExecutor *ReproducibilityExecutor
+
+	// Minimizer client for crash minimization
+	minimizerClient *MinimizerClient
 }
 
 // AgentStats tracks bot agent statistics
@@ -91,6 +97,15 @@ func NewAgent(config *common.BotConfig, logger *logrus.Logger) (*Agent, error) {
 		return nil, common.NewSystemError("create_result_collector", err)
 	}
 
+	// Create reproducibility executor
+	reproExecutor := NewReproducibilityExecutor(client, config, logger)
+
+	// Create minimizer client
+	minimizerClient, err := NewMinimizerClient(config, logger)
+	if err != nil {
+		return nil, common.NewSystemError("create_minimizer_client", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Agent{
@@ -103,6 +118,8 @@ func NewAgent(config *common.BotConfig, logger *logrus.Logger) (*Agent, error) {
 		resourceMonitor: resourceMonitor,
 		cleanupManager:  cleanupManager,
 		resultCollector: resultCollector,
+		reproExecutor:   reproExecutor,
+		minimizerClient: minimizerClient,
 		stats: AgentStats{
 			StartTime:     time.Now(),
 			CurrentStatus: "initialized",
@@ -220,6 +237,19 @@ func (a *Agent) Stop() error {
 		a.completeCurrentJob(false, "Agent shutdown")
 	}
 
+	// Stop any active reproductions
+	if a.reproExecutor != nil {
+		activeRepros := a.reproExecutor.GetActiveReproductions()
+		if len(activeRepros) > 0 {
+			a.logger.WithField("count", len(activeRepros)).Info("Stopping active reproductions")
+			for requestID := range activeRepros {
+				a.reproExecutor.StopReproduction(requestID)
+			}
+			// Give some time for reproductions to finish gracefully
+			time.Sleep(2 * time.Second)
+		}
+	}
+
 	// Stop result collector
 	if a.resultCollector != nil {
 		if err := a.resultCollector.Stop(); err != nil {
@@ -284,7 +314,30 @@ func (a *Agent) processWorkCycle() {
 		// Continue working on current job
 		a.continueCurrentJob()
 	} else {
-		// Try to get a new job
+		// Check for reproduction requests first (higher priority)
+		reproRequest, err := a.client.GetReproductionRequest(a.config.ID)
+		if err != nil {
+			a.logger.WithError(err).Debug("Failed to check for reproduction requests")
+		} else if reproRequest != nil {
+			// Handle reproduction request
+			a.logger.WithFields(logrus.Fields{
+				"request_id": reproRequest.ID,
+				"crash_id":   reproRequest.CrashID,
+				"priority":   reproRequest.Priority,
+			}).Info("Processing reproduction request")
+
+			// Execute reproduction in background
+			go func() {
+				if err := a.reproExecutor.HandleReproductionRequest(reproRequest); err != nil {
+					a.logger.WithError(err).Error("Failed to handle reproduction request")
+				}
+			}()
+
+			// Don't request a regular job if we're handling a reproduction
+			return
+		}
+
+		// No reproduction requests, try to get a regular job
 		a.requestNewJob()
 	}
 }
@@ -559,35 +612,74 @@ func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 	// Update job target to local path
 	job.Target = localBinaryPath
 
-	// Try to download seed corpus (if available)
+	// Create input directory for corpus
+	inputDir := filepath.Join(job.WorkDir, "input")
+	if err := os.MkdirAll(inputDir, 0755); err != nil {
+		a.logger.WithError(err).Error("Failed to create input directory")
+		a.completeCurrentJob(false, fmt.Sprintf("Failed to create input directory: %v", err))
+		return
+	}
+
+	// Check if job should use corpus collection
+	if job.CollectionID != nil && *job.CollectionID != "" {
+		a.logger.WithFields(logrus.Fields{
+			"job_id":        job.ID,
+			"collection_id": *job.CollectionID,
+		}).Info("Job configured to use corpus collection")
+
+		// Download corpus collection files
+		if err := a.downloadCorpusCollection(*job.CollectionID, inputDir); err != nil {
+			a.logger.WithError(err).Error("Failed to download corpus collection")
+			// Continue anyway - corpus initialization failure is not fatal
+		}
+	} else if job.UseCampaignCorpus && job.CampaignID != nil && *job.CampaignID != "" {
+		// Check if job should use campaign corpus
+		a.logger.WithFields(logrus.Fields{
+			"job_id":      job.ID,
+			"campaign_id": *job.CampaignID,
+		}).Info("Job configured to use campaign corpus")
+
+		// Create a temporary corpus syncer for this job initialization
+		corpusSyncer := NewCorpusSyncer(
+			a.client,
+			*job.CampaignID,
+			a.config.ID,
+			inputDir, // Use input directory as sync directory
+			a.logger,
+		)
+
+		// Initialize job with campaign corpus
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		if err := corpusSyncer.InitializeJobCorpus(ctx, job, inputDir); err != nil {
+			a.logger.WithError(err).Error("Failed to initialize job with campaign corpus")
+			// Continue anyway - corpus initialization failure is not fatal
+		}
+	}
+
+	// Try to download job-specific seed corpus (if available)
 	corpusPath := filepath.Join(job.WorkDir, "seed_corpus.zip")
 	a.logger.WithFields(logrus.Fields{
 		"job_id":     job.ID,
 		"local_path": corpusPath,
-	}).Info("Checking for seed corpus from master")
+	}).Info("Checking for job-specific seed corpus from master")
 
 	if err := a.client.DownloadJobCorpus(job.ID, a.config.ID, corpusPath); err != nil {
 		// Corpus download failure is not fatal
-		a.logger.WithError(err).Debug("No seed corpus available or failed to download, continuing without it")
+		a.logger.WithError(err).Debug("No job-specific seed corpus available or failed to download, continuing without it")
 	} else {
-		// Extract corpus
-		inputDir := filepath.Join(job.WorkDir, "input")
-		if err := os.MkdirAll(inputDir, 0755); err != nil {
-			a.logger.WithError(err).Warn("Failed to create input directory")
-		} else {
-			// Check if the corpus file exists before trying to extract
-			if _, err := os.Stat(corpusPath); err == nil {
-				// Extract zip file to input directory
-				if err := a.extractZipFile(corpusPath, inputDir); err != nil {
-					a.logger.WithError(err).Warn("Failed to extract seed corpus")
-				} else {
-					a.logger.WithField("input_dir", inputDir).Info("Seed corpus extracted successfully")
-				}
+		// Check if the corpus file exists before trying to extract
+		if _, err := os.Stat(corpusPath); err == nil {
+			// Extract zip file to input directory (will merge with campaign corpus if present)
+			if err := a.extractZipFile(corpusPath, inputDir); err != nil {
+				a.logger.WithError(err).Warn("Failed to extract seed corpus")
 			} else {
-				a.logger.Debug("Seed corpus file does not exist, skipping extraction")
+				a.logger.WithField("input_dir", inputDir).Info("Job-specific seed corpus extracted successfully")
 			}
+		} else {
+			a.logger.Debug("Seed corpus file does not exist, skipping extraction")
 		}
-		a.logger.Info("Seed corpus downloaded successfully")
 	}
 
 	// Execute the job
@@ -603,8 +695,22 @@ func (a *Agent) executeJob(job *common.Job) {
 
 	a.logger.WithField("job_id", job.ID).Info("Starting job execution")
 
-	// Execute the job
-	success, message, err := a.executor.ExecuteJob(job)
+	var success bool
+	var message string
+	var err error
+
+	// Handle different job types
+	switch job.Type {
+	case common.JobTypeMinimization:
+		// Handle minimization job
+		success, message, err = a.executeMinimizationJob(job)
+	case common.JobTypeReproduction:
+		// Handle reproduction job
+		success, message, err = a.executeReproductionJob(job)
+	default:
+		// Default to fuzzing job
+		success, message, err = a.executor.ExecuteJob(job)
+	}
 
 	duration := time.Since(startTime)
 	a.stats.LastJobDuration = duration
@@ -795,6 +901,30 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 		dirsToCheck = append(dirsToCheck, corpusDir)
 	}
 
+	// Check AFL++ output directories
+	aflOutput := filepath.Join(job.WorkDir, "output")
+	if stat, err := os.Stat(aflOutput); err == nil && stat.IsDir() {
+		// AFL++ stores crashes in output/afl_output/crashes/
+		aflCrashesDir := filepath.Join(aflOutput, "afl_output", "crashes")
+		if stat, err := os.Stat(aflCrashesDir); err == nil && stat.IsDir() {
+			dirsToCheck = append(dirsToCheck, aflCrashesDir)
+			a.logger.WithFields(logrus.Fields{
+				"job_id":          job.ID,
+				"afl_crashes_dir": aflCrashesDir,
+			}).Debug("Found AFL++ crashes directory")
+		}
+
+		// Also check the old location for backwards compatibility
+		oldAflCrashesDir := filepath.Join(aflOutput, "crashes")
+		if stat, err := os.Stat(oldAflCrashesDir); err == nil && stat.IsDir() {
+			dirsToCheck = append(dirsToCheck, oldAflCrashesDir)
+			a.logger.WithFields(logrus.Fields{
+				"job_id":          job.ID,
+				"afl_crashes_dir": oldAflCrashesDir,
+			}).Debug("Found AFL++ crashes directory (old location)")
+		}
+	}
+
 	// Check LibFuzzer output directories
 	libfuzzerOutput := filepath.Join(job.WorkDir, "output", "libfuzzer_output")
 	if stat, err := os.Stat(libfuzzerOutput); err == nil && stat.IsDir() {
@@ -833,14 +963,30 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 				continue
 			}
 
+			// Check if this is a crash file
+			isCrashFile := false
+			crashType := ""
+
 			// LibFuzzer crash files start with "crash-"
 			if strings.HasPrefix(entry.Name(), "crash-") {
+				isCrashFile = true
+				crashType = "libfuzzer"
+			} else if strings.Contains(dir, filepath.Join("output", "crashes")) && !strings.HasPrefix(entry.Name(), "README") {
+				// AFL++ crash files are in output/crashes/ directory
+				// Skip README files that AFL++ creates
+				isCrashFile = true
+				crashType = "afl++"
+			}
+
+			if isCrashFile {
 				crashPath := filepath.Join(dir, entry.Name())
 
 				a.logger.WithFields(logrus.Fields{
 					"job_id":     job.ID,
 					"crash_file": entry.Name(),
 					"crash_path": crashPath,
+					"crash_type": crashType,
+					"directory":  dir,
 				}).Info("Found crash file")
 
 				// Read crash file
@@ -866,7 +1012,7 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 					FilePath:    crashPath,
 					Size:        info.Size(),
 					Hash:        a.hashCrashInput(crashData),
-					Type:        "libfuzzer",
+					Type:        crashType,
 					Input:       crashData,
 					InputBase64: base64.StdEncoding.EncodeToString(crashData),
 				}
@@ -1200,6 +1346,68 @@ func (a *Agent) extractSingleFile(file *zip.File, destPath string) error {
 	return nil
 }
 
+// executeMinimizationJob executes a crash minimization job
+func (a *Agent) executeMinimizationJob(job *common.Job) (bool, string, error) {
+	a.logger.WithFields(logrus.Fields{
+		"job_id":   job.ID,
+		"job_type": job.Type,
+		"metadata": job.Metadata,
+	}).Info("Executing minimization job")
+
+	// Extract crash ID from job metadata
+	crashID, ok := job.Metadata["crash_id"].(string)
+	if !ok || crashID == "" {
+		return false, "crash_id not found in job metadata", fmt.Errorf("invalid minimization job: missing crash_id")
+	}
+
+	// Get crash details
+	crash, err := a.minimizerClient.GetCrashDetails(a.ctx, crashID)
+	if err != nil {
+		return false, fmt.Sprintf("Failed to get crash details: %v", err), err
+	}
+
+	// Extract strategy from metadata
+	strategy := MinimizationStrategyDeltaDebug
+	if s, ok := job.Metadata["strategy"].(string); ok {
+		strategy = MinimizationStrategy(s)
+	}
+
+	// Prepare minimization config
+	config := MinimizationConfig{
+		Strategy:      strategy,
+		MaxIterations: 100,
+		Timeout:       job.Config.Timeout,
+	}
+
+	// Perform minimization
+	result, err := a.minimizerClient.MinimizeCrash(a.ctx, crash, config)
+	if err != nil {
+		return false, fmt.Sprintf("Minimization failed: %v", err), err
+	}
+
+	// Update result with job ID
+	result.JobID = job.ID
+
+	if result.Success {
+		return true, fmt.Sprintf("Minimization completed: %.2f%% reduction", result.ReductionPercent), nil
+	} else {
+		return false, fmt.Sprintf("Minimization failed: %s", result.Error), nil
+	}
+}
+
+// executeReproductionJob executes a crash reproduction job
+func (a *Agent) executeReproductionJob(job *common.Job) (bool, string, error) {
+	a.logger.WithFields(logrus.Fields{
+		"job_id":   job.ID,
+		"job_type": job.Type,
+		"metadata": job.Metadata,
+	}).Info("Executing reproduction job")
+
+	// For now, use the regular fuzzer executor for reproduction jobs
+	// In the future, this could be handled by the reproExecutor
+	return a.executor.ExecuteJob(job)
+}
+
 // connectResultCollectorToExecutor connects the result collector to executor events
 func (a *Agent) connectResultCollectorToExecutor() {
 	defer a.wg.Done()
@@ -1258,4 +1466,72 @@ func (a *Agent) monitorResourceAlerts() {
 			}
 		}
 	}
+}
+
+// downloadCorpusCollection downloads all files from a corpus collection to the specified directory
+func (a *Agent) downloadCorpusCollection(collectionID, targetDir string) error {
+	a.logger.WithFields(logrus.Fields{
+		"collection_id": collectionID,
+		"target_dir":    targetDir,
+	}).Info("Downloading corpus collection files")
+
+	// Get collection files from master
+	files, err := a.client.GetCorpusCollectionFiles(collectionID)
+	if err != nil {
+		return fmt.Errorf("failed to get collection files: %w", err)
+	}
+
+	if len(files) == 0 {
+		a.logger.WithField("collection_id", collectionID).Warn("No files in corpus collection")
+		return nil
+	}
+
+	a.logger.WithFields(logrus.Fields{
+		"collection_id": collectionID,
+		"file_count":    len(files),
+	}).Info("Retrieved corpus collection file list")
+
+	// Download each file
+	downloadedCount := 0
+	for _, file := range files {
+		// Create file path
+		filePath := filepath.Join(targetDir, file.Filename)
+
+		// Download file
+		if err := a.client.DownloadCorpusCollectionFile(collectionID, file.ID, filePath); err != nil {
+			a.logger.WithError(err).WithFields(logrus.Fields{
+				"file_id":   file.ID,
+				"filename":  file.Filename,
+				"file_hash": file.Hash,
+			}).Warn("Failed to download corpus file, continuing with others")
+			continue
+		}
+
+		// Verify downloaded file
+		if stat, err := os.Stat(filePath); err != nil {
+			a.logger.WithError(err).WithField("file_path", filePath).Warn("Failed to stat downloaded file")
+			continue
+		} else if stat.Size() != file.Size {
+			a.logger.WithFields(logrus.Fields{
+				"file_path":     filePath,
+				"expected_size": file.Size,
+				"actual_size":   stat.Size(),
+			}).Warn("Downloaded file size mismatch")
+			// Continue anyway, file might still be useful
+		}
+
+		downloadedCount++
+	}
+
+	a.logger.WithFields(logrus.Fields{
+		"collection_id":    collectionID,
+		"total_files":      len(files),
+		"downloaded_files": downloadedCount,
+	}).Info("Corpus collection download completed")
+
+	if downloadedCount == 0 {
+		return fmt.Errorf("failed to download any files from collection")
+	}
+
+	return nil
 }

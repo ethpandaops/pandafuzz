@@ -19,6 +19,7 @@ import (
 // SQLiteStorage implements the Database interface using SQLite
 type SQLiteStorage struct {
 	db     *sql.DB
+	pool   *ConnectionPool
 	path   string
 	logger *logrus.Logger
 	config common.DatabaseConfig
@@ -84,27 +85,46 @@ func NewSQLiteStorage(config common.DatabaseConfig, logger *logrus.Logger) (comm
 		}
 	}
 
+	// Create connection pool with retry and health check capabilities
+	pool, err := ConfigurePool(db, config, logger)
+	if err != nil {
+		db.Close()
+		return nil, common.NewDatabaseError("configure_pool", err)
+	}
+
 	storage := &SQLiteStorage{
 		db:     db,
+		pool:   pool,
 		path:   config.Path,
 		logger: logger,
 		config: config,
 	}
 
-	// Initialize database schema
-	if err := storage.createTablesContext(context.Background()); err != nil {
-		db.Close()
+	// Initialize database schema with retry
+	err = pool.ExecuteWithRetry(context.Background(), "create_tables", func(ctx context.Context) error {
+		return storage.createTablesContext(ctx)
+	})
+	if err != nil {
+		pool.Stop()
 		return nil, common.NewDatabaseError("create_tables", err)
 	}
 
-	// Apply migrations for normalized schema
-	if err := MigrateExistingData(context.Background(), db); err != nil {
-		db.Close()
+	// Apply migrations for normalized schema with retry
+	err = pool.ExecuteWithRetry(context.Background(), "migrate_data", func(ctx context.Context) error {
+		return MigrateExistingData(ctx, db)
+	})
+	if err != nil {
+		pool.Stop()
 		return nil, common.NewDatabaseError("apply_migrations", err)
 	}
 
-	logger.WithField("path", config.Path).Info("SQLite storage initialized with normalized schema")
+	logger.WithField("path", config.Path).Info("SQLite storage initialized with normalized schema and connection pooling")
 	return storage, nil
+}
+
+// GetDB returns the underlying SQL database connection
+func (s *SQLiteStorage) GetDB() *sql.DB {
+	return s.db
 }
 
 // createTablesContext initializes the database schema with context
@@ -256,8 +276,10 @@ func (s *SQLiteStorage) Store(ctx context.Context, key string, value any) error 
 		return common.NewDatabaseError("marshal_value", err)
 	}
 
-	// Determine table and perform operation based on key prefix
-	return s.storeByKeyContext(ctx, key, string(data))
+	// Use retry logic for the store operation
+	return s.pool.ExecuteWithRetry(ctx, "store", func(ctx context.Context) error {
+		return s.storeByKeyContext(ctx, key, string(data))
+	})
 }
 
 // Get implements the Database interface
@@ -270,7 +292,10 @@ func (s *SQLiteStorage) Get(ctx context.Context, key string, dest any) error {
 	default:
 	}
 
-	data, err := s.getByKeyContext(ctx, key)
+	// Use retry logic for the get operation
+	data, err := ExecutePoolWithRetryResult(s.pool, ctx, "get", func(ctx context.Context) (string, error) {
+		return s.getByKeyContext(ctx, key)
+	})
 	if err != nil {
 		return err
 	}
@@ -293,13 +318,16 @@ func (s *SQLiteStorage) Delete(ctx context.Context, key string) error {
 	default:
 	}
 
-	return s.deleteByKeyContext(ctx, key)
+	// Use retry logic for the delete operation
+	return s.pool.ExecuteWithRetry(ctx, "delete", func(ctx context.Context) error {
+		return s.deleteByKeyContext(ctx, key)
+	})
 }
 
 // Transaction implements the Database interface
 func (s *SQLiteStorage) Transaction(ctx context.Context, fn func(tx common.Transaction) error) error {
 	// Wrap entire transaction in retry logic to handle transient locking issues
-	return ExecuteWithRetry(ctx, s.config, func() error {
+	return s.pool.ExecuteWithRetry(ctx, "transaction", func(ctx context.Context) error {
 		// Check context before proceeding
 		select {
 		case <-ctx.Done():
@@ -357,7 +385,15 @@ func (s *SQLiteStorage) Close(ctx context.Context) error {
 	default:
 	}
 
-	if s.db != nil {
+	// Stop the connection pool first (which will close the database)
+	if s.pool != nil {
+		if err := s.pool.Stop(); err != nil {
+			return common.NewDatabaseError("close_pool", err)
+		}
+		s.pool = nil
+		s.db = nil // db is closed by pool.Stop()
+	} else if s.db != nil {
+		// Fallback if pool is not initialized
 		err := s.db.Close()
 		s.db = nil
 		if err != nil {
@@ -367,11 +403,21 @@ func (s *SQLiteStorage) Close(ctx context.Context) error {
 	return nil
 }
 
+// GetPool returns the connection pool for advanced usage
+func (s *SQLiteStorage) GetPool() *ConnectionPool {
+	return s.pool
+}
+
 // Ping implements the Database interface
 func (s *SQLiteStorage) Ping(ctx context.Context) error {
 
-	if s.db == nil {
+	if s.pool == nil || s.db == nil {
 		return common.ErrDatabaseClosed
+	}
+
+	// Use the pool's health check mechanism
+	if !s.pool.IsHealthy() {
+		return common.NewDatabaseError("ping", fmt.Errorf("connection pool is unhealthy"))
 	}
 
 	// Create a timeout context if none exists
@@ -2022,4 +2068,724 @@ func (s *SQLiteStorage) Cleanup(ctx context.Context) error {
 	// Clean up old data based on configured retention
 	// This is a placeholder - implement based on retention policy
 	return nil
+}
+
+// UpdateCrashReproducibility updates crash reproducibility fields
+func (s *SQLiteStorage) UpdateCrashReproducibility(ctx context.Context, crashID string, reproducible bool, score float64) error {
+	query := `UPDATE crashes SET 
+		reproducible = ?, 
+		reproducibility_score = ?, 
+		reproduction_attempts = reproduction_attempts + 1,
+		last_reproduction_at = CURRENT_TIMESTAMP,
+		updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`
+
+	var reproducibleInt int
+	if reproducible {
+		reproducibleInt = 1
+	} else {
+		reproducibleInt = 0
+	}
+
+	result, err := RetryableExec(ctx, s.db, s.config, query, reproducibleInt, score, crashID)
+	if err != nil {
+		return common.NewDatabaseError("update_crash_reproducibility", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return common.NewDatabaseError("check_rows_affected", err)
+	}
+
+	if rowsAffected == 0 {
+		return common.ErrKeyNotFound
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"crash_id":     crashID,
+		"reproducible": reproducible,
+		"score":        score,
+	}).Info("Updated crash reproducibility")
+
+	return nil
+}
+
+// CreateReproductionResult stores a reproduction attempt result
+func (s *SQLiteStorage) CreateReproductionResult(ctx context.Context, result *common.ReproductionResult) error {
+	query := `INSERT INTO reproduction_results (
+		id, crash_id, campaign_id, job_id, bot_id, attempt_number, 
+		success, execution_time, output, stack_trace, stack_hash, 
+		matches_original, test_binary_hash, corpus_used, notes
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	// Determine success value (1 for reproduced, 0 for not)
+	var success int
+	if result.Reproduced {
+		success = 1
+	} else {
+		success = 0
+	}
+
+	// Get campaign ID from the crash's job
+	var campaignID sql.NullString
+	var jobID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT c.job_id, j.campaign_id 
+		FROM crashes c
+		LEFT JOIN jobs j ON c.job_id = j.id
+		WHERE c.id = ?`, result.CrashID).Scan(&jobID, &campaignID)
+
+	if err != nil && err != sql.ErrNoRows {
+		return common.NewDatabaseError("get_crash_campaign", err)
+	}
+
+	// Build notes from environment info and status
+	notes := fmt.Sprintf("Status: %s", result.Status)
+	if result.Signal > 0 {
+		notes += fmt.Sprintf("\nSignal: %d", result.Signal)
+	}
+	if result.ExitCode != 0 {
+		notes += fmt.Sprintf("\nExit Code: %d", result.ExitCode)
+	}
+	if len(result.EnvironmentInfo) > 0 {
+		envJSON, _ := json.Marshal(result.EnvironmentInfo)
+		notes += fmt.Sprintf("\nEnvironment: %s", string(envJSON))
+	}
+
+	// Determine corpus used based on request info
+	corpusUsed := "original"
+	if result.RequestID != "" {
+		// This would typically be determined from the reproduction request
+		corpusUsed = "campaign"
+	}
+
+	_, err = RetryableExec(ctx, s.db, s.config, query,
+		result.ID, result.CrashID, campaignID, jobID, result.BotID,
+		result.AttemptNumber, success, result.ExecutionTime.Milliseconds(),
+		result.Output, result.StackTrace, result.StackHash,
+		result.MatchesOriginal, "", corpusUsed, notes)
+
+	if err != nil {
+		return common.NewDatabaseError("create_reproduction_result", err)
+	}
+
+	// Update crash reproducibility based on result
+	if result.Reproduced {
+		// Calculate score based on whether stack matches original
+		score := 0.5
+		if result.MatchesOriginal {
+			score = 1.0
+		}
+		if err := s.UpdateCrashReproducibility(ctx, result.CrashID, true, score); err != nil {
+			s.logger.WithError(err).WithField("crash_id", result.CrashID).Warn("Failed to update crash reproducibility")
+		}
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"result_id":  result.ID,
+		"crash_id":   result.CrashID,
+		"reproduced": result.Reproduced,
+		"matches":    result.MatchesOriginal,
+	}).Info("Created reproduction result")
+
+	return nil
+}
+
+// GetReproductionResults retrieves all reproduction results for a crash
+func (s *SQLiteStorage) GetReproductionResults(ctx context.Context, crashID string) ([]*common.ReproductionResult, error) {
+	query := `SELECT 
+		id, crash_id, campaign_id, job_id, bot_id, attempt_number,
+		success, execution_time, output, stack_trace, stack_hash,
+		matches_original, test_binary_hash, corpus_used, notes, created_at
+		FROM reproduction_results 
+		WHERE crash_id = ?
+		ORDER BY created_at DESC`
+
+	return RetryableQuery(ctx, s.db, s.config, query, func(rows *sql.Rows) (*common.ReproductionResult, error) {
+		result := &common.ReproductionResult{}
+		var campaignID, jobID, testBinaryHash, corpusUsed, notes sql.NullString
+		var execTimeMs sql.NullInt64
+		var success int
+		var matchesOriginal sql.NullBool
+
+		err := rows.Scan(
+			&result.ID, &result.CrashID, &campaignID, &jobID, &result.BotID,
+			&result.AttemptNumber, &success, &execTimeMs, &result.Output,
+			&result.StackTrace, &result.StackHash, &matchesOriginal,
+			&testBinaryHash, &corpusUsed, &notes, &result.Timestamp)
+
+		if err != nil {
+			return nil, err
+		}
+
+		// Set reproduced based on success value
+		result.Reproduced = (success == 1)
+
+		// Convert execution time from milliseconds
+		if execTimeMs.Valid {
+			result.ExecutionTime = time.Duration(execTimeMs.Int64) * time.Millisecond
+		}
+
+		// Handle nullable fields
+		if matchesOriginal.Valid {
+			result.MatchesOriginal = matchesOriginal.Bool
+		}
+
+		// Parse notes to extract additional info
+		if notes.Valid && notes.String != "" {
+			// Extract status, signal, exit code, and environment from notes
+			lines := strings.Split(notes.String, "\n")
+			for _, line := range lines {
+				if strings.HasPrefix(line, "Status: ") {
+					result.Status = common.ReproducibilityStatus(strings.TrimPrefix(line, "Status: "))
+				} else if strings.HasPrefix(line, "Signal: ") {
+					fmt.Sscanf(line, "Signal: %d", &result.Signal)
+				} else if strings.HasPrefix(line, "Exit Code: ") {
+					fmt.Sscanf(line, "Exit Code: %d", &result.ExitCode)
+				} else if strings.HasPrefix(line, "Environment: ") {
+					envJSON := strings.TrimPrefix(line, "Environment: ")
+					if err := json.Unmarshal([]byte(envJSON), &result.EnvironmentInfo); err != nil {
+						result.EnvironmentInfo = make(map[string]string)
+					}
+				}
+			}
+		}
+
+		// Initialize environment info if not set
+		if result.EnvironmentInfo == nil {
+			result.EnvironmentInfo = make(map[string]string)
+		}
+
+		// Set default status if not found in notes
+		if result.Status == "" {
+			if result.Reproduced {
+				result.Status = common.ReproducibilityStatusConfirmed
+			} else {
+				result.Status = common.ReproducibilityStatusFailed
+			}
+		}
+
+		return result, nil
+	}, crashID)
+}
+
+// GetCrashesForReproduction retrieves crashes that need reproduction testing
+func (s *SQLiteStorage) GetCrashesForReproduction(ctx context.Context, limit int) ([]*common.CrashResult, error) {
+	// Get crashes that:
+	// - Have not been tested for reproducibility (reproducible IS NULL)
+	// - Have been tested but have low confidence (reproduction_attempts < 3 AND reproducibility_score < 0.8)
+	// - Haven't been tested recently (last_reproduction_at < 24 hours ago)
+	query := `SELECT 
+		id, job_id, bot_id, hash, file_path, type, signal, exit_code,
+		timestamp, size, is_unique, output, stack_trace
+		FROM crashes
+		WHERE 
+			(reproducible IS NULL) OR
+			(reproduction_attempts < 3 AND reproducibility_score < 0.8) OR
+			(last_reproduction_at < datetime('now', '-24 hours'))
+		ORDER BY 
+			CASE WHEN reproducible IS NULL THEN 0 ELSE 1 END,
+			reproduction_attempts ASC,
+			timestamp DESC
+		LIMIT ?`
+
+	return RetryableQuery(ctx, s.db, s.config, query, func(rows *sql.Rows) (*common.CrashResult, error) {
+		crash := &common.CrashResult{}
+		var output, stackTrace sql.NullString
+
+		err := rows.Scan(
+			&crash.ID, &crash.JobID, &crash.BotID, &crash.Hash, &crash.FilePath,
+			&crash.Type, &crash.Signal, &crash.ExitCode, &crash.Timestamp,
+			&crash.Size, &crash.IsUnique, &output, &stackTrace)
+
+		if err != nil {
+			return nil, err
+		}
+
+		crash.Output = output.String
+		crash.StackTrace = stackTrace.String
+
+		// Load crash input
+		if input, err := s.GetCrashInput(ctx, crash.ID); err == nil && input != nil {
+			crash.Input = input
+		}
+
+		return crash, nil
+	}, limit)
+}
+
+// LinkJobToCampaignWithCorpus links a job to a campaign with optional corpus inheritance
+func (s *SQLiteStorage) LinkJobToCampaignWithCorpus(ctx context.Context, jobID, campaignID string, useCampaignCorpus bool) error {
+	return s.Transaction(ctx, func(tx common.Transaction) error {
+		// Update job with campaign ID and corpus usage flag
+		query := `UPDATE jobs SET 
+			campaign_id = ?,
+			use_campaign_corpus = ?,
+			updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?`
+
+		var useCorpusInt int
+		if useCampaignCorpus {
+			useCorpusInt = 1
+		} else {
+			useCorpusInt = 0
+		}
+
+		sqlTx := tx.(*SQLiteTransaction).tx
+		result, err := sqlTx.ExecContext(ctx, query, campaignID, useCorpusInt, jobID)
+		if err != nil {
+			return common.NewDatabaseError("update_job_campaign", err)
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return common.NewDatabaseError("check_rows_affected", err)
+		}
+
+		if rowsAffected == 0 {
+			return common.ErrKeyNotFound
+		}
+
+		// Insert into campaign_jobs relationship table
+		_, err = sqlTx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO campaign_jobs (campaign_id, job_id) 
+			VALUES (?, ?)`, campaignID, jobID)
+
+		if err != nil {
+			return common.NewDatabaseError("insert_campaign_job", err)
+		}
+
+		s.logger.WithFields(logrus.Fields{
+			"job_id":              jobID,
+			"campaign_id":         campaignID,
+			"use_campaign_corpus": useCampaignCorpus,
+		}).Info("Linked job to campaign")
+
+		return nil
+	})
+}
+
+// GetCampaignCorpusForJob retrieves corpus files for a job from its campaign
+func (s *SQLiteStorage) GetCampaignCorpusForJob(ctx context.Context, jobID string) ([]*common.CorpusFile, error) {
+	// First get the campaign ID and check if job uses campaign corpus
+	type jobCampaignInfo struct {
+		campaignID        sql.NullString
+		useCampaignCorpus int
+	}
+
+	info, err := RetryableQueryRow(ctx, s.db, s.config,
+		`SELECT campaign_id, use_campaign_corpus FROM jobs WHERE id = ?`,
+		func(row *sql.Row) (jobCampaignInfo, error) {
+			var info jobCampaignInfo
+			err := row.Scan(&info.campaignID, &info.useCampaignCorpus)
+			return info, err
+		}, jobID)
+
+	if err == sql.ErrNoRows {
+		return nil, common.ErrKeyNotFound
+	}
+	if err != nil {
+		return nil, common.NewDatabaseError("get_job_campaign", err)
+	}
+
+	campaignID := info.campaignID
+	useCampaignCorpus := info.useCampaignCorpus
+
+	// If job doesn't use campaign corpus or has no campaign, return empty
+	if !campaignID.Valid || useCampaignCorpus == 0 {
+		return []*common.CorpusFile{}, nil
+	}
+
+	// Get corpus files from the campaign
+	query := `SELECT 
+		id, campaign_id, job_id, bot_id, filename, hash, size,
+		coverage, new_coverage, parent_hash, generation, created_at,
+		synced_at, is_seed
+		FROM campaign_corpus_files
+		WHERE campaign_id = ?
+		ORDER BY created_at DESC`
+
+	return RetryableQuery(ctx, s.db, s.config, query, func(rows *sql.Rows) (*common.CorpusFile, error) {
+		file := &common.CorpusFile{}
+		var jobID, botID, parentHash sql.NullString
+		var syncedAt sql.NullTime
+
+		err := rows.Scan(
+			&file.ID, &file.CampaignID, &jobID, &botID, &file.Filename,
+			&file.Hash, &file.Size, &file.Coverage, &file.NewCoverage,
+			&parentHash, &file.Generation, &file.CreatedAt, &syncedAt,
+			&file.IsSeed)
+
+		if err != nil {
+			return nil, err
+		}
+
+		// Handle nullable fields
+		if jobID.Valid {
+			file.JobID = jobID.String
+		}
+		if botID.Valid {
+			file.BotID = botID.String
+		}
+		if parentHash.Valid {
+			file.ParentHash = parentHash.String
+		}
+		if syncedAt.Valid {
+			file.SyncedAt = &syncedAt.Time
+		}
+
+		return file, nil
+	}, campaignID.String)
+}
+
+// PromoteCrashToCorpus promotes a crash input to campaign corpus
+func (s *SQLiteStorage) PromoteCrashToCorpus(ctx context.Context, crashID, campaignID string, coverage int64) error {
+	return s.Transaction(ctx, func(tx common.Transaction) error {
+		sqlTx := tx.(*SQLiteTransaction).tx
+
+		// Get crash details
+		var crash common.CrashResult
+		var jobID, botID sql.NullString
+
+		err := sqlTx.QueryRowContext(ctx, `
+			SELECT id, job_id, bot_id, hash, file_path, size 
+			FROM crashes WHERE id = ?`, crashID).Scan(
+			&crash.ID, &jobID, &botID, &crash.Hash, &crash.FilePath, &crash.Size)
+
+		if err == sql.ErrNoRows {
+			return common.ErrKeyNotFound
+		}
+		if err != nil {
+			return common.NewDatabaseError("get_crash_for_promotion", err)
+		}
+
+		// Get crash input
+		input, err := s.GetCrashInput(ctx, crashID)
+		if err != nil {
+			return common.NewDatabaseError("get_crash_input_for_promotion", err)
+		}
+
+		// Create corpus file entry
+		corpusID := fmt.Sprintf("corpus_%s_%d", crashID, time.Now().Unix())
+		filename := fmt.Sprintf("crash_%s_%s", crash.Hash[:8], filepath.Base(crash.FilePath))
+
+		_, err = sqlTx.ExecContext(ctx, `
+			INSERT INTO campaign_corpus_files (
+				id, campaign_id, job_id, bot_id, filename, hash, size,
+				coverage, new_coverage, source_type, source_crash_id,
+				generation, is_seed
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			corpusID, campaignID, jobID, botID, filename, crash.Hash,
+			crash.Size, coverage, coverage, "crash_promotion", crashID,
+			1, 0) // generation=1, is_seed=false
+
+		if err != nil {
+			return common.NewDatabaseError("create_corpus_file", err)
+		}
+
+		// Store the actual input data (this would typically be handled by file storage)
+		// For now, we'll store a reference in metadata
+		inputKey := fmt.Sprintf("corpus_input:%s", corpusID)
+		if err := tx.Store(ctx, inputKey, input); err != nil {
+			return common.NewDatabaseError("store_corpus_input", err)
+		}
+
+		s.logger.WithFields(logrus.Fields{
+			"crash_id":    crashID,
+			"campaign_id": campaignID,
+			"corpus_id":   corpusID,
+			"coverage":    coverage,
+		}).Info("Promoted crash to corpus")
+
+		return nil
+	})
+}
+
+// CreateCorpusCollection creates a new corpus collection
+func (s *SQLiteStorage) CreateCorpusCollection(ctx context.Context, collection *common.CorpusCollection) error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
+		// Convert tags to JSON
+		tagsJSON, err := json.Marshal(collection.Tags)
+		if err != nil {
+			return common.NewValidationError("marshal_tags", err)
+		}
+
+		_, err = s.db.ExecContext(ctx, `
+			INSERT INTO corpus_collections (
+				id, name, description, created_at, updated_at, file_count, total_size, tags
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			collection.ID, collection.Name, collection.Description,
+			collection.CreatedAt, collection.UpdatedAt, collection.FileCount,
+			collection.TotalSize, string(tagsJSON))
+
+		if err != nil {
+			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+				return common.NewValidationError("collection_exists", fmt.Errorf("collection with name '%s' already exists", collection.Name))
+			}
+			return common.NewDatabaseError("create_corpus_collection", err)
+		}
+
+		return nil
+	})
+}
+
+// GetCorpusCollection retrieves a corpus collection by ID
+func (s *SQLiteStorage) GetCorpusCollection(ctx context.Context, collectionID string) (*common.CorpusCollection, error) {
+	var collection common.CorpusCollection
+	var tagsJSON string
+	var createdAtStr, updatedAtStr string
+
+	err := ExecuteWithRetry(ctx, s.config, func() error {
+		row := s.db.QueryRowContext(ctx, `
+			SELECT id, name, description, created_at, updated_at, file_count, total_size, tags
+			FROM corpus_collections WHERE id = ?`, collectionID)
+
+		err := row.Scan(&collection.ID, &collection.Name, &collection.Description,
+			&createdAtStr, &updatedAtStr, &collection.FileCount,
+			&collection.TotalSize, &tagsJSON)
+
+		if err == sql.ErrNoRows {
+			return common.ErrKeyNotFound
+		}
+		return err
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse timestamps
+	if createdAt, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", createdAtStr); err == nil {
+		collection.CreatedAt = createdAt
+	} else if createdAt, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+		collection.CreatedAt = createdAt
+	} else {
+		collection.CreatedAt = time.Now()
+	}
+
+	if updatedAt, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", updatedAtStr); err == nil {
+		collection.UpdatedAt = updatedAt
+	} else if updatedAt, err := time.Parse(time.RFC3339, updatedAtStr); err == nil {
+		collection.UpdatedAt = updatedAt
+	} else {
+		collection.UpdatedAt = time.Now()
+	}
+
+	// Parse tags JSON
+	if tagsJSON != "" {
+		if err := json.Unmarshal([]byte(tagsJSON), &collection.Tags); err != nil {
+			s.logger.WithError(err).Warn("Failed to unmarshal collection tags")
+			collection.Tags = []string{}
+		}
+	}
+
+	return &collection, nil
+}
+
+// GetCorpusCollections retrieves all corpus collections
+func (s *SQLiteStorage) GetCorpusCollections(ctx context.Context) ([]*common.CorpusCollection, error) {
+	var collections []*common.CorpusCollection
+
+	err := ExecuteWithRetry(ctx, s.config, func() error {
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT id, name, description, created_at, updated_at, file_count, total_size, tags
+			FROM corpus_collections ORDER BY created_at DESC`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var collection common.CorpusCollection
+			var tagsJSON string
+			var createdAtStr, updatedAtStr string
+
+			err := rows.Scan(&collection.ID, &collection.Name, &collection.Description,
+				&createdAtStr, &updatedAtStr, &collection.FileCount,
+				&collection.TotalSize, &tagsJSON)
+			if err != nil {
+				return err
+			}
+
+			// Parse timestamps
+			if createdAt, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", createdAtStr); err == nil {
+				collection.CreatedAt = createdAt
+			} else if createdAt, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+				collection.CreatedAt = createdAt
+			} else {
+				collection.CreatedAt = time.Now()
+			}
+
+			if updatedAt, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", updatedAtStr); err == nil {
+				collection.UpdatedAt = updatedAt
+			} else if updatedAt, err := time.Parse(time.RFC3339, updatedAtStr); err == nil {
+				collection.UpdatedAt = updatedAt
+			} else {
+				collection.UpdatedAt = time.Now()
+			}
+
+			// Parse tags JSON
+			if tagsJSON != "" {
+				if err := json.Unmarshal([]byte(tagsJSON), &collection.Tags); err != nil {
+					s.logger.WithError(err).Warn("Failed to unmarshal collection tags")
+					collection.Tags = []string{}
+				}
+			} else {
+				// Initialize empty tags array if JSON is empty/null
+				collection.Tags = []string{}
+			}
+
+			collections = append(collections, &collection)
+		}
+
+		return rows.Err()
+	})
+
+	if err != nil {
+		return nil, common.NewDatabaseError("get_corpus_collections", err)
+	}
+
+	return collections, nil
+}
+
+// UpdateCorpusCollection updates a corpus collection
+func (s *SQLiteStorage) UpdateCorpusCollection(ctx context.Context, collection *common.CorpusCollection) error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
+		// Convert tags to JSON
+		tagsJSON, err := json.Marshal(collection.Tags)
+		if err != nil {
+			return common.NewValidationError("marshal_tags", err)
+		}
+
+		result, err := s.db.ExecContext(ctx, `
+			UPDATE corpus_collections SET
+				name = ?, description = ?, updated_at = ?, file_count = ?, total_size = ?, tags = ?
+			WHERE id = ?`,
+			collection.Name, collection.Description, collection.UpdatedAt,
+			collection.FileCount, collection.TotalSize, string(tagsJSON), collection.ID)
+
+		if err != nil {
+			return common.NewDatabaseError("update_corpus_collection", err)
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return common.NewDatabaseError("update_corpus_collection_rows", err)
+		}
+
+		if rowsAffected == 0 {
+			return common.ErrKeyNotFound
+		}
+
+		return nil
+	})
+}
+
+// DeleteCorpusCollection deletes a corpus collection and all associated files
+func (s *SQLiteStorage) DeleteCorpusCollection(ctx context.Context, collectionID string) error {
+	return RetryableTransaction(ctx, s.db, s.config, func(tx *sql.Tx) error {
+		// Delete the collection (cascade will delete files)
+		result, err := tx.ExecContext(ctx, "DELETE FROM corpus_collections WHERE id = ?", collectionID)
+		if err != nil {
+			return common.NewDatabaseError("delete_corpus_collection", err)
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return common.NewDatabaseError("delete_corpus_collection_rows", err)
+		}
+
+		if rowsAffected == 0 {
+			return common.ErrKeyNotFound
+		}
+
+		return nil
+	})
+}
+
+// AddCorpusCollectionFile adds a file to a corpus collection
+func (s *SQLiteStorage) AddCorpusCollectionFile(ctx context.Context, file *common.CorpusCollectionFile) error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO corpus_collection_files (
+				id, collection_id, filename, hash, size, uploaded_at
+			) VALUES (?, ?, ?, ?, ?, ?)`,
+			file.ID, file.CollectionID, file.Filename, file.Hash, file.Size, file.UploadedAt)
+
+		if err != nil {
+			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+				return common.NewValidationError("file_exists", fmt.Errorf("file with hash '%s' already exists in collection", file.Hash))
+			}
+			return common.NewDatabaseError("add_corpus_collection_file", err)
+		}
+
+		return nil
+	})
+}
+
+// GetCorpusCollectionFiles retrieves all files in a corpus collection
+func (s *SQLiteStorage) GetCorpusCollectionFiles(ctx context.Context, collectionID string) ([]*common.CorpusCollectionFile, error) {
+	var files []*common.CorpusCollectionFile
+
+	err := ExecuteWithRetry(ctx, s.config, func() error {
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT id, collection_id, filename, hash, size, uploaded_at
+			FROM corpus_collection_files WHERE collection_id = ? ORDER BY uploaded_at DESC`,
+			collectionID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var file common.CorpusCollectionFile
+			var uploadedAtStr string
+
+			err := rows.Scan(&file.ID, &file.CollectionID, &file.Filename,
+				&file.Hash, &file.Size, &uploadedAtStr)
+			if err != nil {
+				return err
+			}
+
+			// Parse timestamp
+			if uploadedAt, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", uploadedAtStr); err == nil {
+				file.UploadedAt = uploadedAt
+			} else if uploadedAt, err := time.Parse(time.RFC3339, uploadedAtStr); err == nil {
+				file.UploadedAt = uploadedAt
+			} else {
+				file.UploadedAt = time.Now()
+			}
+
+			files = append(files, &file)
+		}
+
+		return rows.Err()
+	})
+
+	if err != nil {
+		return nil, common.NewDatabaseError("get_corpus_collection_files", err)
+	}
+
+	return files, nil
+}
+
+// DeleteCorpusCollectionFile deletes a specific file from a corpus collection
+func (s *SQLiteStorage) DeleteCorpusCollectionFile(ctx context.Context, fileID string) error {
+	return ExecuteWithRetry(ctx, s.config, func() error {
+		result, err := s.db.ExecContext(ctx, "DELETE FROM corpus_collection_files WHERE id = ?", fileID)
+		if err != nil {
+			return common.NewDatabaseError("delete_corpus_collection_file", err)
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return common.NewDatabaseError("delete_corpus_collection_file_rows", err)
+		}
+
+		if rowsAffected == 0 {
+			return common.ErrKeyNotFound
+		}
+
+		return nil
+	})
 }

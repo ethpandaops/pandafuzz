@@ -9,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/storage"
+	"github.com/gorilla/mux"
 )
 
 // CorpusFile represents a corpus file
@@ -23,13 +24,13 @@ type CorpusFile struct {
 
 // CorpusStats represents corpus statistics
 type CorpusStats struct {
-	TotalFiles   int   `json:"total_files"`
-	TotalSize    int64 `json:"total_size"`
+	TotalFiles   int       `json:"total_files"`
+	TotalSize    int64     `json:"total_size"`
 	LastUpdated  time.Time `json:"last_updated"`
-	UniqueHashes int   `json:"unique_hashes"`
+	UniqueHashes int       `json:"unique_hashes"`
 }
 
-// handleGetJobCorpus returns the list of corpus files for a job
+// handleGetJobCorpus returns the list of corpus files for a job (using enhanced corpus service)
 func (s *Server) handleGetJobCorpus(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	jobID := vars["id"]
@@ -37,62 +38,53 @@ func (s *Server) handleGetJobCorpus(w http.ResponseWriter, r *http.Request) {
 	// Get job to verify it exists
 	job, err := s.services.Job.GetJob(r.Context(), jobID)
 	if err != nil {
-		s.responseWriter.WriteError(w, err)
+		if common.IsNotFoundError(err) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Job not found", err)
+		} else {
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get job", err)
+		}
 		return
 	}
 
-	// Get corpus directory for the job
-	corpusDir := filepath.Join(job.WorkDir, "corpus")
-	
-	// Check if corpus directory exists
-	if _, err := os.Stat(corpusDir); os.IsNotExist(err) {
-		// Return empty list if corpus directory doesn't exist
+	// Check if corpus service is available
+	if s.services == nil || s.services.Corpus == nil {
+		s.logger.Warn("Corpus service not initialized")
+		// Return empty corpus instead of error for backward compatibility
 		response := map[string]any{
-			"job_id": jobID,
-			"files":  []CorpusFile{},
+			"job_id":      jobID,
+			"campaign_id": job.CampaignID,
+			"files":       []CorpusFile{},
+			"count":       0,
 		}
 		s.writeJSONResponse(w, response)
 		return
 	}
 
-	// Read corpus files
-	files := []CorpusFile{}
-	err = filepath.Walk(corpusDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		
-		// Skip directories
-		if info.IsDir() {
-			return nil
-		}
-		
-		// Get relative path from corpus directory
-		relPath, err := filepath.Rel(corpusDir, path)
-		if err != nil {
-			return err
-		}
-		
-		files = append(files, CorpusFile{
-			Name:       relPath,
-			Size:       info.Size(),
-			Hash:       "", // TODO: Calculate hash if needed
-			UploadedAt: info.ModTime(),
-		})
-		
-		return nil
-	})
-	
+	// Get corpus files from the corpus service
+	corpusFiles, err := s.services.Corpus.GetCorpusForJob(r.Context(), jobID)
 	if err != nil {
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read corpus files", err)
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get corpus files", err)
 		return
 	}
 
-	response := map[string]any{
-		"job_id": jobID,
-		"files":  files,
+	// Convert to API response format
+	files := make([]CorpusFile, 0, len(corpusFiles))
+	for _, cf := range corpusFiles {
+		files = append(files, CorpusFile{
+			Name:       cf.Filename,
+			Size:       cf.Size,
+			Hash:       cf.Hash,
+			UploadedAt: cf.CreatedAt,
+		})
 	}
-	
+
+	response := map[string]any{
+		"job_id":      jobID,
+		"campaign_id": job.CampaignID,
+		"files":       files,
+		"count":       len(files),
+	}
+
 	s.writeJSONResponse(w, response)
 }
 
@@ -117,7 +109,7 @@ func (s *Server) handleUploadJobCorpus(w http.ResponseWriter, r *http.Request) {
 
 	// Get corpus directory
 	corpusDir := filepath.Join(job.WorkDir, "corpus")
-	
+
 	// Create corpus directory if it doesn't exist
 	if err := os.MkdirAll(corpusDir, 0755); err != nil {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create corpus directory", err)
@@ -140,7 +132,7 @@ func (s *Server) handleUploadJobCorpus(w http.ResponseWriter, r *http.Request) {
 			// Sanitize filename
 			filename := filepath.Base(header.Filename)
 			filename = strings.ReplaceAll(filename, "..", "")
-			
+
 			// Create destination file
 			destPath := filepath.Join(corpusDir, filename)
 			destFile, err := os.Create(destPath)
@@ -186,7 +178,7 @@ func (s *Server) handleGetCorpusStats(w http.ResponseWriter, r *http.Request) {
 
 	// Get corpus directory
 	corpusDir := filepath.Join(job.WorkDir, "corpus")
-	
+
 	stats := CorpusStats{
 		TotalFiles:   0,
 		TotalSize:    0,
@@ -208,27 +200,27 @@ func (s *Server) handleGetCorpusStats(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		
+
 		// Skip directories
 		if info.IsDir() {
 			return nil
 		}
-		
+
 		stats.TotalFiles++
 		stats.TotalSize += info.Size()
-		
+
 		// Track latest modification time
 		if info.ModTime().After(lastModTime) {
 			lastModTime = info.ModTime()
 		}
-		
+
 		// TODO: Calculate file hash for uniqueness
 		// For now, use filename as a placeholder
 		hashes[info.Name()] = true
-		
+
 		return nil
 	})
-	
+
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to calculate corpus statistics", err)
 		return
@@ -243,51 +235,108 @@ func (s *Server) handleGetCorpusStats(w http.ResponseWriter, r *http.Request) {
 // handleDownloadCorpusFile downloads a specific corpus file
 func (s *Server) handleDownloadCorpusFile(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	jobID := vars["id"]
-	filename := vars["filename"]
+	campaignID := vars["id"]
+	hash := vars["hash"]
 
-	// Get job to verify it exists
-	job, err := s.services.Job.GetJob(r.Context(), jobID)
-	if err != nil {
-		s.responseWriter.WriteError(w, err)
+	if campaignID == "" || hash == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Campaign ID and file hash are required", nil)
 		return
 	}
 
-	// Sanitize filename
-	filename = filepath.Base(filename)
-	filename = strings.ReplaceAll(filename, "..", "")
-	
-	// Get file path
-	filePath := filepath.Join(job.WorkDir, "corpus", filename)
-	
-	// Check if file exists
-	info, err := os.Stat(filePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Corpus file not found", nil)
-		} else {
-			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to access corpus file", err)
+	// Get the corpus file metadata from database
+	var corpusFile *common.CorpusFile
+	if db, ok := s.state.db.(*storage.SQLiteStorage); ok {
+		files, err := db.GetCorpusFiles(r.Context(), campaignID)
+		if err != nil {
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get corpus files", err)
+			return
 		}
+
+		// Find the file by hash
+		for _, f := range files {
+			if f.Hash == hash {
+				corpusFile = f
+				break
+			}
+		}
+	} else {
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Storage interface not available", nil)
 		return
 	}
 
-	// Open file
-	file, err := os.Open(filePath)
-	if err != nil {
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to open corpus file", err)
+	if corpusFile == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Corpus file not found", nil)
 		return
 	}
-	defer file.Close()
 
-	// Set headers
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
+	// Try to retrieve from MinIO/S3 storage backend
+	if s.storageBackend != nil {
+		storageKey := fmt.Sprintf("corpus/%s/%s", campaignID, hash)
+		data, err := s.storageBackend.Retrieve(r.Context(), storageKey)
+		if err != nil {
+			// Fallback to filesystem for backward compatibility
+			s.logger.WithError(err).Debug("Failed to retrieve from storage backend, trying filesystem")
 
-	// Copy file to response
-	_, err = io.Copy(w, file)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to send corpus file")
+			// Try to get from filesystem (for jobs that store locally)
+			job, jobErr := s.services.Job.GetJob(r.Context(), campaignID)
+			if jobErr == nil && job.WorkDir != "" {
+				filePath := filepath.Join(job.WorkDir, "corpus", corpusFile.Filename)
+				file, err := os.Open(filePath)
+				if err != nil {
+					s.writeErrorResponse(w, http.StatusNotFound, "Corpus file not found", err)
+					return
+				}
+				defer file.Close()
+
+				info, _ := file.Stat()
+				w.Header().Set("Content-Type", "application/octet-stream")
+				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", corpusFile.Filename))
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
+
+				if _, err := io.Copy(w, file); err != nil {
+					s.logger.WithError(err).Error("Failed to send corpus file")
+				}
+				return
+			} else {
+				s.writeErrorResponse(w, http.StatusNotFound, "Corpus file not found", err)
+				return
+			}
+		}
+		defer data.Close()
+
+		// Set headers
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", corpusFile.Filename))
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", corpusFile.Size))
+
+		// Copy the file content to response
+		if _, err := io.Copy(w, data); err != nil {
+			s.logger.WithError(err).Error("Failed to send corpus file")
+		}
+	} else {
+		// No storage backend configured, try filesystem only
+		job, err := s.services.Job.GetJob(r.Context(), campaignID)
+		if err != nil {
+			s.writeErrorResponse(w, http.StatusNotFound, "Job not found", err)
+			return
+		}
+
+		filePath := filepath.Join(job.WorkDir, "corpus", corpusFile.Filename)
+		file, err := os.Open(filePath)
+		if err != nil {
+			s.writeErrorResponse(w, http.StatusNotFound, "Corpus file not found", err)
+			return
+		}
+		defer file.Close()
+
+		info, _ := file.Stat()
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", corpusFile.Filename))
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
+
+		if _, err := io.Copy(w, file); err != nil {
+			s.logger.WithError(err).Error("Failed to send corpus file")
+		}
 	}
 }
 
@@ -313,10 +362,10 @@ func (s *Server) handleDeleteCorpusFile(w http.ResponseWriter, r *http.Request) 
 	// Sanitize filename
 	filename = filepath.Base(filename)
 	filename = strings.ReplaceAll(filename, "..", "")
-	
+
 	// Get file path
 	filePath := filepath.Join(job.WorkDir, "corpus", filename)
-	
+
 	// Check if file exists
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		s.writeErrorResponse(w, http.StatusNotFound, "Corpus file not found", nil)
@@ -330,4 +379,113 @@ func (s *Server) handleDeleteCorpusFile(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetCorpusDownloadURL generates presigned URL for direct download
+func (s *Server) handleGetCorpusDownloadURL(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	corpusID := vars["id"]
+	fileHash := vars["hash"]
+
+	if corpusID == "" || fileHash == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Corpus ID and file hash required", nil)
+		return
+	}
+
+	// Check if storage backend is available
+	if s.storageBackend == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Storage backend not initialized", nil)
+		return
+	}
+
+	// Generate S3 key
+	key := fmt.Sprintf("corpus/%s/%s/%s", corpusID, fileHash[:2], fileHash)
+
+	// Generate presigned URL (1 hour expiry)
+	url, err := s.storageBackend.GetPresignedURL(r.Context(), key, 1*time.Hour)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to generate download URL", err)
+		return
+	}
+
+	response := map[string]interface{}{
+		"url":        url,
+		"expires_in": 3600, // seconds
+		"method":     "GET",
+	}
+
+	s.writeJSONResponse(w, response)
+}
+
+// handleGetCorpusUploadURL generates presigned URL for direct upload
+func (s *Server) handleGetCorpusUploadURL(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	corpusID := vars["id"]
+
+	var req struct {
+		Filename string `json:"filename"`
+		Size     int64  `json:"size"`
+		Hash     string `json:"hash"`
+	}
+
+	if err := s.decodeJSONBody(w, r, &req); err != nil {
+		return
+	}
+
+	// Validate request
+	if req.Hash == "" || req.Size <= 0 {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Hash and size required", nil)
+		return
+	}
+
+	// Check if storage backend is available
+	if s.storageBackend == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Storage backend not initialized", nil)
+		return
+	}
+
+	// Check size limit
+	if s.config.Storage.MaxFileSize > 0 && req.Size > s.config.Storage.MaxFileSize {
+		s.writeErrorResponse(w, http.StatusBadRequest, "File too large", nil)
+		return
+	}
+
+	// Generate S3 key
+	key := fmt.Sprintf("corpus/%s/%s/%s", corpusID, req.Hash[:2], req.Hash)
+
+	// Check if already exists
+	exists, err := s.storageBackend.Exists(r.Context(), key)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to check existence", err)
+		return
+	}
+
+	if exists {
+		// File already exists, no need to upload
+		response := map[string]interface{}{
+			"status":  "exists",
+			"message": "File already exists in corpus",
+		}
+		s.writeJSONResponse(w, response)
+		return
+	}
+
+	// Generate presigned upload URL
+	url, err := s.storageBackend.PutPresignedURL(r.Context(), key, 1*time.Hour)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to generate upload URL", err)
+		return
+	}
+
+	response := map[string]interface{}{
+		"url":        url,
+		"expires_in": 3600,
+		"method":     "PUT",
+		"headers": map[string]string{
+			"Content-Type":   "application/octet-stream",
+			"Content-Length": fmt.Sprintf("%d", req.Size),
+		},
+	}
+
+	s.writeJSONResponse(w, response)
 }

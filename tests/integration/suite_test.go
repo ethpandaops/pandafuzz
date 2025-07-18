@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
@@ -13,13 +14,13 @@ import (
 func TestMain(m *testing.M) {
 	// Setup
 	setup()
-	
+
 	// Run tests
 	code := m.Run()
-	
+
 	// Teardown
 	teardown()
-	
+
 	// Exit
 	os.Exit(code)
 }
@@ -27,7 +28,7 @@ func TestMain(m *testing.M) {
 func setup() {
 	// Set test environment
 	os.Setenv("PANDAFUZZ_TEST_MODE", "true")
-	
+
 	// Configure logging for tests
 	logrus.SetLevel(logrus.WarnLevel) // Reduce noise during tests
 	logrus.SetFormatter(&logrus.TextFormatter{
@@ -35,7 +36,7 @@ func setup() {
 		TimestampFormat: "15:04:05.000",
 		DisableColors:   true,
 	})
-	
+
 	fmt.Println("=== PandaFuzz Integration Test Suite ===")
 }
 
@@ -95,19 +96,19 @@ func TestSuiteSmoke(t *testing.T) {
 func BenchmarkBotRegistration(b *testing.B) {
 	env := SetupTestEnvironment(&testing.T{})
 	defer env.Cleanup()
-	
+
 	err := env.StartMaster()
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		botID := fmt.Sprintf("bench-bot-%d", i)
 		bot, _ := env.CreateTestBot(botID)
 		if bot != nil {
-			env.state.DeleteBot(botID)
+			env.state.DeleteBot(context.Background(), botID)
 		}
 	}
 }
@@ -115,18 +116,18 @@ func BenchmarkBotRegistration(b *testing.B) {
 func BenchmarkJobAssignment(b *testing.B) {
 	env := SetupTestEnvironment(&testing.T{})
 	defer env.Cleanup()
-	
+
 	err := env.StartMaster()
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	// Create bot
 	bot, err := env.CreateTestBot("bench-bot")
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	// Create jobs
 	jobs := make([]*common.Job, b.N)
 	for i := 0; i < b.N; i++ {
@@ -136,18 +137,18 @@ func BenchmarkJobAssignment(b *testing.B) {
 		}
 		jobs[i] = job
 	}
-	
+
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		// Simulate job assignment
 		job := jobs[i]
 		job.Status = common.JobStatusAssigned
 		job.AssignedBot = &bot.ID
-		env.state.SaveJobWithRetry(job)
-		
+		env.state.SaveJobWithRetry(context.Background(), job)
+
 		// Reset for next iteration
 		job.Status = common.JobStatusCompleted
-		env.state.SaveJobWithRetry(job)
+		env.state.SaveJobWithRetry(context.Background(), job)
 	}
 }

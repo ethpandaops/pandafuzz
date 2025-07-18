@@ -13,7 +13,7 @@ import (
 
 // MockCorpusStorage is a mock implementation for corpus storage
 type MockCorpusStorage struct {
-	mock.Mock
+	MockStorage
 }
 
 func (m *MockCorpusStorage) AddCorpusFile(ctx context.Context, cf *common.CorpusFile) error {
@@ -104,6 +104,38 @@ func (m *MockFileStorage) List(ctx context.Context, prefix string) ([]string, er
 	return args.Get(0).([]string), args.Error(1)
 }
 
+// Implement the FileStorage interface methods
+func (m *MockFileStorage) SaveFile(ctx context.Context, path string, data []byte) error {
+	args := m.Called(ctx, path, data)
+	return args.Error(0)
+}
+
+func (m *MockFileStorage) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	args := m.Called(ctx, path)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]byte), args.Error(1)
+}
+
+func (m *MockFileStorage) DeleteFile(ctx context.Context, path string) error {
+	args := m.Called(ctx, path)
+	return args.Error(0)
+}
+
+func (m *MockFileStorage) ListFiles(ctx context.Context, prefix string) ([]string, error) {
+	args := m.Called(ctx, prefix)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]string), args.Error(1)
+}
+
+func (m *MockFileStorage) FileExists(ctx context.Context, path string) (bool, error) {
+	args := m.Called(ctx, path)
+	return args.Bool(0), args.Error(1)
+}
+
 func TestCorpusService_AddFile(t *testing.T) {
 	ctx := context.Background()
 	logger := logrus.New()
@@ -112,7 +144,7 @@ func TestCorpusService_AddFile(t *testing.T) {
 	t.Run("add new corpus file", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, logger)
+		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 		file := &common.CorpusFile{
 			CampaignID:  "campaign1",
@@ -150,7 +182,7 @@ func TestCorpusService_AddFile(t *testing.T) {
 	t.Run("add duplicate corpus file", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, logger)
+		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 		file := &common.CorpusFile{
 			CampaignID: "campaign1",
@@ -175,7 +207,7 @@ func TestCorpusService_AddFile(t *testing.T) {
 	t.Run("add file exceeding size limit", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, logger)
+		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 		file := &common.CorpusFile{
 			CampaignID: "campaign1",
@@ -196,7 +228,7 @@ func TestCorpusService_GetEvolution(t *testing.T) {
 
 	mockStorage := new(MockCorpusStorage)
 	mockFileStorage := new(MockFileStorage)
-	cs := NewCorpusService(mockStorage, mockFileStorage, logger)
+	cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 	t.Run("get corpus evolution history", func(t *testing.T) {
 		campaignID := "campaign1"
@@ -250,7 +282,7 @@ func TestCorpusService_SyncCorpus(t *testing.T) {
 	t.Run("sync corpus files to bot", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, logger)
+		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 		campaignID := "campaign1"
 		botID := "bot1"
@@ -288,7 +320,7 @@ func TestCorpusService_SyncCorpus(t *testing.T) {
 	t.Run("no files to sync", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, logger)
+		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 		campaignID := "campaign1"
 		botID := "bot1"
@@ -312,7 +344,7 @@ func TestCorpusService_ShareCorpus(t *testing.T) {
 	t.Run("share corpus between campaigns", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, logger)
+		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 		fromCampaign := "campaign1"
 		toCampaign := "campaign2"
@@ -365,7 +397,7 @@ func TestCorpusService_ShareCorpus(t *testing.T) {
 	t.Run("share corpus with some duplicates", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, logger)
+		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 		fromCampaign := "campaign1"
 		toCampaign := "campaign2"
@@ -428,6 +460,7 @@ func TestCorpusService_trackEvolution(t *testing.T) {
 		cs := &corpusService{
 			storage:     mockStorage,
 			fileStorage: mockFileStorage,
+			corpusDir:   "/tmp/test-corpus",
 			logger:      logger,
 		}
 
@@ -459,6 +492,7 @@ func TestCorpusService_findCoverageIncreasingFiles(t *testing.T) {
 		cs := &corpusService{
 			storage:     mockStorage,
 			fileStorage: mockFileStorage,
+			corpusDir:   "/tmp/test-corpus",
 			logger:      logger,
 		}
 

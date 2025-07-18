@@ -70,7 +70,7 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 	// If the path is relative, check in storage
 	if !filepath.IsAbs(binaryPath) {
 		// First try binaries directory
-		binariesPath := filepath.Join(s.config.Storage.BasePath, "binaries", binaryPath)
+		binariesPath := filepath.Join(s.getStorageBasePath(), "binaries", binaryPath)
 		if _, err := os.Stat(binariesPath); err == nil {
 			binaryPath = binariesPath
 			s.logger.WithFields(logrus.Fields{
@@ -79,7 +79,7 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 			}).Debug("Resolved to binaries directory")
 		} else {
 			// Check if it's a stored binary (e.g., storage/binaries/timestamp_filename)
-			storagePath := filepath.Join(s.config.Storage.BasePath, binaryPath)
+			storagePath := filepath.Join(s.getStorageBasePath(), binaryPath)
 			if _, err := os.Stat(storagePath); err == nil {
 				binaryPath = storagePath
 				s.logger.WithFields(logrus.Fields{
@@ -90,7 +90,7 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 				// Try without storage prefix
 				if strings.HasPrefix(binaryPath, "storage/") {
 					trimmedPath := strings.TrimPrefix(binaryPath, "storage/")
-					storagePath = filepath.Join(s.config.Storage.BasePath, trimmedPath)
+					storagePath = filepath.Join(s.getStorageBasePath(), trimmedPath)
 					if _, err := os.Stat(storagePath); err == nil {
 						binaryPath = storagePath
 						s.logger.WithFields(logrus.Fields{
@@ -111,7 +111,7 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request) {
 			"bot_id":        botID,
 			"binary_path":   binaryPath,
 			"original_path": originalPath,
-			"storage_base":  s.config.Storage.BasePath,
+			"storage_base":  s.getStorageBasePath(),
 		}).Error("Failed to open binary file")
 
 		if os.IsNotExist(err) {
@@ -177,11 +177,11 @@ func (s *Server) handleCorpusDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if corpus exists for this job
-	corpusPath := filepath.Join(s.config.Storage.BasePath, "corpus", jobID, "seed_corpus.zip")
+	corpusPath := filepath.Join(s.getStorageBasePath(), "corpus", jobID, "seed_corpus.zip")
 
 	// Try alternate path
 	if _, err := os.Stat(corpusPath); os.IsNotExist(err) {
-		corpusPath = filepath.Join(s.config.Storage.BasePath, "corpus", jobID, "corpus.zip")
+		corpusPath = filepath.Join(s.getStorageBasePath(), "corpus", jobID, "corpus.zip")
 	}
 
 	// Open corpus file

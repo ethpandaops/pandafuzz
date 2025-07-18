@@ -83,7 +83,7 @@ func TestFuzzerInitialization(t *testing.T) {
 	seedDir := filepath.Join(tempDir, "seeds")
 	err = os.MkdirAll(seedDir, 0755)
 	require.NoError(t, err)
-	
+
 	// Create seed file
 	err = os.WriteFile(filepath.Join(seedDir, "seed1"), []byte("test"), 0644)
 	require.NoError(t, err)
@@ -99,7 +99,7 @@ func TestFuzzerInitialization(t *testing.T) {
 	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 	err = aflFuzzer.Configure(config)
 	require.NoError(t, err)
-	
+
 	err = aflFuzzer.Initialize()
 	assert.NoError(t, err)
 
@@ -120,10 +120,10 @@ func TestFuzzerValidation(t *testing.T) {
 		Target:          "/non/existent/binary",
 		OutputDirectory: "/tmp/test",
 	}
-	
+
 	err = aflFuzzer.Configure(config)
 	assert.NoError(t, err)
-	
+
 	err = aflFuzzer.Validate()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
@@ -162,7 +162,7 @@ exit 0`
 	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 	err = aflFuzzer.Configure(config)
 	require.NoError(t, err)
-	
+
 	err = aflFuzzer.Initialize()
 	require.NoError(t, err)
 
@@ -209,7 +209,7 @@ exit 0`
 // TestFuzzerJobExecution tests fuzzer execution through bot job executor
 func TestFuzzerJobExecution(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -227,12 +227,12 @@ func TestFuzzerJobExecution(t *testing.T) {
 
 	// Create test job
 	job := &common.Job{
-		ID:       "fuzzer-job-1",
-		Name:     "Test Fuzzing",
-		Fuzzer:   "afl++",
-		Target:   "/bin/echo", // Use system binary for testing
-		Status:   common.JobStatusPending,
-		WorkDir:  workDir,
+		ID:        "fuzzer-job-1",
+		Name:      "Test Fuzzing",
+		Fuzzer:    "afl++",
+		Target:    "/bin/echo", // Use system binary for testing
+		Status:    common.JobStatusPending,
+		WorkDir:   workDir,
 		TimeoutAt: time.Now().Add(5 * time.Second),
 		Config: common.JobConfig{
 			Duration: 2 * time.Second,
@@ -242,7 +242,7 @@ func TestFuzzerJobExecution(t *testing.T) {
 
 	// Mock execution (actual fuzzer might not be available)
 	success, message, err := executor.ExecuteJob(job)
-	
+
 	// We expect this to fail gracefully if AFL++ is not installed
 	if err != nil {
 		assert.Contains(t, err.Error(), "not found")
@@ -301,7 +301,7 @@ func TestFuzzerCrashHandling(t *testing.T) {
 		assert.Equal(t, crashes[i].content, crash.Input)
 		assert.Equal(t, int64(len(crashes[i].content)), crash.Size)
 		assert.NotEmpty(t, crash.Hash)
-		
+
 		// Check crash type detection
 		if i == 0 {
 			assert.Equal(t, "segmentation_fault", crash.Type)
@@ -314,13 +314,13 @@ func TestFuzzerCrashHandling(t *testing.T) {
 // TestFuzzerCoverageReporting tests coverage collection
 func TestFuzzerCoverageReporting(t *testing.T) {
 	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
-	
+
 	// Configure with minimal settings
 	config := fuzzer.FuzzConfig{
 		Target:          "/bin/test",
 		OutputDirectory: "/tmp/test",
 	}
-	
+
 	err := aflFuzzer.Configure(config)
 	require.NoError(t, err)
 
@@ -335,14 +335,14 @@ func TestFuzzerCoverageReporting(t *testing.T) {
 // TestFuzzerProgress tests progress tracking
 func TestFuzzerProgress(t *testing.T) {
 	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
-	
+
 	config := fuzzer.FuzzConfig{
 		Target:          "/bin/test",
 		OutputDirectory: "/tmp/test",
 		Duration:        10 * time.Second,
 		MaxExecutions:   1000,
 	}
-	
+
 	err := aflFuzzer.Configure(config)
 	require.NoError(t, err)
 
@@ -370,7 +370,7 @@ func TestFuzzerCleanup(t *testing.T) {
 	aflFuzzer := fuzzer.NewAFLPlusPlus(nil)
 	err = aflFuzzer.Configure(config)
 	require.NoError(t, err)
-	
+
 	err = aflFuzzer.Initialize()
 	require.NoError(t, err)
 
@@ -394,7 +394,7 @@ func TestLibFuzzerSpecifics(t *testing.T) {
 	libFuzzerHelp := `libFuzzer help
 Usage: fuzz-target [-flag=val]
 -help=1`
-	
+
 	script := fmt.Sprintf(`#!/bin/sh
 if [ "$1" = "-help=1" ]; then
     echo '%s'
@@ -402,7 +402,7 @@ if [ "$1" = "-help=1" ]; then
 fi
 echo "Running libfuzzer"
 `, libFuzzerHelp)
-	
+
 	err = os.WriteFile(testBinary, []byte(script), 0755)
 	require.NoError(t, err)
 
@@ -413,17 +413,17 @@ echo "Running libfuzzer"
 		Duration:        5 * time.Second,
 		MaxExecutions:   100,
 		FuzzerOptions: map[string]any{
-			"workers":        2,
-			"fork":           true,
-			"value_profile":  true,
-			"entropic":       true,
+			"workers":       2,
+			"fork":          true,
+			"value_profile": true,
+			"entropic":      true,
 		},
 	}
 
-	libFuzzer := fuzzer.NewLibFuzzer()
+	libFuzzer := fuzzer.NewLibFuzzer(logrus.New())
 	err = libFuzzer.Configure(config)
 	require.NoError(t, err)
-	
+
 	err = libFuzzer.Initialize()
 	assert.NoError(t, err)
 
@@ -431,7 +431,7 @@ echo "Running libfuzzer"
 	err = libFuzzer.Pause()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not support pause")
-	
+
 	err = libFuzzer.Resume()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not support resume")
@@ -449,7 +449,7 @@ func TestFuzzerEventHandling(t *testing.T) {
 		Target:          "/bin/test",
 		OutputDirectory: "/tmp/test",
 	}
-	
+
 	err := aflFuzzer.Configure(config)
 	require.NoError(t, err)
 
@@ -502,7 +502,7 @@ func TestFuzzerCorpusManagement(t *testing.T) {
 		WorkDirectory:   tempDir,
 	}
 
-	libFuzzer := fuzzer.NewLibFuzzer()
+	libFuzzer := fuzzer.NewLibFuzzer(logrus.New())
 	err = libFuzzer.Configure(config)
 	require.NoError(t, err)
 

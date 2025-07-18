@@ -2,6 +2,7 @@ package bot
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,6 +46,22 @@ type LogPushResponse struct {
 	Status string `json:"status"`
 	JobID  string `json:"job_id"`
 	Size   int    `json:"size"`
+}
+
+// UploadURLRequest represents a request for a presigned upload URL
+type UploadURLRequest struct {
+	Filename string `json:"filename"`
+	Size     int64  `json:"size"`
+	Hash     string `json:"hash"`
+}
+
+// UploadURLResponse represents the response with presigned upload URL
+type UploadURLResponse struct {
+	URL       string            `json:"url"`
+	Status    string            `json:"status,omitempty"`
+	ExpiresIn int               `json:"expires_in"`
+	Method    string            `json:"method"`
+	Headers   map[string]string `json:"headers,omitempty"`
 }
 
 // NewRetryClient creates a new retry client for bot communication
@@ -719,6 +736,345 @@ func (rc *RetryClient) DownloadJobCorpus(jobID, botID string, targetPath string)
 		return fmt.Errorf("failed to download corpus: %v", err)
 	}
 	return downloadErr
+}
+
+// DownloadCrashInput downloads crash input data from the master
+func (rc *RetryClient) DownloadCrashInput(crashID, botID string) ([]byte, error) {
+	url := fmt.Sprintf("%s/api/v1/results/crashes/%s/input", rc.masterURL, crashID)
+
+	rc.logger.WithFields(logrus.Fields{
+		"crash_id": crashID,
+		"bot_id":   botID,
+		"url":      url,
+	}).Debug("Downloading crash input")
+
+	var input []byte
+	err := rc.retryManager.Execute(func() error {
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %v", err)
+		}
+
+		req.Header.Set("X-Bot-ID", botID)
+
+		return rc.circuitBreaker.Execute(func() error {
+			resp, err := rc.httpClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(body))
+			}
+
+			input, err = io.ReadAll(resp.Body)
+			if err != nil {
+				return fmt.Errorf("failed to read response body: %v", err)
+			}
+
+			rc.logger.WithFields(logrus.Fields{
+				"crash_id": crashID,
+				"bot_id":   botID,
+				"size":     len(input),
+			}).Debug("Crash input downloaded successfully")
+
+			return nil
+		})
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to download crash input: %v", err)
+	}
+
+	return input, nil
+}
+
+// ReportReproductionResult reports a reproduction result to the master
+func (rc *RetryClient) ReportReproductionResult(result *common.ReproductionResult) error {
+	rc.logger.WithFields(logrus.Fields{
+		"result_id":        result.ID,
+		"crash_id":         result.CrashID,
+		"reproduced":       result.Reproduced,
+		"matches_original": result.MatchesOriginal,
+	}).Debug("Reporting reproduction result to master")
+
+	err := rc.retryManager.Execute(func() error {
+		return rc.circuitBreaker.Execute(func() error {
+			return rc.doRequest("POST", "/api/v1/reproduction/result", result, nil)
+		})
+	})
+
+	if err != nil {
+		return common.NewNetworkError("report_reproduction_result", err)
+	}
+
+	rc.logger.WithField("result_id", result.ID).Info("Reproduction result reported successfully")
+	return nil
+}
+
+// GetReproductionRequest fetches a reproduction request from the master
+func (rc *RetryClient) GetReproductionRequest(botID string) (*common.ReproductionRequest, error) {
+	var response json.RawMessage
+
+	err := rc.retryManager.Execute(func() error {
+		return rc.circuitBreaker.Execute(func() error {
+			return rc.doRequest("GET", fmt.Sprintf("/api/v1/bots/%s/reproduction", botID), nil, &response)
+		})
+	})
+
+	if err != nil {
+		return nil, common.NewNetworkError("get_reproduction_request", err)
+	}
+
+	// Check if response is empty (no reproduction requests available)
+	if len(response) == 0 || string(response) == "null" {
+		return nil, nil
+	}
+
+	// Try to unmarshal as reproduction request
+	var reproRequest common.ReproductionRequest
+	if err := json.Unmarshal(response, &reproRequest); err != nil {
+		// Try to unmarshal as error response
+		var errResp map[string]string
+		if jsonErr := json.Unmarshal(response, &errResp); jsonErr == nil {
+			if errResp["status"] == "no_reproduction_request" {
+				return nil, nil
+			}
+		}
+		return nil, fmt.Errorf("failed to unmarshal reproduction request: %v", err)
+	}
+
+	rc.logger.WithFields(logrus.Fields{
+		"request_id": reproRequest.ID,
+		"crash_id":   reproRequest.CrashID,
+		"bot_id":     botID,
+	}).Info("Received reproduction request")
+
+	return &reproRequest, nil
+}
+
+// GetCorpusFiles gets the list of corpus files for a campaign
+func (rc *RetryClient) GetCorpusFiles(ctx context.Context, campaignID string) ([]*common.CorpusFile, error) {
+	var response struct {
+		Files     []*common.CorpusFile `json:"files"`
+		FileCount int                  `json:"file_count"`
+	}
+
+	url := fmt.Sprintf("/api/v1/campaigns/%s/corpus/files", campaignID)
+	err := rc.retryManager.Execute(func() error {
+		return rc.circuitBreaker.Execute(func() error {
+			return rc.doRequest("GET", url, nil, &response)
+		})
+	})
+
+	if err != nil {
+		return nil, common.NewNetworkError("get_corpus_files", err)
+	}
+
+	return response.Files, nil
+}
+
+// GetCorpusDownloadURL gets a presigned download URL for a corpus file
+func (rc *RetryClient) GetCorpusDownloadURL(ctx context.Context, campaignID, fileHash string) (string, error) {
+	var response struct {
+		URL       string `json:"url"`
+		ExpiresIn int    `json:"expires_in"`
+		Method    string `json:"method"`
+	}
+
+	url := fmt.Sprintf("/api/v1/campaigns/%s/corpus/files/%s/download-url", campaignID, fileHash)
+	err := rc.retryManager.Execute(func() error {
+		return rc.circuitBreaker.Execute(func() error {
+			return rc.doRequest("GET", url, nil, &response)
+		})
+	})
+
+	if err != nil {
+		return "", common.NewNetworkError("get_corpus_download_url", err)
+	}
+
+	return response.URL, nil
+}
+
+// GetCorpusUploadURL gets a presigned upload URL for a corpus file
+func (rc *RetryClient) GetCorpusUploadURL(ctx context.Context, campaignID string, request UploadURLRequest) (*UploadURLResponse, error) {
+	var response UploadURLResponse
+
+	url := fmt.Sprintf("/api/v1/campaigns/%s/corpus/upload-url", campaignID)
+	err := rc.retryManager.Execute(func() error {
+		return rc.circuitBreaker.Execute(func() error {
+			return rc.doRequest("POST", url, request, &response)
+		})
+	})
+
+	if err != nil {
+		return nil, common.NewNetworkError("get_corpus_upload_url", err)
+	}
+
+	return &response, nil
+}
+
+// RegisterCorpusFile registers a new corpus file with the master
+func (rc *RetryClient) RegisterCorpusFile(ctx context.Context, campaignID, hash, filename string) error {
+	request := map[string]string{
+		"hash":     hash,
+		"filename": filename,
+	}
+
+	url := fmt.Sprintf("/api/v1/campaigns/%s/corpus/register", campaignID)
+	err := rc.retryManager.Execute(func() error {
+		return rc.circuitBreaker.Execute(func() error {
+			return rc.doRequest("POST", url, request, nil)
+		})
+	})
+
+	if err != nil {
+		return common.NewNetworkError("register_corpus_file", err)
+	}
+
+	rc.logger.WithFields(logrus.Fields{
+		"campaign_id": campaignID,
+		"hash":        hash,
+		"filename":    filename,
+	}).Debug("Corpus file registered with master")
+
+	return nil
+}
+
+// GetCorpusCollectionFiles retrieves the list of files in a corpus collection
+func (rc *RetryClient) GetCorpusCollectionFiles(collectionID string) ([]*common.CorpusCollectionFile, error) {
+	url := fmt.Sprintf("%s/api/v1/corpus/collections/%s/files", rc.masterURL, collectionID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, common.NewSystemError("create_request", err)
+	}
+
+	// API returns wrapped response with files array
+	var response struct {
+		Files []*common.CorpusCollectionFile `json:"files"`
+		Count int                            `json:"count"`
+	}
+
+	err = rc.retryManager.Execute(func() error {
+		resp, err := rc.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("HTTP request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("master returned status %d: %s", resp.StatusCode, body)
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return response.Files, nil
+}
+
+// DownloadCorpusCollectionFile downloads a specific file from a corpus collection
+func (rc *RetryClient) DownloadCorpusCollectionFile(collectionID, fileID, targetPath string) error {
+	url := fmt.Sprintf("%s/api/v1/corpus/collections/%s/files/%s/download", rc.masterURL, collectionID, fileID)
+
+	// Ensure target directory exists
+	targetDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create target directory: %w", err)
+	}
+
+	// Create temporary file
+	tempFile, err := os.CreateTemp(targetDir, "corpus_download_*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	tempFile.Close()
+
+	// Clean up temp file on error
+	defer func() {
+		if _, err := os.Stat(tempPath); err == nil {
+			os.Remove(tempPath)
+		}
+	}()
+
+	// Download with retry
+	err = rc.retryManager.Execute(func() error {
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return err
+		}
+
+		resp, err := rc.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("HTTP request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("master returned status %d: %s", resp.StatusCode, body)
+		}
+
+		// Open temp file for writing
+		out, err := os.Create(tempPath)
+		if err != nil {
+			return fmt.Errorf("failed to create file: %w", err)
+		}
+		defer out.Close()
+
+		// Copy response body to file
+		_, err = io.Copy(out, resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to write file: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	// Move temp file to final location
+	if err := os.Rename(tempPath, targetPath); err != nil {
+		// If rename fails, try copy instead
+		if err := rc.copyFile(tempPath, targetPath); err != nil {
+			return fmt.Errorf("failed to move file to final location: %w", err)
+		}
+		os.Remove(tempPath)
+	}
+
+	return nil
+}
+
+// copyFile copies a file from src to dst
+func (rc *RetryClient) copyFile(src, dst string) error {
+	source, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+
+	destination, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destination.Close()
+
+	_, err = io.Copy(destination, source)
+	return err
 }
 
 // Close closes the HTTP client and releases resources

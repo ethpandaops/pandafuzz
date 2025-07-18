@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -14,13 +15,13 @@ import (
 // TestJobCreationAndAssignment tests job creation and assignment flow
 func TestJobCreationAndAssignment(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
 
 	// Create and register bot
-	botClient, err := bot.NewRetryClient(env.botConfig)
+	botClient, err := bot.NewRetryClient(env.botConfig, env.logger)
 	require.NoError(t, err)
 	defer botClient.Close()
 
@@ -41,13 +42,13 @@ func TestJobCreationAndAssignment(t *testing.T) {
 	assert.Equal(t, env.botConfig.ID, *assignedJob.AssignedBot)
 
 	// Verify job status in database
-	dbJob, err := env.state.GetJob(job.ID)
+	dbJob, err := env.state.GetJob(context.Background(), job.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.JobStatusAssigned, dbJob.Status)
 	assert.Equal(t, env.botConfig.ID, *dbJob.AssignedBot)
 
 	// Verify bot status
-	dbBot, err := env.state.GetBot(env.botConfig.ID)
+	dbBot, err := env.state.GetBot(context.Background(), env.botConfig.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.BotStatusBusy, dbBot.Status)
 	assert.Equal(t, job.ID, *dbBot.CurrentJob)
@@ -56,13 +57,13 @@ func TestJobCreationAndAssignment(t *testing.T) {
 // TestJobCompletion tests job completion flow
 func TestJobCompletion(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
 
 	// Create and register bot
-	botClient, err := bot.NewRetryClient(env.botConfig)
+	botClient, err := bot.NewRetryClient(env.botConfig, env.logger)
 	require.NoError(t, err)
 	defer botClient.Close()
 
@@ -82,13 +83,13 @@ func TestJobCompletion(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify job status
-	dbJob, err := env.state.GetJob(job.ID)
+	dbJob, err := env.state.GetJob(context.Background(), job.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.JobStatusCompleted, dbJob.Status)
 	assert.NotNil(t, dbJob.CompletedAt)
 
 	// Verify bot is idle again
-	dbBot, err := env.state.GetBot(env.botConfig.ID)
+	dbBot, err := env.state.GetBot(context.Background(), env.botConfig.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.BotStatusIdle, dbBot.Status)
 	assert.Nil(t, dbBot.CurrentJob)
@@ -97,13 +98,13 @@ func TestJobCompletion(t *testing.T) {
 // TestJobFailure tests job failure handling
 func TestJobFailure(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
 
 	// Create and register bot
-	botClient, err := bot.NewRetryClient(env.botConfig)
+	botClient, err := bot.NewRetryClient(env.botConfig, env.logger)
 	require.NoError(t, err)
 	defer botClient.Close()
 
@@ -123,14 +124,14 @@ func TestJobFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify job status
-	dbJob, err := env.state.GetJob(job.ID)
+	dbJob, err := env.state.GetJob(context.Background(), job.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.JobStatusFailed, dbJob.Status)
 	assert.NotNil(t, dbJob.CompletedAt)
 	// assert.Contains(t, dbJob.Message, "Job failed with error") // TODO: Check if Message field exists
 
 	// Verify bot is idle again
-	dbBot, err := env.state.GetBot(env.botConfig.ID)
+	dbBot, err := env.state.GetBot(context.Background(), env.botConfig.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.BotStatusIdle, dbBot.Status)
 	assert.Nil(t, dbBot.CurrentJob)
@@ -139,10 +140,10 @@ func TestJobFailure(t *testing.T) {
 // TestJobTimeout tests job timeout handling
 func TestJobTimeout(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Use very short timeout for testing
 	env.masterConfig.Timeouts.JobExecution = 1 * time.Second
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -155,7 +156,7 @@ func TestJobTimeout(t *testing.T) {
 	job, err := env.CreateTestJob("timeout-test")
 	require.NoError(t, err)
 	job.TimeoutAt = time.Now().Add(1 * time.Second)
-	err = env.state.SaveJobWithRetry(job)
+	err = env.state.SaveJobWithRetry(context.Background(), job)
 	require.NoError(t, err)
 
 	// Assign job to bot
@@ -163,15 +164,15 @@ func TestJobTimeout(t *testing.T) {
 	job.AssignedBot = &env.botConfig.ID
 	job.StartedAt = &time.Time{}
 	*job.StartedAt = time.Now()
-	err = env.state.SaveJobWithRetry(job)
+	err = env.state.SaveJobWithRetry(context.Background(), job)
 	require.NoError(t, err)
 
 	// Update bot status
-	bot, err := env.state.GetBot(env.botConfig.ID)
+	bot, err := env.state.GetBot(context.Background(), env.botConfig.ID)
 	require.NoError(t, err)
 	bot.Status = common.BotStatusBusy
 	bot.CurrentJob = &job.ID
-	err = env.state.SaveBotWithRetry(bot)
+	err = env.state.SaveBotWithRetry(context.Background(), bot)
 	require.NoError(t, err)
 
 	// Wait for timeout
@@ -181,7 +182,7 @@ func TestJobTimeout(t *testing.T) {
 	// env.timeoutMgr.CheckTimeouts() // TODO: This method doesn't exist
 
 	// Verify job is timed out
-	dbJob, err := env.state.GetJob(job.ID)
+	dbJob, err := env.state.GetJob(context.Background(), job.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.JobStatusFailed, dbJob.Status)
 	// assert.Contains(t, dbJob.Message, "timeout") // TODO: Check if Message field exists
@@ -190,7 +191,7 @@ func TestJobTimeout(t *testing.T) {
 // TestJobPriority tests job priority assignment
 func TestJobPriority(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -199,7 +200,7 @@ func TestJobPriority(t *testing.T) {
 	highPriorityJob, err := env.CreateTestJob("high-priority")
 	require.NoError(t, err)
 	// highPriorityJob.Priority = common.JobPriorityHigh // TODO: Priority field doesn't exist
-	err = env.state.SaveJobWithRetry(highPriorityJob)
+	err = env.state.SaveJobWithRetry(context.Background(), highPriorityJob)
 	require.NoError(t, err)
 
 	normalPriorityJob, err := env.CreateTestJob("normal-priority")
@@ -208,11 +209,11 @@ func TestJobPriority(t *testing.T) {
 	lowPriorityJob, err := env.CreateTestJob("low-priority")
 	require.NoError(t, err)
 	// lowPriorityJob.Priority = common.JobPriorityLow // TODO: Priority field doesn't exist
-	err = env.state.SaveJobWithRetry(lowPriorityJob)
+	err = env.state.SaveJobWithRetry(context.Background(), lowPriorityJob)
 	require.NoError(t, err)
 
 	// Register bot and get jobs
-	botClient, err := bot.NewRetryClient(env.botConfig)
+	botClient, err := bot.NewRetryClient(env.botConfig, env.logger)
 	require.NoError(t, err)
 	defer botClient.Close()
 
@@ -237,7 +238,7 @@ func TestJobPriority(t *testing.T) {
 // TestMultipleBotsJobDistribution tests job distribution among multiple bots
 func TestMultipleBotsJobDistribution(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -257,11 +258,11 @@ func TestMultipleBotsJobDistribution(t *testing.T) {
 	for i := 0; i < numBots; i++ {
 		config := *env.botConfig
 		config.ID = fmt.Sprintf("worker-%d", i)
-		
-		client, err := bot.NewRetryClient(&config)
+
+		client, err := bot.NewRetryClient(&config, env.logger)
 		require.NoError(t, err)
 		botClients[i] = client
-		
+
 		_, err = client.RegisterBot(config.ID, config.Capabilities, "http://localhost:9000")
 		require.NoError(t, err)
 	}
@@ -279,13 +280,13 @@ func TestMultipleBotsJobDistribution(t *testing.T) {
 
 	// Verify jobs are distributed
 	assert.Greater(t, len(assignedJobs), 0)
-	
+
 	// Check no duplicate assignments
 	uniqueBots := make(map[string]int)
 	for _, botID := range assignedJobs {
 		uniqueBots[botID]++
 	}
-	
+
 	// Each bot should have some jobs
 	for i := 0; i < numBots; i++ {
 		botID := fmt.Sprintf("worker-%d", i)
@@ -301,13 +302,13 @@ func TestMultipleBotsJobDistribution(t *testing.T) {
 // TestJobCancellation tests job cancellation
 func TestJobCancellation(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
 
 	// Create and register bot
-	botClient, err := bot.NewRetryClient(env.botConfig)
+	botClient, err := bot.NewRetryClient(env.botConfig, env.logger)
 	require.NoError(t, err)
 	defer botClient.Close()
 
@@ -327,12 +328,12 @@ func TestJobCancellation(t *testing.T) {
 	// require.NoError(t, err)
 
 	// Verify job status
-	dbJob, err := env.state.GetJob(job.ID)
+	dbJob, err := env.state.GetJob(context.Background(), job.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.JobStatusCancelled, dbJob.Status)
 
 	// Bot should be idle
-	dbBot, err := env.state.GetBot(env.botConfig.ID)
+	dbBot, err := env.state.GetBot(context.Background(), env.botConfig.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.BotStatusIdle, dbBot.Status)
 }
@@ -340,7 +341,7 @@ func TestJobCancellation(t *testing.T) {
 // TestJobRetryOnBotFailure tests job retry when bot fails
 func TestJobRetryOnBotFailure(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -348,7 +349,7 @@ func TestJobRetryOnBotFailure(t *testing.T) {
 	// Create first bot
 	bot1Config := *env.botConfig
 	bot1Config.ID = "bot-1"
-	bot1Client, err := bot.NewRetryClient(&bot1Config)
+	bot1Client, err := bot.NewRetryClient(&bot1Config, env.logger)
 	require.NoError(t, err)
 	defer bot1Client.Close()
 
@@ -365,13 +366,13 @@ func TestJobRetryOnBotFailure(t *testing.T) {
 	require.NotNil(t, assignedJob)
 
 	// Simulate bot 1 failure (mark as failed)
-	err = env.recoveryMgr.HandleBotFailureWithRetry(bot1Config.ID)
+	err = env.recoveryMgr.HandleBotFailureWithRetry(context.Background(), bot1Config.ID)
 	require.NoError(t, err)
 
 	// Create second bot
 	bot2Config := *env.botConfig
 	bot2Config.ID = "bot-2"
-	bot2Client, err := bot.NewRetryClient(&bot2Config)
+	bot2Client, err := bot.NewRetryClient(&bot2Config, env.logger)
 	require.NoError(t, err)
 	defer bot2Client.Close()
 
@@ -389,7 +390,7 @@ func TestJobRetryOnBotFailure(t *testing.T) {
 // TestJobFiltering tests job filtering by capabilities
 func TestJobFiltering(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -398,22 +399,22 @@ func TestJobFiltering(t *testing.T) {
 	aflJob, err := env.CreateTestJob("afl-only")
 	require.NoError(t, err)
 	aflJob.Fuzzer = "afl++"
-	err = env.state.SaveJobWithRetry(aflJob)
+	err = env.state.SaveJobWithRetry(context.Background(), aflJob)
 	require.NoError(t, err)
 
 	// Create LibFuzzer only job
 	libfuzzerJob, err := env.CreateTestJob("libfuzzer-only")
 	require.NoError(t, err)
 	libfuzzerJob.Fuzzer = "libfuzzer"
-	err = env.state.SaveJobWithRetry(libfuzzerJob)
+	err = env.state.SaveJobWithRetry(context.Background(), libfuzzerJob)
 	require.NoError(t, err)
 
 	// Create bot with only AFL++ capability
 	aflBotConfig := *env.botConfig
 	aflBotConfig.ID = "afl-bot"
 	aflBotConfig.Capabilities = []string{"afl++"}
-	
-	aflClient, err := bot.NewRetryClient(&aflBotConfig)
+
+	aflClient, err := bot.NewRetryClient(&aflBotConfig, env.logger)
 	require.NoError(t, err)
 	defer aflClient.Close()
 

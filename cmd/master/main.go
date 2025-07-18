@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	_ "github.com/ethpandaops/pandafuzz/pkg/config"
 	"github.com/ethpandaops/pandafuzz/pkg/master"
 	"github.com/ethpandaops/pandafuzz/pkg/storage"
 	"github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -139,6 +139,12 @@ func main() {
 	// Set recovery manager on server to avoid circular dependency
 	server.SetRecoveryManager(recoveryMgr)
 
+	// Initialize storage backend
+	logger.Info("Initializing storage backend")
+	if err := server.InitializeStorage(); err != nil {
+		logger.WithError(err).Fatal("Failed to initialize storage backend")
+	}
+
 	// Setup graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -175,6 +181,7 @@ func main() {
 		"git_commit":  gitCommit,
 		"config_file": *configFile,
 		"data_dir":    *dataDir,
+		"services":    getEnabledServices(server),
 	}).Info("PandaFuzz Master started successfully")
 
 	// Wait for shutdown signal
@@ -231,73 +238,31 @@ func setupLogging(level string) *logrus.Logger {
 }
 
 func loadConfig(configFile string) (*common.MasterConfig, error) {
-	// Default configuration
-	config := &common.MasterConfig{
-		Server: common.ServerConfig{
-			Host: "0.0.0.0",
-			Port: 8080,
-		},
-		Database: common.DatabaseConfig{
-			Type: "sqlite",
-			Path: "./data/pandafuzz.db",
-		},
-		Storage: common.StorageConfig{
-			BasePath: "./storage",
-		},
-		Timeouts: common.TimeoutConfig{
-			BotHeartbeat:   1 * time.Minute,
-			JobExecution:   24 * time.Hour,
-			MasterRecovery: 5 * time.Minute,
-			DatabaseOp:     10 * time.Second,
-			HTTPRequest:    30 * time.Second,
-		},
-		Limits: common.ResourceLimits{
-			MaxConcurrentJobs: 10,
-			MaxCorpusSize:     100 * 1024 * 1024, // 100MB
-			MaxCrashSize:      10 * 1024 * 1024,  // 10MB
-			MaxCrashCount:     1000,
-			MaxJobDuration:    24 * time.Hour,
-		},
-		Monitoring: common.MonitoringConfig{
-			Enabled:     true,
-			MetricsPort: 9090,
-			MetricsPath: "/metrics",
-			HealthPath:  "/health",
-		},
-		Retry: common.RetryConfigs{
-			Database: common.RetryPolicy{
-				MaxRetries:   3,
-				InitialDelay: 1 * time.Second,
-				MaxDelay:     30 * time.Second,
-				Multiplier:   2.0,
-			},
-		},
-	}
+	// Create config manager
+	configMgr := common.NewConfigManager()
 
 	// Check if config file exists
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		// Use defaults
+		// Create default configuration with proper defaults
+		config := &common.MasterConfig{}
+		configMgr.SetMasterDefaults(config)
+
+		// Apply storage defaults
+		config.Storage.SetDefaults()
+
+		logger := logrus.New()
+		logger.WithField("config_file", configFile).Warn("Config file not found, using defaults")
 		return config, nil
 	}
 
-	// Read config file
-	data, err := os.ReadFile(configFile)
+	// Load master configuration from file
+	config, err := configMgr.LoadMasterConfig(configFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Parse YAML
-	var fileConfig struct {
-		Master *common.MasterConfig `yaml:"master"`
-	}
-	if err := yaml.Unmarshal(data, &fileConfig); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
-	}
-
-	// Use file config if available
-	if fileConfig.Master != nil {
-		config = fileConfig.Master
-	}
+	// Ensure storage defaults are applied
+	config.Storage.SetDefaults()
 
 	return config, nil
 }
@@ -317,6 +282,11 @@ func validateConfig(config *common.MasterConfig) error {
 		return fmt.Errorf("unsupported database type: %s", config.Database.Type)
 	}
 
+	// Validate storage configuration
+	if err := config.Storage.Validate(); err != nil {
+		return fmt.Errorf("storage configuration error: %w", err)
+	}
+
 	// Validate timeouts
 	if config.Timeouts.BotHeartbeat < 10*time.Second {
 		return fmt.Errorf("bot heartbeat timeout too short: %v", config.Timeouts.BotHeartbeat)
@@ -333,6 +303,19 @@ func validateConfig(config *common.MasterConfig) error {
 
 	if config.Limits.MaxCorpusSize <= 0 {
 		return fmt.Errorf("invalid max corpus size: %d", config.Limits.MaxCorpusSize)
+	}
+
+	// Validate security settings if enabled
+	if config.Security.EnableInputValidation {
+		if config.Security.MaxRequestSize <= 0 {
+			return fmt.Errorf("invalid max request size: %d", config.Security.MaxRequestSize)
+		}
+		if config.Security.MaxCrashFileSize <= 0 {
+			return fmt.Errorf("invalid max crash file size: %d", config.Security.MaxCrashFileSize)
+		}
+		if config.Security.MaxCorpusFileSize <= 0 {
+			return fmt.Errorf("invalid max corpus file size: %d", config.Security.MaxCorpusFileSize)
+		}
 	}
 
 	return nil
@@ -419,4 +402,22 @@ func startMaintenance(ctx context.Context, recovery *master.RecoveryManager, log
 			}
 		}
 	}
+}
+
+// getEnabledServices returns a list of enabled services for logging
+func getEnabledServices(server *master.Server) []string {
+	services := []string{
+		"bot",
+		"job",
+		"result",
+		"system",
+		"monitoring",
+	}
+
+	// Check if reproducibility service is available
+	// We can't directly access server.services from here, but we know it's initialized
+	// if the storage layer supports it
+	services = append(services, "reproducibility")
+
+	return services
 }

@@ -1,8 +1,14 @@
 package common
 
 import (
+	"errors"
 	"strings"
 	"time"
+)
+
+// Common errors
+var (
+	ErrNotImplemented = errors.New("not implemented")
 )
 
 // VersionInfo contains build version information
@@ -48,20 +54,33 @@ type BotOperationalConfig struct {
 
 // Job management
 type Job struct {
-	ID          string     `json:"id" db:"id"`
-	Name        string     `json:"name" db:"name"`
-	Target      string     `json:"target" db:"target"`
-	Fuzzer      string     `json:"fuzzer" db:"fuzzer"` // "afl++", "libfuzzer"
-	Status      JobStatus  `json:"status" db:"status"`
-	AssignedBot *string    `json:"assigned_bot" db:"assigned_bot"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
-	StartedAt   *time.Time `json:"started_at" db:"started_at"`
-	CompletedAt *time.Time `json:"completed_at" db:"completed_at"`
-	TimeoutAt   time.Time  `json:"timeout_at" db:"timeout_at"`
-	WorkDir     string     `json:"work_dir" db:"work_dir"`
-	Config      JobConfig  `json:"config" db:"config"`
-	Progress    int        `json:"progress" db:"progress"` // Job progress percentage (0-100)
+	ID                string                 `json:"id" db:"id"`
+	Name              string                 `json:"name" db:"name"`
+	Target            string                 `json:"target" db:"target"`
+	Fuzzer            string                 `json:"fuzzer" db:"fuzzer"` // "afl++", "libfuzzer", "minimizer"
+	Type              JobType                `json:"type" db:"type"`     // "fuzzing", "minimization", "reproduction"
+	Status            JobStatus              `json:"status" db:"status"`
+	AssignedBot       *string                `json:"assigned_bot" db:"assigned_bot"`
+	CreatedAt         time.Time              `json:"created_at" db:"created_at"`
+	StartedAt         *time.Time             `json:"started_at" db:"started_at"`
+	CompletedAt       *time.Time             `json:"completed_at" db:"completed_at"`
+	TimeoutAt         time.Time              `json:"timeout_at" db:"timeout_at"`
+	WorkDir           string                 `json:"work_dir" db:"work_dir"`
+	Config            JobConfig              `json:"config" db:"config"`
+	Progress          int                    `json:"progress" db:"progress"` // Job progress percentage (0-100)
+	CampaignID        *string                `json:"campaign_id" db:"campaign_id"`
+	CollectionID      *string                `json:"collection_id" db:"collection_id"` // Corpus collection ID
+	UseCampaignCorpus bool                   `json:"use_campaign_corpus" db:"use_campaign_corpus"`
+	Metadata          map[string]interface{} `json:"metadata" db:"metadata"` // For job-specific data (e.g., crashID for minimization)
 }
+
+type JobType string
+
+const (
+	JobTypeFuzzing      JobType = "fuzzing"
+	JobTypeMinimization JobType = "minimization"
+	JobTypeReproduction JobType = "reproduction"
+)
 
 type JobStatus string
 
@@ -85,24 +104,6 @@ type JobConfig struct {
 }
 
 // Results and findings
-type CrashResult struct {
-	ID          string    `json:"id" db:"id"`
-	JobID       string    `json:"job_id" db:"job_id"`
-	BotID       string    `json:"bot_id" db:"bot_id"`
-	Hash        string    `json:"hash" db:"hash"`           // SHA256 for deduplication
-	FilePath    string    `json:"file_path" db:"file_path"` // Relative to job work dir
-	Type        string    `json:"type" db:"type"`           // "segfault", "assertion", "timeout"
-	Signal      int       `json:"signal" db:"signal"`       // Signal number if applicable
-	ExitCode    int       `json:"exit_code" db:"exit_code"`
-	Timestamp   time.Time `json:"timestamp" db:"timestamp"`
-	Size        int64     `json:"size" db:"size"`                // Crash input size
-	IsUnique    bool      `json:"is_unique" db:"is_unique"`      // Not a duplicate
-	Input       []byte    `json:"-" db:"-"`                      // Raw crash input (not persisted)
-	InputBase64 string    `json:"input_base64,omitempty" db:"-"` // Base64 encoded crash input for JSON serialization
-	Output      string    `json:"output" db:"output"`            // Crash output/stderr
-	StackTrace  string    `json:"stack_trace" db:"stack_trace"`  // Raw stack trace
-}
-
 type CoverageResult struct {
 	ID        string    `json:"id" db:"id"`
 	JobID     string    `json:"job_id" db:"job_id"`
@@ -113,30 +114,12 @@ type CoverageResult struct {
 	ExecCount int64     `json:"exec_count" db:"exec_count"` // Total executions
 }
 
-type CorpusUpdate struct {
-	ID        string    `json:"id" db:"id"`
-	JobID     string    `json:"job_id" db:"job_id"`
-	BotID     string    `json:"bot_id" db:"bot_id"`
-	Files     []string  `json:"files" db:"files"` // New corpus files
-	Timestamp time.Time `json:"timestamp" db:"timestamp"`
-	TotalSize int64     `json:"total_size" db:"total_size"`
-}
-
 // Persistent storage structures
 type JobAssignment struct {
 	JobID     string    `json:"job_id" db:"job_id"`
 	BotID     string    `json:"bot_id" db:"bot_id"`
 	Timestamp time.Time `json:"timestamp" db:"timestamp"`
 	Status    string    `json:"status" db:"status"` // "assigned", "started", "completed"
-}
-
-// Corpus metadata (persisted)
-type CorpusMetadata struct {
-	JobID       string            `json:"job_id" db:"job_id"`
-	FileCount   int               `json:"file_count" db:"file_count"`
-	TotalSize   int64             `json:"total_size" db:"total_size"`
-	LastUpdated time.Time         `json:"last_updated" db:"last_updated"`
-	FileHashes  map[string]string `json:"file_hashes" db:"file_hashes"` // filename -> hash
 }
 
 // System configuration persisted to disk
@@ -335,71 +318,14 @@ type Campaign struct {
 type CampaignStatus string
 
 const (
-	CampaignStatusPending   CampaignStatus = "pending"
-	CampaignStatusRunning   CampaignStatus = "running"
-	CampaignStatusCompleted CampaignStatus = "completed"
-	CampaignStatusFailed    CampaignStatus = "failed"
-	CampaignStatusPaused    CampaignStatus = "paused"
-	CampaignStatusCancelled CampaignStatus = "cancelled"
+	CampaignStatusPending    CampaignStatus = "pending"
+	CampaignStatusRunning    CampaignStatus = "running"
+	CampaignStatusCompleted  CampaignStatus = "completed"
+	CampaignStatusFailed     CampaignStatus = "failed"
+	CampaignStatusPaused     CampaignStatus = "paused"
+	CampaignStatusCancelled  CampaignStatus = "cancelled"
+	CampaignStatusCorpusOnly CampaignStatus = "corpus_only" // For standalone corpus collections
 )
-
-// StackFrame represents a single frame in a stack trace
-type StackFrame struct {
-	Function string `json:"function" db:"function"`
-	File     string `json:"file" db:"file"`
-	Line     int    `json:"line" db:"line"`
-	Offset   uint64 `json:"offset" db:"offset"`
-}
-
-// StackTrace represents a parsed stack trace for crash deduplication
-type StackTrace struct {
-	Frames   []StackFrame `json:"frames" db:"frames"`
-	TopNHash string       `json:"top_n_hash" db:"top_n_hash"` // Hash of top N frames
-	FullHash string       `json:"full_hash" db:"full_hash"`   // Hash of complete trace
-	RawTrace string       `json:"raw_trace" db:"raw_trace"`
-}
-
-// CorpusFile represents a file in the fuzzing corpus
-type CorpusFile struct {
-	ID          string     `json:"id" db:"id"`
-	CampaignID  string     `json:"campaign_id" db:"campaign_id"`
-	JobID       string     `json:"job_id" db:"job_id"`
-	BotID       string     `json:"bot_id" db:"bot_id"`
-	Filename    string     `json:"filename" db:"filename"`
-	Hash        string     `json:"hash" db:"hash"`
-	Size        int64      `json:"size" db:"size"`
-	Coverage    int64      `json:"coverage" db:"coverage"`         // Edges covered
-	NewCoverage int64      `json:"new_coverage" db:"new_coverage"` // New edges this file found
-	ParentHash  string     `json:"parent_hash" db:"parent_hash"`   // File this was mutated from
-	Generation  int        `json:"generation" db:"generation"`     // Mutation generation
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
-	SyncedAt    *time.Time `json:"synced_at" db:"synced_at"`
-	IsSeed      bool       `json:"is_seed" db:"is_seed"`
-}
-
-// CorpusEvolution tracks corpus growth over time
-type CorpusEvolution struct {
-	CampaignID    string    `json:"campaign_id" db:"campaign_id"`
-	Timestamp     time.Time `json:"timestamp" db:"timestamp"`
-	TotalFiles    int       `json:"total_files" db:"total_files"`
-	TotalSize     int64     `json:"total_size" db:"total_size"`
-	TotalCoverage int64     `json:"total_coverage" db:"total_coverage"`
-	NewFiles      int       `json:"new_files" db:"new_files"`
-	NewCoverage   int64     `json:"new_coverage" db:"new_coverage"`
-}
-
-// CrashGroup represents a group of similar crashes for deduplication
-type CrashGroup struct {
-	ID           string       `json:"id" db:"id"`
-	CampaignID   string       `json:"campaign_id" db:"campaign_id"`
-	StackHash    string       `json:"stack_hash" db:"stack_hash"`
-	FirstSeen    time.Time    `json:"first_seen" db:"first_seen"`
-	LastSeen     time.Time    `json:"last_seen" db:"last_seen"`
-	Count        int          `json:"count" db:"count"`
-	Severity     string       `json:"severity" db:"severity"`
-	StackFrames  []StackFrame `json:"stack_frames" db:"stack_frames"`
-	ExampleCrash string       `json:"example_crash" db:"example_crash"` // ID of representative crash
-}
 
 // CampaignStats represents aggregated statistics for a campaign
 type CampaignStats struct {

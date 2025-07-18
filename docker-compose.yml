@@ -160,6 +160,29 @@ services:
       timeout: 5s
       retries: 5
 
+  # MinIO S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: pandafuzz-minio
+    ports:
+      - "9000:9000"    # S3 API
+      - "9001:9001"    # Console UI
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-pandafuzz}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-pandafuzz123}
+      MINIO_DEFAULT_BUCKETS: ${MINIO_DEFAULT_BUCKETS:-corpus,quarantine,backup}
+    volumes:
+      - minio-data:/data
+      - ./docker/configs/minio-init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pandafuzz
+
 networks:
   pandafuzz:
     driver: bridge
@@ -176,4 +199,6 @@ volumes:
   grafana-data:
     driver: local
   postgres-data:
+    driver: local
+  minio-data:
     driver: local

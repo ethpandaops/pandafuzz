@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,7 +18,7 @@ import (
 // TestHealthEndpoint tests the health check endpoint
 func TestHealthEndpoint(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -28,11 +29,11 @@ func TestHealthEndpoint(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	
+
 	var health map[string]any
 	err = json.NewDecoder(resp.Body).Decode(&health)
 	require.NoError(t, err)
-	
+
 	assert.Equal(t, "healthy", health["status"])
 	assert.Contains(t, health, "timestamp")
 	assert.Contains(t, health, "database")
@@ -41,7 +42,7 @@ func TestHealthEndpoint(t *testing.T) {
 // TestSystemStatusEndpoint tests the system status endpoint
 func TestSystemStatusEndpoint(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -49,7 +50,7 @@ func TestSystemStatusEndpoint(t *testing.T) {
 	// Create some data
 	_, err = env.CreateTestBot("status-bot")
 	require.NoError(t, err)
-	
+
 	_, err = env.CreateTestJob("status-job")
 	require.NoError(t, err)
 
@@ -59,20 +60,20 @@ func TestSystemStatusEndpoint(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	
+
 	var status map[string]any
 	err = json.NewDecoder(resp.Body).Decode(&status)
 	require.NoError(t, err)
-	
+
 	assert.Equal(t, "operational", status["status"])
 	assert.Contains(t, status, "bots")
 	assert.Contains(t, status, "jobs")
 	assert.Contains(t, status, "uptime")
-	
+
 	// Check counts
 	bots := status["bots"].(map[string]any)
 	assert.Equal(t, float64(1), bots["total"])
-	
+
 	jobs := status["jobs"].(map[string]any)
 	assert.Equal(t, float64(1), jobs["total"])
 }
@@ -80,7 +81,7 @@ func TestSystemStatusEndpoint(t *testing.T) {
 // TestBotListEndpoint tests the bot list endpoint
 func TestBotListEndpoint(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -97,11 +98,11 @@ func TestBotListEndpoint(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	
+
 	var bots []common.Bot
 	err = json.NewDecoder(resp.Body).Decode(&bots)
 	require.NoError(t, err)
-	
+
 	assert.Len(t, bots, 3)
 	for i, bot := range bots {
 		assert.Equal(t, fmt.Sprintf("list-bot-%d", i), bot.ID)
@@ -112,7 +113,7 @@ func TestBotListEndpoint(t *testing.T) {
 // TestGetBotEndpoint tests getting a specific bot
 func TestGetBotEndpoint(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -127,11 +128,11 @@ func TestGetBotEndpoint(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	
+
 	var retrievedBot common.Bot
 	err = json.NewDecoder(resp.Body).Decode(&retrievedBot)
 	require.NoError(t, err)
-	
+
 	assert.Equal(t, bot.ID, retrievedBot.ID)
 	assert.Equal(t, bot.Status, retrievedBot.Status)
 	assert.Equal(t, bot.Capabilities, retrievedBot.Capabilities)
@@ -140,14 +141,14 @@ func TestGetBotEndpoint(t *testing.T) {
 	resp, err = env.httpClient.Get(env.masterURL + "/api/v1/bots/non-existent")
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
 // TestJobEndpoints tests job-related endpoints
 func TestJobEndpoints(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -163,7 +164,7 @@ func TestJobEndpoints(t *testing.T) {
 		"timeout_sec":  300,
 		"memory_limit": 1024,
 	}
-	
+
 	body, _ := json.Marshal(jobRequest)
 	resp, err := env.httpClient.Post(
 		env.masterURL+"/api/v1/jobs",
@@ -172,13 +173,13 @@ func TestJobEndpoints(t *testing.T) {
 	)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
-	
+
 	var createdJob common.Job
 	err = json.NewDecoder(resp.Body).Decode(&createdJob)
 	require.NoError(t, err)
-	
+
 	assert.Equal(t, "api-test-job", createdJob.Name)
 	assert.Equal(t, common.JobStatusPending, createdJob.Status)
 
@@ -186,20 +187,20 @@ func TestJobEndpoints(t *testing.T) {
 	resp, err = env.httpClient.Get(env.masterURL + "/api/v1/jobs/" + createdJob.ID)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Test listing jobs
 	resp, err = env.httpClient.Get(env.masterURL + "/api/v1/jobs")
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	
+
 	var jobs []common.Job
 	err = json.NewDecoder(resp.Body).Decode(&jobs)
 	require.NoError(t, err)
-	
+
 	assert.Len(t, jobs, 1)
 	assert.Equal(t, createdJob.ID, jobs[0].ID)
 }
@@ -207,7 +208,7 @@ func TestJobEndpoints(t *testing.T) {
 // TestJobCancellationEndpoint tests job cancellation via API
 func TestJobCancellationEndpoint(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -223,15 +224,15 @@ func TestJobCancellationEndpoint(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	
+
 	resp, err := env.httpClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Verify job is cancelled
-	cancelledJob, err := env.state.GetJob(job.ID)
+	cancelledJob, err := env.state.GetJob(context.Background(), job.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.JobStatusCancelled, cancelledJob.Status)
 }
@@ -239,7 +240,7 @@ func TestJobCancellationEndpoint(t *testing.T) {
 // TestResultsEndpoints tests result reporting endpoints
 func TestResultsEndpoints(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -260,7 +261,7 @@ func TestResultsEndpoints(t *testing.T) {
 		"type":      "segmentation_fault",
 		"output":    "Segmentation fault",
 	}
-	
+
 	body, _ := json.Marshal(crashRequest)
 	resp, err := env.httpClient.Post(
 		env.masterURL+"/api/v1/results/crash",
@@ -269,7 +270,7 @@ func TestResultsEndpoints(t *testing.T) {
 	)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
 	// Test coverage reporting endpoint
@@ -283,7 +284,7 @@ func TestResultsEndpoints(t *testing.T) {
 		"new_edges":        10,
 		"coverage_percent": 50.0,
 	}
-	
+
 	body, _ = json.Marshal(coverageRequest)
 	resp, err = env.httpClient.Post(
 		env.masterURL+"/api/v1/results/coverage",
@@ -292,14 +293,14 @@ func TestResultsEndpoints(t *testing.T) {
 	)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 }
 
 // TestPaginationAndFiltering tests API pagination and filtering
 func TestPaginationAndFiltering(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -308,7 +309,7 @@ func TestPaginationAndFiltering(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		job, err := env.CreateTestJob(fmt.Sprintf("page-job-%d", i))
 		require.NoError(t, err)
-		
+
 		// Set different statuses
 		if i%3 == 0 {
 			job.Status = common.JobStatusCompleted
@@ -317,8 +318,8 @@ func TestPaginationAndFiltering(t *testing.T) {
 		} else if i%3 == 1 {
 			job.Status = common.JobStatusRunning
 		}
-		
-		err = env.state.SaveJobWithRetry(job)
+
+		err = env.state.SaveJobWithRetry(context.Background(), job)
 		require.NoError(t, err)
 	}
 
@@ -326,9 +327,9 @@ func TestPaginationAndFiltering(t *testing.T) {
 	resp, err := env.httpClient.Get(env.masterURL + "/api/v1/jobs?limit=10&offset=0")
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	
+
 	var page1Jobs []common.Job
 	err = json.NewDecoder(resp.Body).Decode(&page1Jobs)
 	require.NoError(t, err)
@@ -338,12 +339,12 @@ func TestPaginationAndFiltering(t *testing.T) {
 	resp, err = env.httpClient.Get(env.masterURL + "/api/v1/jobs?limit=10&offset=10")
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	var page2Jobs []common.Job
 	err = json.NewDecoder(resp.Body).Decode(&page2Jobs)
 	require.NoError(t, err)
 	assert.Len(t, page2Jobs, 10)
-	
+
 	// Ensure different jobs
 	assert.NotEqual(t, page1Jobs[0].ID, page2Jobs[0].ID)
 
@@ -351,11 +352,11 @@ func TestPaginationAndFiltering(t *testing.T) {
 	resp, err = env.httpClient.Get(env.masterURL + "/api/v1/jobs?status=completed")
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	var completedJobs []common.Job
 	err = json.NewDecoder(resp.Body).Decode(&completedJobs)
 	require.NoError(t, err)
-	
+
 	for _, job := range completedJobs {
 		assert.Equal(t, common.JobStatusCompleted, job.Status)
 	}
@@ -364,7 +365,7 @@ func TestPaginationAndFiltering(t *testing.T) {
 // TestErrorHandling tests API error handling
 func TestErrorHandling(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -377,9 +378,9 @@ func TestErrorHandling(t *testing.T) {
 	)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	
+
 	var errorResp map[string]any
 	err = json.NewDecoder(resp.Body).Decode(&errorResp)
 	require.NoError(t, err)
@@ -390,7 +391,7 @@ func TestErrorHandling(t *testing.T) {
 		"name": "missing-fields",
 		// Missing required fields
 	}
-	
+
 	body, _ := json.Marshal(invalidJob)
 	resp, err = env.httpClient.Post(
 		env.masterURL+"/api/v1/jobs",
@@ -399,7 +400,7 @@ func TestErrorHandling(t *testing.T) {
 	)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
 	// Test method not allowed
@@ -410,14 +411,14 @@ func TestErrorHandling(t *testing.T) {
 	)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
 }
 
 // TestConcurrentAPIRequests tests handling of concurrent API requests
 func TestConcurrentAPIRequests(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -425,7 +426,7 @@ func TestConcurrentAPIRequests(t *testing.T) {
 	// Make concurrent requests
 	numRequests := 50
 	results := make(chan error, numRequests)
-	
+
 	for i := 0; i < numRequests; i++ {
 		go func(index int) {
 			// Mix of different API calls
@@ -437,7 +438,7 @@ func TestConcurrentAPIRequests(t *testing.T) {
 					resp.Body.Close()
 				}
 				results <- err
-				
+
 			case 1:
 				// List bots
 				resp, err := env.httpClient.Get(env.masterURL + "/api/v1/bots")
@@ -445,7 +446,7 @@ func TestConcurrentAPIRequests(t *testing.T) {
 					resp.Body.Close()
 				}
 				results <- err
-				
+
 			case 2:
 				// List jobs
 				resp, err := env.httpClient.Get(env.masterURL + "/api/v1/jobs")
@@ -453,7 +454,7 @@ func TestConcurrentAPIRequests(t *testing.T) {
 					resp.Body.Close()
 				}
 				results <- err
-				
+
 			case 3:
 				// Create job
 				jobReq := map[string]any{
@@ -488,11 +489,11 @@ func TestConcurrentAPIRequests(t *testing.T) {
 /*
 func TestAPIAuthentication(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Enable authentication
 	env.masterConfig.Security.EnableAuth = true
 	env.masterConfig.Security.AuthToken = "test-token-123"
-	
+
 	// Recreate API handlers with auth enabled
 	env.apiHandlers = master.NewAPIHandlers(
 		env.state,
@@ -501,7 +502,7 @@ func TestAPIAuthentication(t *testing.T) {
 		env.masterConfig,
 	)
 	env.server = master.NewServer(env.masterConfig, env.apiHandlers)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -510,29 +511,29 @@ func TestAPIAuthentication(t *testing.T) {
 	resp, err := env.httpClient.Get(env.masterURL + "/api/v1/bots")
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
 	// Test with invalid auth token
 	req, err := http.NewRequest("GET", env.masterURL+"/api/v1/bots", nil)
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer invalid-token")
-	
+
 	resp, err = env.httpClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
 	// Test with valid auth token
 	req, err = http.NewRequest("GET", env.masterURL+"/api/v1/bots", nil)
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer test-token-123")
-	
+
 	resp, err = env.httpClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 */
@@ -547,7 +548,7 @@ func TestWebSocketEndpoint(t *testing.T) {
 // TestAPIDocumentation tests API documentation endpoint
 func TestAPIDocumentation(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -556,7 +557,7 @@ func TestAPIDocumentation(t *testing.T) {
 	resp, err := env.httpClient.Get(env.masterURL + "/api/docs")
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	// May return 404 if not implemented
 	if resp.StatusCode == http.StatusOK {
 		// Verify it returns valid documentation

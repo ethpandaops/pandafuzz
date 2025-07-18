@@ -21,23 +21,33 @@ import (
 
 // AFLPlusPlus implements the Fuzzer interface for AFL++
 type AFLPlusPlus struct {
-	*BaseFuzzer   // Embed base fuzzer for event handling
-	config        FuzzConfig
-	status        FuzzerStatus
-	logger        *logrus.Logger
-	cmd           *exec.Cmd
-	ctx           context.Context
-	cancel        context.CancelFunc
-	eventHandler  EventHandler
-	stats         FuzzerStats
-	statsFile     string
-	outputDir     string
-	crashDir      string
-	corpusDir     string
-	mu            sync.RWMutex
-	monitorTicker *time.Ticker
-	wg            sync.WaitGroup
-	botID         string
+	*BaseFuzzer      // Embed base fuzzer for event handling
+	config           FuzzConfig
+	status           FuzzerStatus
+	logger           *logrus.Logger
+	cmd              *exec.Cmd
+	ctx              context.Context
+	cancel           context.CancelFunc
+	eventHandler     EventHandler
+	stats            FuzzerStats
+	statsFile        string
+	outputDir        string
+	crashDir         string
+	corpusDir        string
+	mu               sync.RWMutex
+	monitorTicker    *time.Ticker
+	wg               sync.WaitGroup
+	botID            string
+	metricsCollector common.MetricsCollector
+
+	// Performance tracking
+	lastExecCount   int64
+	lastStatsUpdate time.Time
+	execHistory     []float64
+	peakExecSpeed   float64
+
+	// Crash tracking
+	lastReportedCrashes int
 }
 
 // Compile-time interface compliance check
@@ -50,7 +60,7 @@ func NewAFLPlusPlus(logger *logrus.Logger) *AFLPlusPlus {
 		logger.SetLevel(logrus.InfoLevel)
 	}
 
-	return &AFLPlusPlus{
+	afl := &AFLPlusPlus{
 		BaseFuzzer:   NewBaseFuzzer(logger),
 		status:       StatusUninitialized,
 		logger:       logger,
@@ -58,7 +68,17 @@ func NewAFLPlusPlus(logger *logrus.Logger) *AFLPlusPlus {
 		stats: FuzzerStats{
 			StartTime: time.Now(),
 		},
+		execHistory:     make([]float64, 0, 100),
+		lastStatsUpdate: time.Now(),
 	}
+
+	// Create metrics collector
+	afl.metricsCollector = NewDefaultMetricsCollector(
+		logger.WithField("component", "afl_metrics"),
+		5*time.Second,
+	)
+
+	return afl
 }
 
 // Name returns the name of the fuzzer
@@ -190,6 +210,8 @@ func (afl *AFLPlusPlus) Initialize() error {
 	os.Setenv("AFL_SKIP_CPUFREQ", "1")
 	os.Setenv("AFL_NO_AFFINITY", "1")
 	os.Setenv("AFL_NO_UI", "1")
+	os.Setenv("AFL_SKIP_BIN_CHECK", "1")
+	os.Setenv("AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES", "1")
 
 	// Enable specific AFL++ features based on config
 	if features, ok := afl.config.FuzzerOptions["afl_features"].(map[string]bool); ok {
@@ -276,6 +298,7 @@ func (afl *AFLPlusPlus) Start(ctx context.Context) error {
 
 	// Build AFL++ command
 	args := afl.buildAFLArgs()
+	afl.logger.WithField("afl_args", args).Debug("AFL++ command arguments")
 	afl.cmd = exec.CommandContext(afl.ctx, "afl-fuzz", args...)
 
 	// Set up pipes for output
@@ -323,6 +346,11 @@ func (afl *AFLPlusPlus) Start(ctx context.Context) error {
 	// Start stats monitoring
 	afl.startStatsMonitoring()
 
+	// Start metrics collector
+	if err := afl.metricsCollector.Start(afl.ctx); err != nil {
+		afl.logger.WithError(err).Warn("Failed to start metrics collector")
+	}
+
 	// Notify event handler
 	if afl.eventHandler != nil {
 		afl.eventHandler.OnStart(afl)
@@ -365,19 +393,47 @@ func (afl *AFLPlusPlus) Stop() error {
 		afl.monitorTicker.Stop()
 	}
 
+	// Stop metrics collector
+	if afl.metricsCollector != nil {
+		if err := afl.metricsCollector.Stop(); err != nil {
+			afl.logger.WithError(err).Warn("Failed to stop metrics collector")
+		}
+	}
+
 	// Send SIGTERM to AFL++
 	if afl.cmd != nil && afl.cmd.Process != nil {
 		if err := afl.cmd.Process.Signal(os.Interrupt); err != nil {
 			afl.logger.WithError(err).Warn("Failed to send interrupt signal")
-			// Force kill if interrupt fails
-			afl.cmd.Process.Kill()
+		}
+
+		// Give it a moment to exit gracefully
+		time.Sleep(100 * time.Millisecond)
+
+		// Force kill if still running
+		if afl.cmd.Process != nil {
+			if err := afl.cmd.Process.Kill(); err != nil {
+				afl.logger.WithError(err).Debug("Process may have already exited")
+			}
 		}
 	}
 
-	// Wait for goroutines to finish
-	afl.wg.Wait()
-
+	// Update status immediately so IsRunning() returns false
 	afl.status = StatusStopped
+
+	// Wait for goroutines to finish (with timeout to avoid hanging)
+	done := make(chan struct{})
+	go func() {
+		afl.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Goroutines finished normally
+	case <-time.After(5 * time.Second):
+		// Timeout waiting for goroutines
+		afl.logger.Warn("Timeout waiting for fuzzer goroutines to finish")
+	}
 
 	// Notify event handler
 	if afl.eventHandler != nil {
@@ -762,6 +818,9 @@ func (afl *AFLPlusPlus) validateConfig(config FuzzConfig) error {
 func (afl *AFLPlusPlus) buildAFLArgs() []string {
 	args := []string{}
 
+	// Use non-instrumented mode
+	args = append(args, "-n")
+
 	// Input directory
 	if afl.config.SeedDirectory != "" {
 		args = append(args, "-i", afl.config.SeedDirectory)
@@ -782,6 +841,10 @@ func (afl *AFLPlusPlus) buildAFLArgs() []string {
 
 	// Timeout
 	timeoutMs := afl.config.Timeout.Milliseconds()
+	if timeoutMs <= 0 {
+		timeoutMs = 1000 // Default to 1 second
+	}
+	afl.logger.WithField("timeout_ms", timeoutMs).Debug("Setting AFL++ timeout")
 	args = append(args, "-t", fmt.Sprintf("%d", timeoutMs))
 
 	// Dictionary
@@ -814,6 +877,12 @@ func (afl *AFLPlusPlus) monitorOutput(pipe io.Reader, name string) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		afl.logger.WithField("stream", name).Debug(line)
+
+		// Write to OutputWriter if configured
+		if afl.config.OutputWriter != nil {
+			// Write the line with a newline
+			fmt.Fprintf(afl.config.OutputWriter, "[%s] %s\n", name, line)
+		}
 
 		// Check for important messages
 		if strings.Contains(line, "Looks like there are no valid") {
@@ -901,7 +970,8 @@ func (afl *AFLPlusPlus) updateStats() {
 	afl.mu.Lock()
 	defer afl.mu.Unlock()
 
-	// Parse stats
+	// Parse stats for enhanced metrics
+	parsedStats := make(map[string]string)
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
 		parts := strings.SplitN(line, ":", 2)
@@ -911,6 +981,7 @@ func (afl *AFLPlusPlus) updateStats() {
 
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
+		parsedStats[key] = value
 
 		switch key {
 		case "execs_done":
@@ -920,6 +991,15 @@ func (afl *AFLPlusPlus) updateStats() {
 		case "execs_per_sec":
 			if val, err := strconv.ParseFloat(value, 64); err == nil {
 				afl.stats.ExecPerSecond = val
+				// Track peak execution speed
+				if val > afl.peakExecSpeed {
+					afl.peakExecSpeed = val
+				}
+				// Add to history
+				afl.execHistory = append(afl.execHistory, val)
+				if len(afl.execHistory) > 100 {
+					afl.execHistory = afl.execHistory[1:]
+				}
 			}
 		case "paths_total":
 			if val, err := strconv.ParseInt(value, 10, 64); err == nil {
@@ -947,6 +1027,9 @@ func (afl *AFLPlusPlus) updateStats() {
 		}
 	}
 
+	// Collect enhanced metrics
+	afl.collectEnhancedMetrics(parsedStats)
+
 	// Update derived stats
 	afl.stats.ElapsedTime = time.Since(afl.stats.StartTime)
 	if afl.stats.Executions > 0 && afl.stats.ElapsedTime.Seconds() > 0 {
@@ -960,6 +1043,18 @@ func (afl *AFLPlusPlus) updateStats() {
 		afl.stats.CPUUsage = 50.0
 		afl.stats.MemoryUsage = afl.config.MemoryLimit * 1024 * 1024
 	}
+
+	// Record execution for performance tracking
+	if afl.lastExecCount > 0 {
+		execDiff := afl.stats.Executions - afl.lastExecCount
+		timeDiff := time.Since(afl.lastStatsUpdate)
+		if timeDiff > 0 && execDiff > 0 {
+			avgExecTime := timeDiff / time.Duration(execDiff)
+			afl.metricsCollector.RecordExecution(avgExecTime)
+		}
+	}
+	afl.lastExecCount = afl.stats.Executions
+	afl.lastStatsUpdate = time.Now()
 
 	// Notify event handler
 	if afl.eventHandler != nil {
@@ -986,20 +1081,40 @@ func (afl *AFLPlusPlus) checkForNewCrashes() {
 		return
 	}
 
-	// Simple check: if crash count increased, notify about latest crash
-	if len(crashes) > afl.stats.TotalCrashes {
+	// Check if we have new crashes since last report
+	if len(crashes) > afl.lastReportedCrashes {
+		// Report all new crashes since last check
+		newCrashes := crashes[afl.lastReportedCrashes:]
+
+		afl.logger.WithFields(logrus.Fields{
+			"new_crashes":   len(newCrashes),
+			"total_crashes": len(crashes),
+			"job_id":        afl.config.JobID,
+		}).Info("Found new crashes during periodic check")
+
+		// Update stats
 		afl.stats.TotalCrashes = len(crashes)
+		afl.stats.UniqueCrashes = len(crashes) // Assuming all are unique for now
 		afl.stats.LastCrash = time.Now()
 
-		if afl.eventHandler != nil && len(crashes) > 0 {
-			// Notify about the latest crash
-			afl.eventHandler.OnCrash(afl, crashes[len(crashes)-1])
+		// Report each new crash
+		for i, crash := range newCrashes {
+			afl.logger.WithFields(logrus.Fields{
+				"crash_index": afl.lastReportedCrashes + i,
+				"crash_id":    crash.ID,
+				"crash_hash":  crash.Hash,
+				"crash_type":  crash.Type,
+			}).Debug("Reporting new crash")
+
+			if afl.eventHandler != nil {
+				afl.eventHandler.OnCrash(afl, crash)
+			}
+			// Also emit crash event through base fuzzer
+			afl.detectAndEmitCrash(crash)
 		}
 
-		// Emit crash event through base fuzzer
-		if len(crashes) > 0 {
-			afl.detectAndEmitCrash(crashes[len(crashes)-1])
-		}
+		// Update the last reported count
+		afl.lastReportedCrashes = len(crashes)
 	}
 }
 
@@ -1050,9 +1165,88 @@ func (afl *AFLPlusPlus) getCurrentInput() string {
 }
 
 func (afl *AFLPlusPlus) getPeakExecSpeed() float64 {
-	// Would need to track this over time
-	// For now, return current speed as peak
-	return afl.stats.ExecPerSecond
+	return afl.peakExecSpeed
+}
+
+// collectEnhancedMetrics collects and updates enhanced metrics
+func (afl *AFLPlusPlus) collectEnhancedMetrics(parsedStats map[string]string) {
+	// Coverage metrics
+	coverage := common.CoverageMetrics{
+		LineCoverage:     afl.stats.CoveragePercent,
+		BranchCoverage:   afl.stats.CoveragePercent, // AFL++ bitmap coverage
+		NewEdgesFound:    int64(afl.stats.NewPaths),
+		TotalEdges:       int64(afl.stats.TotalEdges),
+		CoverageByModule: make(map[string]float64),
+	}
+
+	// Parse additional coverage info from stats
+	if edges, exists := parsedStats["edges_found"]; exists {
+		if val, err := strconv.ParseInt(edges, 10, 64); err == nil {
+			coverage.TotalEdges = val
+		}
+	}
+
+	// Calculate coverage growth rate
+	if afl.stats.ElapsedTime.Seconds() > 0 {
+		coverage.CoverageGrowth = float64(afl.stats.NewPaths) / afl.stats.ElapsedTime.Seconds()
+	}
+
+	// Performance metrics
+	performance := common.PerformanceMetrics{
+		ExecutionsPerSecond: afl.stats.ExecPerSecond,
+		ThroughputMBps:      afl.calculateThroughput(),
+	}
+
+	// Calculate mutation efficiency from AFL++ stats
+	if pending, exists := parsedStats["pending_total"]; exists {
+		if pendingVal, err := strconv.ParseInt(pending, 10, 64); err == nil {
+			if afl.stats.PathsTotal > 0 {
+				performance.MutationEfficiency = float64(afl.stats.PathsTotal-int(pendingVal)) / float64(afl.stats.PathsTotal)
+			}
+		}
+	}
+
+	// Queue utilization
+	if queueCur, exists := parsedStats["queue_cur"]; exists {
+		if curVal, err := strconv.ParseInt(queueCur, 10, 64); err == nil {
+			if afl.stats.PathsTotal > 0 {
+				performance.QueueUtilization = float64(curVal) / float64(afl.stats.PathsTotal)
+			}
+		}
+	}
+
+	// Update metrics collector
+	afl.metricsCollector.UpdateCoverageMetrics(coverage)
+	afl.metricsCollector.UpdatePerformanceMetrics(performance)
+
+	// Add AFL++ specific metrics
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("stability", parsedStats["stability"])
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("variable_paths", parsedStats["variable_paths"])
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("max_depth", parsedStats["max_depth"])
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("pending_favs", parsedStats["pending_favs"])
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("pending_total", parsedStats["pending_total"])
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("cycles_done", parsedStats["cycles_done"])
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("bit_flips", parsedStats["bit_flips"])
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("byte_flips", parsedStats["byte_flips"])
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("arithmetics", parsedStats["arithmetics"])
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("known_ints", parsedStats["known_ints"])
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("dictionary", parsedStats["dictionary"])
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("havoc", parsedStats["havoc"])
+	afl.metricsCollector.UpdateFuzzerSpecificMetrics("splice", parsedStats["splice"])
+}
+
+// calculateThroughput calculates throughput in MB/s
+func (afl *AFLPlusPlus) calculateThroughput() float64 {
+	if afl.stats.ElapsedTime.Seconds() == 0 {
+		return 0
+	}
+
+	// Estimate average input size (would need actual tracking)
+	avgInputSize := 1024.0 // 1KB average estimate
+	totalBytes := float64(afl.stats.Executions) * avgInputSize
+	totalMB := totalBytes / (1024 * 1024)
+
+	return totalMB / afl.stats.ElapsedTime.Seconds()
 }
 
 func (afl *AFLPlusPlus) getExitReason() string {
@@ -1146,6 +1340,232 @@ func (afl *AFLPlusPlus) monitorCorpusChanges() {
 		// Emit corpus update event
 		afl.EmitCorpusUpdateEvent(afl.ctx, afl.config.Target, corpusUpdate)
 	}
+}
+
+// ReproduceCrash attempts to reproduce a crash with the given input
+func (afl *AFLPlusPlus) ReproduceCrash(ctx context.Context, crashInput []byte, config ReproductionConfig) (*common.ReproductionResult, error) {
+	afl.logger.WithFields(logrus.Fields{
+		"crash_size": len(crashInput),
+		"attempts":   config.Attempts,
+		"timeout":    config.Timeout,
+	}).Info("Starting crash reproduction with AFL++")
+
+	// Default attempts if not specified
+	if config.Attempts <= 0 {
+		config.Attempts = 3
+	}
+
+	// Default timeout if not specified
+	if config.Timeout <= 0 {
+		config.Timeout = 30 * time.Second
+	}
+
+	// Create temporary directory for reproduction
+	tempDir, err := os.MkdirTemp("", "afl_reproduce_*")
+	if err != nil {
+		return nil, &FuzzerError{
+			Type:    ErrInternal,
+			Message: fmt.Sprintf("failed to create temp directory: %v", err),
+			Fuzzer:  afl.Name(),
+			Code:    100,
+		}
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Save crash input to file
+	crashFile := filepath.Join(tempDir, "crash_input")
+	if err := os.WriteFile(crashFile, crashInput, 0644); err != nil {
+		return nil, &FuzzerError{
+			Type:    ErrInternal,
+			Message: fmt.Sprintf("failed to write crash input: %v", err),
+			Fuzzer:  afl.Name(),
+			Code:    101,
+		}
+	}
+
+	// Try to reproduce the crash multiple times
+	for attempt := 1; attempt <= config.Attempts; attempt++ {
+		afl.logger.WithField("attempt", attempt).Debug("Attempting crash reproduction")
+
+		// Create a context with timeout for this attempt
+		attemptCtx, cancel := context.WithTimeout(ctx, config.Timeout)
+		defer cancel()
+
+		// Build command to run target directly with crash input
+		// AFL++ doesn't have a crash reproduction mode, so we run the target directly
+		var args []string
+
+		// Add target arguments, replacing @@ with the crash file path
+		for _, arg := range afl.config.TargetArgs {
+			if arg == "@@" {
+				args = append(args, crashFile)
+			} else {
+				args = append(args, arg)
+			}
+		}
+
+		// If no @@ was found, assume input is via stdin
+		var cmd *exec.Cmd
+		if contains(afl.config.TargetArgs, "@@") {
+			cmd = exec.CommandContext(attemptCtx, afl.config.Target, args...)
+		} else {
+			// Input via stdin
+			cmd = exec.CommandContext(attemptCtx, afl.config.Target, args...)
+			cmd.Stdin = strings.NewReader(string(crashInput))
+		}
+
+		// Set environment variables if provided
+		if config.Environment != nil {
+			env := os.Environ()
+			for k, v := range config.Environment {
+				env = append(env, fmt.Sprintf("%s=%s", k, v))
+			}
+			cmd.Env = env
+		}
+
+		// Start timing
+		startTime := time.Now()
+
+		// Capture output
+		output, err := cmd.CombinedOutput()
+
+		// Calculate execution time
+		executionTime := time.Since(startTime)
+
+		// Determine if crash was reproduced
+		reproduced := false
+		var signal int
+		var exitCode int
+
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+				// Check if it's a signal-based crash
+				if exitCode == -1 {
+					// Process was killed by signal
+					if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+						if status.Signaled() {
+							signal = int(status.Signal())
+							reproduced = true
+						}
+					}
+				} else if exitCode != 0 {
+					// Non-zero exit code might indicate crash
+					reproduced = true
+				}
+			}
+		}
+
+		// Extract stack trace from output
+		stackTrace := extractStackTrace(string(output))
+		stackHash := afl.hashInput([]byte(stackTrace))
+
+		// Build environment info
+		envInfo := make(map[string]string)
+		envInfo["fuzzer"] = "AFL++"
+		envInfo["version"] = afl.Version()
+		envInfo["bot_id"] = afl.botID
+		envInfo["attempt"] = strconv.Itoa(attempt)
+
+		result := &common.ReproductionResult{
+			ID:              fmt.Sprintf("afl_repro_%d_%d", time.Now().Unix(), attempt),
+			RequestID:       config.OriginalCrashID,
+			CrashID:         config.OriginalCrashID,
+			BotID:           afl.botID,
+			AttemptNumber:   attempt,
+			Status:          common.ReproducibilityStatusConfirmed,
+			Reproduced:      reproduced,
+			ExecutionTime:   executionTime,
+			Signal:          signal,
+			ExitCode:        exitCode,
+			Output:          string(output),
+			StackTrace:      stackTrace,
+			StackHash:       stackHash,
+			MatchesOriginal: true, // This would need to be compared with original crash
+			EnvironmentInfo: envInfo,
+			Timestamp:       time.Now(),
+		}
+
+		if reproduced {
+			afl.logger.WithFields(logrus.Fields{
+				"attempt":    attempt,
+				"signal":     signal,
+				"exit_code":  exitCode,
+				"stack_hash": stackHash,
+			}).Info("Successfully reproduced crash with AFL++")
+			return result, nil
+		}
+
+		afl.logger.WithField("attempt", attempt).Debug("Crash not reproduced in this attempt")
+
+		// If this was the last attempt and we didn't reproduce
+		if attempt == config.Attempts {
+			result.Status = common.ReproducibilityStatusFailed
+			return result, nil
+		}
+	}
+
+	// Should not reach here, but just in case
+	return &common.ReproductionResult{
+		ID:              fmt.Sprintf("afl_repro_%d_failed", time.Now().Unix()),
+		RequestID:       config.OriginalCrashID,
+		CrashID:         config.OriginalCrashID,
+		BotID:           afl.botID,
+		Status:          common.ReproducibilityStatusFailed,
+		Reproduced:      false,
+		EnvironmentInfo: map[string]string{"fuzzer": "AFL++"},
+		Timestamp:       time.Now(),
+	}, nil
+}
+
+// Helper function to check if slice contains string
+func contains(slice []string, str string) bool {
+	for _, s := range slice {
+		if s == str {
+			return true
+		}
+	}
+	return false
+}
+
+// Helper function to extract stack trace from output
+func extractStackTrace(output string) string {
+	// Look for common stack trace indicators
+	lines := strings.Split(output, "\n")
+	var stackLines []string
+	inStack := false
+
+	for _, line := range lines {
+		// Common stack trace patterns
+		if strings.Contains(line, "Stack trace:") ||
+			strings.Contains(line, "backtrace:") ||
+			strings.Contains(line, "#0 ") ||
+			strings.Contains(line, "at 0x") {
+			inStack = true
+		}
+
+		if inStack {
+			stackLines = append(stackLines, line)
+			// Stop at empty line or common end markers
+			if line == "" || strings.Contains(line, "===") {
+				break
+			}
+		}
+	}
+
+	return strings.Join(stackLines, "\n")
+}
+
+// GetEnhancedMetrics returns enhanced metrics from the fuzzer
+func (afl *AFLPlusPlus) GetEnhancedMetrics() *common.EnhancedMetrics {
+	afl.mu.RLock()
+	defer afl.mu.RUnlock()
+
+	if afl.metricsCollector != nil {
+		return afl.metricsCollector.GetMetrics()
+	}
+
+	return nil
 }
 
 // CreateAFLPlusPlus creates a new AFL++ instance with optional logger

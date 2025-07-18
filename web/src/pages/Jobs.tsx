@@ -110,6 +110,7 @@ function Jobs() {
     priority: JobPriority.Normal,
     timeout_sec: 3600,
     memory_limit: 2048,
+    collection_id: ''
   });
   
   // File upload state
@@ -118,6 +119,9 @@ function Jobs() {
   const [seedCorpusFiles, setSeedCorpusFiles] = useState<File[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const corpusInputRef = useRef<HTMLInputElement>(null);
+  
+  // Corpus collections state
+  const [corpusCollections, setCorpusCollections] = useState<any[]>([]);
 
   const fetchJobs = useCallback(async (showLoading = true) => {
     try {
@@ -162,10 +166,24 @@ function Jobs() {
     }
   };
 
+  const fetchCorpusCollections = async () => {
+    try {
+      const response = await fetch('/api/v1/corpus/collections');
+      if (response.ok) {
+        const data = await response.json();
+        setCorpusCollections(data.collections || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch corpus collections:', err);
+    }
+  };
+
+
   useEffect(() => {
     // Initial load with loading indicator
     fetchJobs(true);
     fetchBots();
+    fetchCorpusCollections();
     
     // Subsequent updates without loading indicator
     const interval = setInterval(() => {
@@ -193,6 +211,7 @@ function Jobs() {
       const jobData = {
         ...newJob,
         target_args: newJob.target_args.split(' ').filter(arg => arg),
+        collection_id: newJob.collection_id || undefined,
       };
       
       if (useFileUpload && targetBinaryFile) {
@@ -212,6 +231,7 @@ function Jobs() {
         priority: JobPriority.Normal,
         timeout_sec: 3600,
         memory_limit: 2048,
+        collection_id: '',
       });
       setTargetBinaryFile(null);
       setSeedCorpusFiles([]);
@@ -331,6 +351,7 @@ function Jobs() {
               priority: JobPriority.Normal,
               timeout_sec: 3600,
               memory_limit: 2048,
+              collection_id: '',
             });
             setTargetBinaryFile(null);
             setSeedCorpusFiles([]);
@@ -610,6 +631,23 @@ function Jobs() {
                 </Grid>
               </>
             )}
+            <Grid item xs={12}>
+              <TextField
+                fullWidth
+                select
+                label="Corpus Collection (Optional)"
+                value={newJob.collection_id}
+                onChange={(e) => setNewJob({ ...newJob, collection_id: e.target.value })}
+                helperText="Use an existing corpus collection for this job"
+              >
+                <MenuItem value="">None</MenuItem>
+                {corpusCollections.map((collection) => (
+                  <MenuItem key={collection.id} value={collection.id}>
+                    {collection.name} ({collection.file_count} files, {(collection.total_size / 1024 / 1024).toFixed(2)} MB)
+                  </MenuItem>
+                ))}
+              </TextField>
+            </Grid>
             <Grid item xs={12}>
               <TextField
                 fullWidth

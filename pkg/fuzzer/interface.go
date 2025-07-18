@@ -39,6 +39,9 @@ type Fuzzer interface {
 	GetCoverage() (*common.CoverageResult, error)
 	GetCorpus() ([]*CorpusEntry, error)
 
+	// Reproducibility
+	ReproduceCrash(ctx context.Context, crashInput []byte, config ReproductionConfig) (*common.ReproductionResult, error)
+
 	// Event handling
 	SetEventHandler(handler EventHandler)
 
@@ -388,6 +391,27 @@ type SourceLocation struct {
 	Line     int    `json:"line"`
 	Column   int    `json:"column"`
 	Function string `json:"function"`
+}
+
+// ReproductionConfig holds configuration for crash reproduction
+type ReproductionConfig struct {
+	// Number of times to attempt reproduction
+	Attempts int `json:"attempts"`
+
+	// Timeout for each reproduction attempt
+	Timeout time.Duration `json:"timeout"`
+
+	// Whether to collect additional debug information
+	CollectDebugInfo bool `json:"collect_debug_info"`
+
+	// Original crash context
+	OriginalCrashID string `json:"original_crash_id"`
+
+	// Environment variables to set during reproduction
+	Environment map[string]string `json:"environment"`
+
+	// Additional fuzzer-specific options
+	Options map[string]any `json:"options"`
 }
 
 // Common error types

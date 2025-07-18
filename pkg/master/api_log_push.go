@@ -37,7 +37,7 @@ func (s *Server) handleLogPush(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request based on content type
 	contentType := r.Header.Get("Content-Type")
-	
+
 	var logContent []byte
 	var botID string
 
@@ -58,7 +58,7 @@ func (s *Server) handleLogPush(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusBadRequest, "X-Bot-ID header is required", nil)
 			return
 		}
-		
+
 		// Read raw content
 		content, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -75,7 +75,7 @@ func (s *Server) handleLogPush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create log storage directory
-	logDir := filepath.Join(s.config.Storage.BasePath, "logs", jobID)
+	logDir := filepath.Join(s.getStorageBasePath(), "logs", jobID)
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create log directory", err)
 		return
@@ -89,8 +89,8 @@ func (s *Server) handleLogPush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"job_id": jobID,
-		"bot_id": botID,
+		"job_id":   jobID,
+		"bot_id":   botID,
 		"log_size": len(logContent),
 		"log_path": logPath,
 	}).Info("Job logs pushed successfully")
@@ -98,7 +98,7 @@ func (s *Server) handleLogPush(w http.ResponseWriter, r *http.Request) {
 	response := map[string]any{
 		"status": "success",
 		"job_id": jobID,
-		"size": len(logContent),
+		"size":   len(logContent),
 	}
 
 	w.WriteHeader(http.StatusCreated)
@@ -116,14 +116,14 @@ func (s *Server) handleLogExists(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if logs exist in storage
-	logPath := filepath.Join(s.config.Storage.BasePath, "logs", jobID, "job.log")
+	logPath := filepath.Join(s.getStorageBasePath(), "logs", jobID, "job.log")
 	_, err := os.Stat(logPath)
 	exists := err == nil
 
 	response := map[string]any{
 		"job_id": jobID,
 		"exists": exists,
-		"path": logPath,
+		"path":   logPath,
 	}
 
 	s.writeJSONResponse(w, response)

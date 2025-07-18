@@ -1,0 +1,1374 @@
+package api_v3
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/errors"
+	"github.com/ethpandaops/pandafuzz/pkg/service"
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
+)
+
+// HandlerV3 implements the v3 API handlers
+type HandlerV3 struct {
+	services  *service.Manager
+	campaign  *CampaignServiceAdapter
+	corpus    *CorpusServiceAdapter
+	validator *Validator
+	logger    logrus.FieldLogger
+	config    *Config
+}
+
+// Config holds API v3 configuration
+type Config struct {
+	MaxRequestSize  int64
+	RequestTimeout  time.Duration
+	MaxBatchSize    int
+	EnableSwaggerUI bool
+}
+
+// NewHandlerV3 creates a new v3 API handler
+func NewHandlerV3(services *service.Manager, logger logrus.FieldLogger, config *Config) *HandlerV3 {
+	return &HandlerV3{
+		services:  services,
+		campaign:  NewCampaignServiceAdapter(services.Campaign),
+		corpus:    NewCorpusServiceAdapter(services.Corpus),
+		validator: NewValidator(),
+		logger:    logger.WithField("api_version", "v3"),
+		config:    config,
+	}
+}
+
+// RegisterRoutes registers all v3 API routes
+func (h *HandlerV3) RegisterRoutes(router *mux.Router) {
+	// Apply versioning middleware
+	v3 := router.PathPrefix("/api/v3").Subrouter()
+	v3.Use(h.versioningMiddleware)
+	v3.Use(h.requestValidationMiddleware)
+	v3.Use(h.loggingMiddleware)
+
+	// Bot management
+	v3.HandleFunc("/bots", h.listBots).Methods("GET")
+	v3.HandleFunc("/bots", h.registerBot).Methods("POST")
+	v3.HandleFunc("/bots/{botId}", h.getBot).Methods("GET")
+	v3.HandleFunc("/bots/{botId}", h.deregisterBot).Methods("DELETE")
+	v3.HandleFunc("/bots/{botId}/heartbeat", h.botHeartbeat).Methods("POST")
+	v3.HandleFunc("/bots/{botId}/jobs/next", h.getNextJob).Methods("POST")
+	v3.HandleFunc("/bots/{botId}/jobs/complete", h.completeJob).Methods("POST")
+	v3.HandleFunc("/bots/{botId}/metrics", h.getBotMetrics).Methods("GET")
+
+	// Job management
+	v3.HandleFunc("/jobs", h.listJobs).Methods("GET")
+	v3.HandleFunc("/jobs", h.createJob).Methods("POST")
+	v3.HandleFunc("/jobs/{jobId}", h.getJob).Methods("GET")
+	v3.HandleFunc("/jobs/{jobId}", h.cancelJob).Methods("DELETE")
+	v3.HandleFunc("/jobs/{jobId}/logs", h.getJobLogs).Methods("GET")
+	v3.HandleFunc("/jobs/{jobId}/progress", h.getJobProgress).Methods("GET")
+	v3.HandleFunc("/jobs/{jobId}/crashes", h.getJobCrashes).Methods("GET")
+
+	// Campaign management
+	v3.HandleFunc("/campaigns", h.listCampaigns).Methods("GET")
+	v3.HandleFunc("/campaigns", h.createCampaign).Methods("POST")
+	v3.HandleFunc("/campaigns/{campaignId}", h.getCampaign).Methods("GET")
+	v3.HandleFunc("/campaigns/{campaignId}", h.updateCampaign).Methods("PATCH")
+	v3.HandleFunc("/campaigns/{campaignId}", h.deleteCampaign).Methods("DELETE")
+	v3.HandleFunc("/campaigns/{campaignId}/stats", h.getCampaignStats).Methods("GET")
+
+	// Corpus management
+	v3.HandleFunc("/corpus", h.listCorpus).Methods("GET")
+	v3.HandleFunc("/corpus", h.uploadCorpus).Methods("POST")
+	v3.HandleFunc("/corpus/{corpusId}", h.getCorpusFile).Methods("GET")
+	v3.HandleFunc("/corpus/{corpusId}", h.deleteCorpusFile).Methods("DELETE")
+	v3.HandleFunc("/corpus/{corpusId}/download", h.downloadCorpusFile).Methods("GET")
+	v3.HandleFunc("/corpus/sync", h.syncCorpus).Methods("POST")
+	v3.HandleFunc("/corpus/promote", h.promoteCrashToCorpus).Methods("POST")
+
+	// Crash management
+	v3.HandleFunc("/crashes", h.listCrashes).Methods("GET")
+	v3.HandleFunc("/crashes/{crashId}", h.getCrash).Methods("GET")
+	v3.HandleFunc("/crashes/{crashId}/input", h.getCrashInput).Methods("GET")
+
+	// Reproducibility
+	v3.HandleFunc("/reproducibility/requests", h.listReproductionRequests).Methods("GET")
+	v3.HandleFunc("/reproducibility/requests", h.createReproductionRequest).Methods("POST")
+	v3.HandleFunc("/reproducibility/requests/{requestId}", h.getReproductionRequest).Methods("GET")
+	v3.HandleFunc("/reproducibility/results", h.submitReproductionResult).Methods("POST")
+
+	// Result submission
+	v3.HandleFunc("/results/batch", h.submitBatchResults).Methods("POST")
+	v3.HandleFunc("/results/crash", h.submitCrashResult).Methods("POST")
+	v3.HandleFunc("/results/coverage", h.submitCoverageResult).Methods("POST")
+	v3.HandleFunc("/results/corpus", h.submitCorpusUpdate).Methods("POST")
+
+	// System management
+	v3.HandleFunc("/system/stats", h.getSystemStats).Methods("GET")
+	v3.HandleFunc("/system/health", h.healthCheck).Methods("GET")
+	v3.HandleFunc("/system/recovery", h.triggerRecovery).Methods("POST")
+	v3.HandleFunc("/system/maintenance", h.triggerMaintenance).Methods("POST")
+	v3.HandleFunc("/system/timeouts", h.listTimeouts).Methods("GET")
+	v3.HandleFunc("/system/timeouts/{type}/{id}", h.forceTimeout).Methods("POST")
+
+	// Swagger UI (if enabled)
+	if h.config.EnableSwaggerUI {
+		v3.HandleFunc("/docs", h.swaggerUI).Methods("GET")
+		v3.HandleFunc("/openapi.yaml", h.openAPISpec).Methods("GET")
+	}
+}
+
+// Middleware functions
+
+func (h *HandlerV3) versioningMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("API-Version", "3.0.0")
+		w.Header().Set("X-RateLimit-Limit", "1000")
+		w.Header().Set("X-RateLimit-Remaining", "999")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (h *HandlerV3) requestValidationMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Validate request size
+		r.Body = http.MaxBytesReader(w, r.Body, h.config.MaxRequestSize)
+
+		// Add request ID
+		requestID := r.Header.Get("X-Request-ID")
+		if requestID == "" {
+			requestID = generateRequestID()
+		}
+		ctx := context.WithValue(r.Context(), "request_id", requestID)
+		r = r.WithContext(ctx)
+
+		w.Header().Set("X-Request-ID", requestID)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (h *HandlerV3) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+
+		h.logger.WithFields(logrus.Fields{
+			"method":     r.Method,
+			"path":       r.URL.Path,
+			"request_id": r.Context().Value("request_id"),
+		}).Debug("API request started")
+
+		next.ServeHTTP(wrapped, r)
+
+		h.logger.WithFields(logrus.Fields{
+			"method":     r.Method,
+			"path":       r.URL.Path,
+			"status":     wrapped.statusCode,
+			"duration":   time.Since(start),
+			"request_id": r.Context().Value("request_id"),
+		}).Info("API request completed")
+	})
+}
+
+// Bot management handlers
+
+func (h *HandlerV3) listBots(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters
+	params := parsePaginationParams(r)
+	statusFilterStr := r.URL.Query().Get("status")
+	var statusFilter *common.BotStatus
+	if statusFilterStr != "" {
+		Status := common.BotStatus(statusFilterStr)
+		statusFilter = &Status
+	}
+
+	// Get bots from service
+	bots, err := h.services.Bot.ListBots(r.Context(), statusFilter)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Apply filters
+	statusStr := ""
+	if statusFilter != nil {
+		statusStr = string(*statusFilter)
+	}
+	filtered := filterBotsByStatus(bots, statusStr)
+
+	// Apply pagination
+	paginated := paginateBots(filtered, params.Page, params.Limit)
+
+	// Write response
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"bots":  paginated,
+		"count": len(paginated),
+	})
+}
+
+func (h *HandlerV3) registerBot(w http.ResponseWriter, r *http.Request) {
+	var req BotRegisterRequest
+	if err := h.decodeAndValidate(w, r, &req); err != nil {
+		return // Error already written
+	}
+
+	// Use service to register bot
+	bot, err := h.services.Bot.RegisterBot(r.Context(), req.Hostname, req.Name, req.Capabilities, req.APIEndpoint)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Write response
+	resp := BotRegisterResponse{
+		BotID:     bot.ID,
+		Status:    "registered",
+		Timestamp: bot.RegisteredAt,
+		Timeout:   bot.TimeoutAt,
+	}
+
+	h.writeJSON(w, http.StatusCreated, resp)
+}
+
+func (h *HandlerV3) getBot(w http.ResponseWriter, r *http.Request) {
+	botID := mux.Vars(r)["botId"]
+
+	bot, err := h.services.Bot.GetBot(r.Context(), botID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, bot)
+}
+
+func (h *HandlerV3) deregisterBot(w http.ResponseWriter, r *http.Request) {
+	botID := mux.Vars(r)["botId"]
+
+	if err := h.services.Bot.DeregisterBot(r.Context(), botID); err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HandlerV3) botHeartbeat(w http.ResponseWriter, r *http.Request) {
+	botID := mux.Vars(r)["botId"]
+
+	var req BotHeartbeatRequest
+	if err := h.decodeAndValidate(w, r, &req); err != nil {
+		return
+	}
+
+	// Update heartbeat with status and current job
+	err := h.services.Bot.UpdateHeartbeat(r.Context(), botID, req.Status, req.CurrentJob)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Calculate timeout
+	timeout := time.Now().Add(60 * time.Second) // Default 60s timeout
+
+	resp := BotHeartbeatResponse{
+		Status:    "ok",
+		Timestamp: time.Now(),
+		Timeout:   timeout,
+	}
+
+	h.writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *HandlerV3) getNextJob(w http.ResponseWriter, r *http.Request) {
+	botID := mux.Vars(r)["botId"]
+
+	job, err := h.services.Job.AssignNextJob(r.Context(), botID)
+	if err != nil {
+		if err == service.ErrNoJobsAvailable {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, job)
+}
+
+func (h *HandlerV3) completeJob(w http.ResponseWriter, r *http.Request) {
+	botID := mux.Vars(r)["botId"]
+
+	var req JobCompleteRequest
+	if err := h.decodeAndValidate(w, r, &req); err != nil {
+		return
+	}
+
+	job, err := h.services.Bot.GetCurrentJob(r.Context(), botID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	if job == nil {
+		h.writeError(w, &ValidationError{
+			Field:   "bot",
+			Message: "bot has no active job",
+		})
+		return
+	}
+
+	if err := h.services.Job.CompleteJob(r.Context(), job.ID, botID, req.Success); err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	resp := JobCompleteResponse{
+		Acknowledged: true,
+		JobID:        job.ID,
+		Message:      "Job completion successfully recorded",
+		Status:       "completed",
+		Timestamp:    time.Now(),
+	}
+
+	h.writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *HandlerV3) getBotMetrics(w http.ResponseWriter, r *http.Request) {
+	botID := mux.Vars(r)["botId"]
+
+	// Get bot details
+	bot, err := h.services.Bot.GetBot(r.Context(), botID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Get metrics
+	metrics, err := h.services.Bot.GetMetrics(r.Context(), botID)
+	if err != nil {
+		// Return placeholder metrics if not available
+		metrics = &service.BotMetrics{
+			BotID:            botID,
+			TotalJobsRun:     0,
+			SuccessfulJobs:   0,
+			FailedJobs:       0,
+			CrashesFound:     0,
+			UniqueCrashes:    0,
+			CorpusItemsAdded: 0,
+			CPUTime:          0.0,
+			LastActive:       bot.LastSeen,
+		}
+	}
+
+	h.writeJSON(w, http.StatusOK, metrics)
+}
+
+// Job management handlers
+
+func (h *HandlerV3) listJobs(w http.ResponseWriter, r *http.Request) {
+	// Parse filters
+	params := parsePaginationParams(r)
+	filters := parseJobFilters(r)
+
+	// Get jobs from service
+	jobs, err := h.services.Job.ListJobs(r.Context(), *filters)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Apply sorting
+	sortJobs(jobs, params.SortBy, params.SortOrder)
+
+	// Apply pagination
+	total := len(jobs)
+	paginated := paginateJobs(jobs, params.Page, params.Limit)
+
+	// Write response
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"jobs":       paginated,
+		"count":      len(paginated),
+		"page":       params.Page,
+		"limit":      params.Limit,
+		"total":      total,
+		"sort_by":    params.SortBy,
+		"sort_order": params.SortOrder,
+	})
+}
+
+func (h *HandlerV3) createJob(w http.ResponseWriter, r *http.Request) {
+	var req JobRequest
+	if err := h.decodeAndValidate(w, r, &req); err != nil {
+		return
+	}
+
+	// Convert to service request
+	createReq := service.CreateJobRequest{
+		Name:              req.Name,
+		Target:            req.Target,
+		Fuzzer:            req.Fuzzer,
+		Duration:          req.Duration,
+		Config:            req.Config,
+		CampaignID:        req.CampaignID,
+		CorpusID:          req.CorpusID,
+		CollectionID:      req.CollectionID,
+		UseCampaignCorpus: req.UseCampaignCorpus,
+	}
+
+	job, err := h.services.Job.CreateJob(r.Context(), createReq)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusCreated, job)
+}
+
+func (h *HandlerV3) getJob(w http.ResponseWriter, r *http.Request) {
+	jobID := mux.Vars(r)["jobId"]
+
+	job, err := h.services.Job.GetJob(r.Context(), jobID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, job)
+}
+
+func (h *HandlerV3) cancelJob(w http.ResponseWriter, r *http.Request) {
+	jobID := mux.Vars(r)["jobId"]
+
+	if err := h.services.Job.CancelJob(r.Context(), jobID); err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":    "cancelled",
+		"timestamp": time.Now(),
+	})
+}
+
+func (h *HandlerV3) getJobLogs(w http.ResponseWriter, r *http.Request) {
+	jobID := mux.Vars(r)["jobId"]
+	follow := r.URL.Query().Get("follow") == "true"
+	lines := 1000
+	if l := r.URL.Query().Get("lines"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 10000 {
+			lines = parsed
+		}
+	}
+
+	if follow {
+		// Set up Server-Sent Events
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			h.writeError(w, &APIError{
+				Code:    "streaming_not_supported",
+				Message: "Streaming not supported",
+			})
+			return
+		}
+
+		// Stream logs
+		logChan, err := h.services.Job.StreamLogs(r.Context(), jobID)
+		if err != nil {
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+			flusher.Flush()
+			return
+		}
+		for {
+			select {
+			case log, ok := <-logChan:
+				if !ok {
+					return
+				}
+				data, _ := json.Marshal(log)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+			case <-r.Context().Done():
+				return
+			}
+		}
+	} else {
+		// Return static logs
+		logs, err := h.services.Job.GetLogs(r.Context(), jobID)
+		// Apply lines limit if requested
+		if lines > 0 && len(logs) > lines {
+			logs = logs[len(logs)-lines:]
+		}
+		if err != nil {
+			h.writeError(w, err)
+			return
+		}
+
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"job_id":    jobID,
+			"logs":      logs,
+			"timestamp": time.Now(),
+		})
+	}
+}
+
+func (h *HandlerV3) getJobProgress(w http.ResponseWriter, r *http.Request) {
+	jobID := mux.Vars(r)["jobId"]
+
+	// Set up Server-Sent Events
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		h.writeError(w, &APIError{
+			Code:    "streaming_not_supported",
+			Message: "Streaming not supported",
+		})
+		return
+	}
+
+	// Send initial job details
+	job, err := h.services.Job.GetJob(r.Context(), jobID)
+	if err != nil {
+		fmt.Fprintf(w, "event: error\ndata: {\"error\": \"%s\"}\n\n", err.Error())
+		flusher.Flush()
+		return
+	}
+
+	initialData := map[string]interface{}{
+		"job_id":   job.ID,
+		"name":     job.Name,
+		"status":   job.Status,
+		"fuzzer":   job.Fuzzer,
+		"progress": job.Progress,
+	}
+	data, _ := json.Marshal(initialData)
+	fmt.Fprintf(w, "event: connected\ndata: %s\n\n", data)
+	flusher.Flush()
+
+	// Stream progress updates
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			// Get updated job status
+			job, err := h.services.Job.GetJob(r.Context(), jobID)
+			if err != nil {
+				fmt.Fprintf(w, "event: error\ndata: {\"error\": \"Failed to get job status\"}\n\n")
+				flusher.Flush()
+				return
+			}
+
+			// Get statistics
+			stats, _ := h.services.Job.GetJobStats(r.Context(), jobID)
+
+			progressData := map[string]interface{}{
+				"job_id":         job.ID,
+				"status":         job.Status,
+				"progress":       job.Progress,
+				"crash_count":    stats.CrashesFound,
+				"coverage_edges": int64(stats.CoveragePercent * 1000), // Convert percentage to edges approximation
+				"timestamp":      time.Now(),
+			}
+
+			if job.AssignedBot != nil {
+				progressData["assigned_bot"] = *job.AssignedBot
+			}
+
+			data, _ := json.Marshal(progressData)
+			fmt.Fprintf(w, "event: progress\ndata: %s\n\n", data)
+			flusher.Flush()
+
+			// Check if job completed
+			if job.Status == common.JobStatusCompleted ||
+				job.Status == common.JobStatusFailed ||
+				job.Status == common.JobStatusCancelled ||
+				job.Status == common.JobStatusTimedOut {
+
+				finalData := map[string]interface{}{
+					"job_id":    job.ID,
+					"status":    job.Status,
+					"completed": true,
+					"timestamp": time.Now(),
+				}
+
+				data, _ := json.Marshal(finalData)
+				fmt.Fprintf(w, "event: completed\ndata: %s\n\n", data)
+				flusher.Flush()
+				return
+			}
+
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (h *HandlerV3) getJobCrashes(w http.ResponseWriter, r *http.Request) {
+	jobID := mux.Vars(r)["jobId"]
+	params := parsePaginationParams(r)
+
+	crashes, err := h.services.Job.GetJobCrashes(r.Context(), jobID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Apply pagination
+	paginated := paginateCrashes(crashes, params.Page, params.Limit)
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"crashes": paginated,
+		"count":   len(paginated),
+	})
+}
+
+// Campaign management handlers
+
+func (h *HandlerV3) listCampaigns(w http.ResponseWriter, r *http.Request) {
+	params := parsePaginationParams(r)
+	filters := parseCampaignFilters(r)
+
+	campaigns, err := h.campaign.ListCampaigns(r.Context(), *filters)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Apply pagination
+	paginated := paginateCampaigns(campaigns, params.Page, params.Limit)
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"campaigns": paginated,
+		"count":     len(paginated),
+	})
+}
+
+func (h *HandlerV3) createCampaign(w http.ResponseWriter, r *http.Request) {
+	var req CampaignRequest
+	if err := h.decodeAndValidate(w, r, &req); err != nil {
+		return
+	}
+
+	campaign, err := h.campaign.CreateCampaign(r.Context(), &common.Campaign{
+		Name:         req.Name,
+		Description:  req.Description,
+		TargetBinary: req.TargetBinary,
+		AutoRestart:  req.AutoRestart,
+		MaxDuration:  req.MaxDuration,
+		MaxJobs:      req.MaxJobs,
+		JobTemplate:  req.JobTemplate,
+		SharedCorpus: req.SharedCorpus,
+		Tags:         req.Tags,
+	})
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusCreated, campaign)
+}
+
+func (h *HandlerV3) getCampaign(w http.ResponseWriter, r *http.Request) {
+	campaignID := mux.Vars(r)["campaignId"]
+
+	campaign, err := h.campaign.GetCampaign(r.Context(), campaignID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, campaign)
+}
+
+func (h *HandlerV3) updateCampaign(w http.ResponseWriter, r *http.Request) {
+	campaignID := mux.Vars(r)["campaignId"]
+
+	var updates common.CampaignUpdates
+	if err := h.decodeAndValidate(w, r, &updates); err != nil {
+		return
+	}
+
+	campaign, err := h.campaign.UpdateCampaign(r.Context(), campaignID, &updates)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, campaign)
+}
+
+func (h *HandlerV3) deleteCampaign(w http.ResponseWriter, r *http.Request) {
+	campaignID := mux.Vars(r)["campaignId"]
+
+	if err := h.campaign.DeleteCampaign(r.Context(), campaignID); err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HandlerV3) getCampaignStats(w http.ResponseWriter, r *http.Request) {
+	campaignID := mux.Vars(r)["campaignId"]
+
+	stats, err := h.campaign.GetCampaignStats(r.Context(), campaignID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, stats)
+}
+
+// Corpus management handlers
+
+func (h *HandlerV3) listCorpus(w http.ResponseWriter, r *http.Request) {
+	params := parsePaginationParams(r)
+	campaignID := r.URL.Query().Get("campaignId")
+	jobID := r.URL.Query().Get("jobId")
+
+	// Get corpus files based on campaign or job ID
+	var files []*common.CorpusFile
+	var err error
+
+	if jobID != "" {
+		files, err = h.services.Corpus.GetCorpusForJob(r.Context(), jobID)
+	} else if campaignID != "" {
+		files, err = h.corpus.ListCorpusFiles(r.Context(), campaignID)
+	} else {
+		files = []*common.CorpusFile{}
+	}
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Apply pagination
+	paginated := paginateCorpusFiles(files, params.Page, params.Limit)
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"files": paginated,
+		"count": len(paginated),
+	})
+}
+
+func (h *HandlerV3) uploadCorpus(w http.ResponseWriter, r *http.Request) {
+	// Parse multipart form
+	if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB max
+		h.writeError(w, &ValidationError{
+			Field:   "form",
+			Message: "failed to parse multipart form",
+		})
+		return
+	}
+
+	campaignID := r.FormValue("campaignId")
+	if campaignID == "" {
+		h.writeError(w, &ValidationError{
+			Field:   "campaignId",
+			Message: "campaign ID is required",
+		})
+		return
+	}
+
+	jobID := r.FormValue("jobId")
+
+	// Process uploaded files
+	uploaded := 0
+	duplicates := 0
+	errors := []string{}
+
+	files := r.MultipartForm.File["files"]
+	for _, fileHeader := range files {
+		file, err := fileHeader.Open()
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: failed to open", fileHeader.Filename))
+			continue
+		}
+		defer file.Close()
+
+		// Read file content
+		content := make([]byte, fileHeader.Size)
+		_, err = file.Read(content)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: failed to read", fileHeader.Filename))
+			continue
+		}
+
+		// Create corpus file
+		corpusFile := &common.CorpusFile{
+			ID:         uuid.New().String(),
+			CampaignID: campaignID,
+			JobID:      jobID,
+			Filename:   fileHeader.Filename,
+			Size:       int64(len(content)),
+			Hash:       fmt.Sprintf("%x", content), // Simple hash for now
+			// Content is not a field - need to store separately
+			CreatedAt: time.Now(),
+		}
+
+		// Upload file
+		if _, err := h.corpus.UploadCorpusFile(r.Context(), corpusFile); err != nil {
+			if strings.Contains(err.Error(), "duplicate") {
+				duplicates++
+			} else {
+				errors = append(errors, fmt.Sprintf("%s: %v", fileHeader.Filename, err))
+			}
+		} else {
+			uploaded++
+		}
+	}
+
+	h.writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"uploaded":   uploaded,
+		"duplicates": duplicates,
+		"errors":     errors,
+	})
+}
+
+func (h *HandlerV3) getCorpusFile(w http.ResponseWriter, r *http.Request) {
+	corpusID := mux.Vars(r)["corpusId"]
+
+	file, err := h.corpus.GetCorpusFile(r.Context(), corpusID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, file)
+}
+
+func (h *HandlerV3) deleteCorpusFile(w http.ResponseWriter, r *http.Request) {
+	corpusID := mux.Vars(r)["corpusId"]
+
+	if err := h.corpus.DeleteCorpusFile(r.Context(), corpusID); err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HandlerV3) downloadCorpusFile(w http.ResponseWriter, r *http.Request) {
+	// TODO: Implement corpus file download
+	h.writeError(w, common.ErrNotImplemented)
+}
+
+func (h *HandlerV3) syncCorpus(w http.ResponseWriter, r *http.Request) {
+	var req CorpusSyncRequest
+	if err := h.decodeAndValidate(w, r, &req); err != nil {
+		return
+	}
+
+	// Call the actual SyncCorpus method with correct parameters
+	files, err := h.services.Corpus.SyncCorpus(r.Context(), req.SourceCampaignID, req.TargetCampaignID)
+	result := map[string]interface{}{
+		"synced_files": files,
+		"count":        len(files),
+	}
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, result)
+}
+
+func (h *HandlerV3) promoteCrashToCorpus(w http.ResponseWriter, r *http.Request) {
+	var req CorpusPromotionRequest
+	if err := h.decodeAndValidate(w, r, &req); err != nil {
+		return
+	}
+
+	// Call the actual PromoteCrashToCorpus method with correct parameters
+	file, err := h.services.Corpus.PromoteCrashToCorpus(r.Context(), req.CrashID, req.CampaignID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusCreated, file)
+}
+
+// Crash management handlers
+
+func (h *HandlerV3) listCrashes(w http.ResponseWriter, r *http.Request) {
+	params := parsePaginationParams(r)
+	_ = parseCrashFilters(r) // TODO: Use filters when implemented
+
+	// TODO: Implement crash listing
+	// This would need to be retrieved from storage
+	var crashes []*common.CrashResult
+	err := common.ErrNotImplemented
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"crashes":    crashes,
+		"count":      len(crashes),
+		"limit":      params.Limit,
+		"offset":     params.Offset,
+		"sort_by":    params.SortBy,
+		"sort_order": params.SortOrder,
+	})
+}
+
+func (h *HandlerV3) getCrash(w http.ResponseWriter, r *http.Request) {
+	_ = mux.Vars(r)["crashId"] // TODO: Use crashID when implemented
+
+	// TODO: Implement crash retrieval through Result service
+	// crash, err := h.services.Result.GetCrash(r.Context(), crashID)
+	var crash *common.CrashResult
+	err := common.ErrNotImplemented
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, crash)
+}
+
+func (h *HandlerV3) getCrashInput(w http.ResponseWriter, r *http.Request) {
+	crashID := mux.Vars(r)["crashId"]
+
+	// TODO: Implement crash input retrieval
+	// This would need to be retrieved from storage
+	var input []byte
+	err := common.ErrNotImplemented
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Set headers
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"crash_%s.bin\"", crashID[:8]))
+	w.Header().Set("Content-Length", strconv.Itoa(len(input)))
+
+	// Write content
+	if _, err := w.Write(input); err != nil {
+		h.logger.WithError(err).Error("Failed to write crash input response")
+	}
+}
+
+// Reproducibility handlers
+
+func (h *HandlerV3) listReproductionRequests(w http.ResponseWriter, r *http.Request) {
+	_ = parsePaginationParams(r)    // TODO: Use params when implemented
+	_ = r.URL.Query().Get("status") // TODO: Use status when implemented
+
+	// TODO: Implement reproducibility request listing
+	var requests []*common.ReproductionRequest
+	err := common.ErrNotImplemented
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"requests": requests,
+		"count":    len(requests),
+	})
+}
+
+func (h *HandlerV3) createReproductionRequest(w http.ResponseWriter, r *http.Request) {
+	var req ReproductionRequestCreate
+	if err := h.decodeAndValidate(w, r, &req); err != nil {
+		return
+	}
+
+	// TODO: Implement reproducibility request creation
+	var request *common.ReproductionRequest
+	err := common.ErrNotImplemented
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusCreated, request)
+}
+
+func (h *HandlerV3) getReproductionRequest(w http.ResponseWriter, r *http.Request) {
+	_ = mux.Vars(r)["requestId"] // TODO: Use requestID when implemented
+
+	// TODO: Implement GetReproductionStatus instead
+	var request *common.ReproductionRequest
+	err := common.ErrNotImplemented
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, request)
+}
+
+func (h *HandlerV3) submitReproductionResult(w http.ResponseWriter, r *http.Request) {
+	var result common.ReproductionResult
+	if err := h.decodeAndValidate(w, r, &result); err != nil {
+		return
+	}
+
+	// TODO: Implement RecordReproductionResult instead
+	err := common.ErrNotImplemented
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusCreated, result)
+}
+
+// Result submission handlers
+
+func (h *HandlerV3) submitBatchResults(w http.ResponseWriter, r *http.Request) {
+	var req BatchResultRequest
+	if err := h.decodeAndValidate(w, r, &req); err != nil {
+		return
+	}
+
+	// Validate batch size
+	totalSize := len(req.Crashes) + len(req.Coverage) + len(req.Corpus)
+	if totalSize > h.config.MaxBatchSize {
+		h.writeError(w, &ValidationError{
+			Field:   "batch",
+			Message: fmt.Sprintf("batch size %d exceeds maximum %d", totalSize, h.config.MaxBatchSize),
+		})
+		return
+	}
+
+	// Process batch
+	// TODO: Implement batch processing
+	result := &BatchResultResponse{
+		Status: "error",
+		BotID:  req.BotID,
+		JobID:  req.JobID,
+		Processed: struct {
+			Crashes  int `json:"crashes"`
+			Coverage int `json:"coverage"`
+			Corpus   int `json:"corpus"`
+		}{
+			Crashes:  0,
+			Coverage: 0,
+			Corpus:   0,
+		},
+		Timestamp:      time.Now(),
+		Errors:         []string{"not implemented"},
+		PartialSuccess: false,
+	}
+
+	// Determine status code
+	status := http.StatusOK
+	if len(result.Errors) > 0 && result.PartialSuccess {
+		status = http.StatusMultiStatus // 207
+	}
+
+	h.writeJSON(w, status, result)
+}
+
+func (h *HandlerV3) submitCrashResult(w http.ResponseWriter, r *http.Request) {
+	var crash common.CrashResult
+	if err := h.decodeAndValidate(w, r, &crash); err != nil {
+		return
+	}
+
+	err := h.services.Result.ProcessCrashResult(r.Context(), &crash)
+	processedCrash := &crash // Return the same crash for now
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"status":    "processed",
+		"crash_id":  processedCrash.ID,
+		"is_unique": true, // TODO: Implement deduplication to determine uniqueness
+		"timestamp": time.Now(),
+	}
+
+	h.writeJSON(w, http.StatusCreated, resp)
+}
+
+func (h *HandlerV3) submitCoverageResult(w http.ResponseWriter, r *http.Request) {
+	var coverage common.CoverageResult
+	if err := h.decodeAndValidate(w, r, &coverage); err != nil {
+		return
+	}
+
+	if err := h.services.Result.ProcessCoverageResult(r.Context(), &coverage); err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"status":      "processed",
+		"coverage_id": coverage.ID,
+		"timestamp":   time.Now(),
+	}
+
+	h.writeJSON(w, http.StatusCreated, resp)
+}
+
+func (h *HandlerV3) submitCorpusUpdate(w http.ResponseWriter, r *http.Request) {
+	var corpus common.CorpusUpdate
+	if err := h.decodeAndValidate(w, r, &corpus); err != nil {
+		return
+	}
+
+	if err := h.services.Result.ProcessCorpusUpdate(r.Context(), &corpus); err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"status":    "processed",
+		"corpus_id": corpus.ID,
+		"timestamp": time.Now(),
+	}
+
+	h.writeJSON(w, http.StatusCreated, resp)
+}
+
+// System management handlers
+
+func (h *HandlerV3) getSystemStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.services.System.GetSystemStats(r.Context())
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, stats)
+}
+
+func (h *HandlerV3) healthCheck(w http.ResponseWriter, r *http.Request) {
+	// TODO: Implement health check properly
+	health := map[string]interface{}{
+		"status":    "healthy",
+		"timestamp": time.Now(),
+	}
+
+	status := http.StatusOK
+	if healthStatus, ok := health["status"].(string); ok && healthStatus == "unhealthy" {
+		status = http.StatusServiceUnavailable
+	}
+
+	h.writeJSON(w, status, health)
+}
+
+func (h *HandlerV3) triggerRecovery(w http.ResponseWriter, r *http.Request) {
+	if err := h.services.System.TriggerRecovery(r.Context()); err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":    "recovery_initiated",
+		"timestamp": time.Now(),
+	})
+}
+
+func (h *HandlerV3) triggerMaintenance(w http.ResponseWriter, r *http.Request) {
+	var req MaintenanceRequest
+	if err := h.decodeAndValidate(w, r, &req); err != nil {
+		return
+	}
+
+	// TODO: Implement maintenance trigger
+	var result interface{}
+	err := common.ErrNotImplemented
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, result)
+}
+
+func (h *HandlerV3) listTimeouts(w http.ResponseWriter, r *http.Request) {
+	timeouts, err := h.services.System.GetActiveTimeouts(r.Context())
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, timeouts)
+}
+
+func (h *HandlerV3) forceTimeout(w http.ResponseWriter, r *http.Request) {
+	timeoutType := mux.Vars(r)["type"]
+	entityID := mux.Vars(r)["id"]
+
+	if err := h.services.System.ForceTimeout(r.Context(), timeoutType, entityID); err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":    "timeout_forced",
+		"type":      timeoutType,
+		"entity_id": entityID,
+		"timestamp": time.Now(),
+	})
+}
+
+// Documentation handlers
+
+func (h *HandlerV3) swaggerUI(w http.ResponseWriter, r *http.Request) {
+	// Serve Swagger UI
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(swaggerUIHTML))
+}
+
+func (h *HandlerV3) openAPISpec(w http.ResponseWriter, r *http.Request) {
+	// Serve OpenAPI spec
+	http.ServeFile(w, r, "api_v3/openapi.yaml")
+}
+
+// Helper methods
+
+func (h *HandlerV3) decodeAndValidate(w http.ResponseWriter, r *http.Request, v interface{}) error {
+	// Decode JSON
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(v); err != nil {
+		h.writeError(w, &ValidationError{
+			Field:   "body",
+			Message: "invalid JSON: " + err.Error(),
+		})
+		return err
+	}
+
+	// Validate
+	if err := h.validator.Validate(v); err != nil {
+		h.writeError(w, err)
+		return err
+	}
+
+	return nil
+}
+
+func (h *HandlerV3) writeJSON(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		h.logger.WithError(err).Error("Failed to encode JSON response")
+	}
+}
+
+func (h *HandlerV3) writeError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	resp := ErrorResponse{
+		Error:     "internal_error",
+		Message:   err.Error(),
+		Timestamp: time.Now(),
+	}
+
+	// Add request ID if available
+	if requestID, ok := w.Header()["X-Request-ID"]; ok && len(requestID) > 0 {
+		resp.RequestID = requestID[0]
+	}
+
+	// Determine status code based on error type
+	switch e := err.(type) {
+	case *ValidationError:
+		status = http.StatusBadRequest
+		resp.Error = "validation_error"
+		resp.Details = map[string]interface{}{
+			"field": e.Field,
+		}
+	case *NotFoundError:
+		status = http.StatusNotFound
+		resp.Error = "not_found"
+	case *ConflictError:
+		status = http.StatusConflict
+		resp.Error = "conflict"
+	case *APIError:
+		status = e.StatusCode
+		resp.Error = e.Code
+	case *errors.Error:
+		switch e.Type {
+		case errors.ErrorTypeNotFound:
+			status = http.StatusNotFound
+			resp.Error = "not_found"
+		case errors.ErrorTypeValidation:
+			status = http.StatusBadRequest
+			resp.Error = "validation_error"
+		case errors.ErrorTypeConflict:
+			status = http.StatusConflict
+			resp.Error = "conflict"
+		case errors.ErrorTypeTimeout:
+			status = http.StatusGatewayTimeout
+			resp.Error = "timeout"
+		}
+	}
+
+	h.writeJSON(w, status, resp)
+}
+
+// Response writer wrapper for logging
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *responseWriter) WriteHeader(code int) {
+	w.statusCode = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// Swagger UI HTML template
+const swaggerUIHTML = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>PandaFuzz API Documentation</title>
+    <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist/swagger-ui.css" />
+    <style>
+        html { box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }
+        *, *:before, *:after { box-sizing: inherit; }
+        body { margin:0; background: #fafafa; }
+    </style>
+</head>
+<body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist/swagger-ui-bundle.js"></script>
+    <script src="https://unpkg.com/swagger-ui-dist/swagger-ui-standalone-preset.js"></script>
+    <script>
+    window.onload = function() {
+        window.ui = SwaggerUIBundle({
+            url: "/api/v3/openapi.yaml",
+            dom_id: '#swagger-ui',
+            deepLinking: true,
+            presets: [
+                SwaggerUIBundle.presets.apis,
+                SwaggerUIStandalonePreset
+            ],
+            plugins: [
+                SwaggerUIBundle.plugins.DownloadUrl
+            ],
+            layout: "StandaloneLayout"
+        })
+    }
+    </script>
+</body>
+</html>
+`

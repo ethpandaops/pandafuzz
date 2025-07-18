@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/config"
 	"github.com/ethpandaops/pandafuzz/pkg/master"
 	"github.com/ethpandaops/pandafuzz/pkg/storage"
-	"github.com/stretchr/testify/require"
 	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/require"
 )
 
 // TestEnvironment holds the test environment components
@@ -32,6 +33,7 @@ type TestEnvironment struct {
 	tempDir      string
 	masterURL    string
 	httpClient   *http.Client
+	logger       *logrus.Logger
 }
 
 // SetupTestEnvironment creates a test environment
@@ -48,15 +50,18 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 	// Create master config
 	masterConfig := &common.MasterConfig{
 		Server: common.ServerConfig{
-			Host:          "127.0.0.1",
-			Port:          8765, // Use fixed port for testing
+			Host: "127.0.0.1",
+			Port: 8765, // Use fixed port for testing
 		},
 		Database: common.DatabaseConfig{
 			Type: "sqlite",
 			Path: filepath.Join(tempDir, "test.db"),
 		},
-		Storage: common.StorageConfig{
-			BasePath: tempDir,
+		Storage: config.StorageConfig{
+			Type: "filesystem",
+			Filesystem: config.FilesystemConfig{
+				BasePath: tempDir,
+			},
 		},
 		Timeouts: common.TimeoutConfig{
 			BotHeartbeat:   10 * time.Second,
@@ -65,11 +70,11 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 			HTTPRequest:    10 * time.Second,
 		},
 		Retry: common.RetryConfigs{
-			Network: common.NetworkRetryPolicy,
+			Network:  common.NetworkRetryPolicy,
 			Database: common.DatabaseRetryPolicy,
 		},
 		Limits: common.ResourceLimits{
-			MaxCrashSize:      1024 * 1024,     // 1MB
+			MaxCrashSize:      1024 * 1024,      // 1MB
 			MaxCorpusSize:     10 * 1024 * 1024, // 10MB
 			MaxJobDuration:    5 * time.Hour,
 			MaxConcurrentJobs: 100,
@@ -120,7 +125,7 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 	db, err := storage.NewSQLiteStorage(masterConfig.Database, logger)
 	require.NoError(t, err)
 
-	err = db.CreateTables()
+	err = db.CreateTables(ctx)
 	require.NoError(t, err)
 
 	// Create master components
@@ -148,6 +153,7 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 		server:       server,
 		tempDir:      tempDir,
 		httpClient:   httpClient,
+		logger:       logger,
 	}
 
 	// Cleanup on test completion
@@ -228,7 +234,7 @@ func (env *TestEnvironment) Cleanup() {
 
 	// Close database
 	if env.database != nil {
-		env.database.Close()
+		env.database.Close(context.Background())
 	}
 
 	// Remove temp directory
@@ -240,19 +246,19 @@ func (env *TestEnvironment) Cleanup() {
 // CreateTestJob creates a test job
 func (env *TestEnvironment) CreateTestJob(name string) (*common.Job, error) {
 	job := &common.Job{
-		ID:          fmt.Sprintf("job-%s-%d", name, time.Now().UnixNano()),
-		Name:        name,
-		Status:      common.JobStatusPending,
+		ID:     fmt.Sprintf("job-%s-%d", name, time.Now().UnixNano()),
+		Name:   name,
+		Status: common.JobStatusPending,
 		// Priority:    common.JobPriorityNormal, // TODO: Find correct priority constant
-		Fuzzer:      "afl++",
-		Target:      "/bin/test",
+		Fuzzer: "afl++",
+		Target: "/bin/test",
 		// TargetArgs:  []string{"@@"}, // TODO: Check if this field exists
 		// Corpus:      []string{"/corpus"}, // TODO: Check if this field exists
 		// Dictionary:  "/dict.txt", // TODO: Check if this field exists
 		// TimeoutSec:  300, // TODO: Check if this field exists
 		// MemoryLimit: 1024, // TODO: Check if this field exists
-		CreatedAt:   time.Now(),
-		TimeoutAt:   time.Now().Add(5 * time.Minute),
+		CreatedAt: time.Now(),
+		TimeoutAt: time.Now().Add(5 * time.Minute),
 		Config: common.JobConfig{
 			Duration:    5 * time.Minute,
 			MemoryLimit: 1024 * 1024 * 1024, // 1GB
@@ -260,7 +266,7 @@ func (env *TestEnvironment) CreateTestJob(name string) (*common.Job, error) {
 		},
 	}
 
-	return job, env.state.SaveJobWithRetry(job)
+	return job, env.state.SaveJobWithRetry(context.Background(), job)
 }
 
 // CreateTestBot creates a test bot
@@ -275,21 +281,21 @@ func (env *TestEnvironment) CreateTestBot(id string) (*common.Bot, error) {
 		// IP:           "127.0.0.1", // TODO: Check if this field exists
 	}
 
-	return bot, env.state.SaveBotWithRetry(bot)
+	return bot, env.state.SaveBotWithRetry(context.Background(), bot)
 }
 
 // CreateTestCrash creates a test crash result
 func (env *TestEnvironment) CreateTestCrash(jobID string) *common.CrashResult {
 	return &common.CrashResult{
-		ID:        fmt.Sprintf("crash-%d", time.Now().UnixNano()),
-		JobID:     jobID,
-		BotID:     env.botConfig.ID,
-		Timestamp: time.Now(),
-		Input:     []byte("AAAA"),
-		Size:      4,
-		Hash:      "deadbeef",
-		Type:      "segmentation_fault",
-		Output:    "Segmentation fault (core dumped)",
+		ID:         fmt.Sprintf("crash-%d", time.Now().UnixNano()),
+		JobID:      jobID,
+		BotID:      env.botConfig.ID,
+		Timestamp:  time.Now(),
+		Input:      []byte("AAAA"),
+		Size:       4,
+		Hash:       "deadbeef",
+		Type:       "segmentation_fault",
+		Output:     "Segmentation fault (core dumped)",
 		StackTrace: "#0 0x00000000 in main()",
 	}
 }
@@ -297,13 +303,13 @@ func (env *TestEnvironment) CreateTestCrash(jobID string) *common.CrashResult {
 // CreateTestCoverage creates a test coverage result
 func (env *TestEnvironment) CreateTestCoverage(jobID string) *common.CoverageResult {
 	return &common.CoverageResult{
-		ID:              fmt.Sprintf("coverage-%d", time.Now().UnixNano()),
-		JobID:           jobID,
-		BotID:           env.botConfig.ID,
-		Timestamp:       time.Now(),
-		Edges:           1000,
+		ID:        fmt.Sprintf("coverage-%d", time.Now().UnixNano()),
+		JobID:     jobID,
+		BotID:     env.botConfig.ID,
+		Timestamp: time.Now(),
+		Edges:     1000,
 		// CoveredEdges:    500, // TODO: Check if this field exists
-		NewEdges:        10,
+		NewEdges: 10,
 		// CoveragePercent: 50.0, // TODO: Check if this field exists
 	}
 }
@@ -326,7 +332,7 @@ func AssertEventually(t *testing.T, condition func() bool, timeout time.Duration
 func (env *TestEnvironment) WaitForJobStatus(jobID string, expectedStatus common.JobStatus, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		job, err := env.state.GetJob(jobID)
+		job, err := env.state.GetJob(context.Background(), jobID)
 		if err != nil {
 			return err
 		}
@@ -342,7 +348,7 @@ func (env *TestEnvironment) WaitForJobStatus(jobID string, expectedStatus common
 func (env *TestEnvironment) WaitForBotStatus(botID string, expectedStatus common.BotStatus, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		bot, err := env.state.GetBot(botID)
+		bot, err := env.state.GetBot(context.Background(), botID)
 		if err != nil {
 			return err
 		}

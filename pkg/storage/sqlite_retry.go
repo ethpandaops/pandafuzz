@@ -1,3 +1,7 @@
+// Deprecated: This file is kept for backward compatibility.
+// New code should use the generic retry mechanisms in retry.go and pool.go
+// TODO: Migrate all usages and remove this file
+
 package storage
 
 import (
@@ -18,8 +22,9 @@ type RetryableFunc func() error
 // RetryableResultFunc represents a function that returns a result and an error and can be retried
 type RetryableResultFunc[T any] func() (T, error)
 
-// ExecuteWithRetry executes a function with exponential backoff retry logic
-func ExecuteWithRetry(ctx context.Context, config common.DatabaseConfig, fn RetryableFunc) error {
+// LegacyExecuteWithRetry executes a function with exponential backoff retry logic
+// Deprecated: Use ExecuteWithRetry from retry.go instead
+func LegacyExecuteWithRetry(ctx context.Context, config common.DatabaseConfig, fn RetryableFunc) error {
 	logger := logrus.WithField("component", "sqlite_retry")
 
 	// Ensure defaults are set
@@ -85,8 +90,9 @@ func ExecuteWithRetry(ctx context.Context, config common.DatabaseConfig, fn Retr
 	return lastErr
 }
 
-// ExecuteWithRetryResult executes a function that returns a result with exponential backoff retry logic
-func ExecuteWithRetryResult[T any](ctx context.Context, config common.DatabaseConfig, fn RetryableResultFunc[T]) (T, error) {
+// LegacyExecuteWithRetryResult executes a function that returns a result with exponential backoff retry logic
+// Deprecated: Use ExecuteWithRetryResult from retry.go instead
+func LegacyExecuteWithRetryResult[T any](ctx context.Context, config common.DatabaseConfig, fn RetryableResultFunc[T]) (T, error) {
 	logger := logrus.WithField("component", "sqlite_retry")
 
 	// Ensure defaults are set
@@ -246,7 +252,7 @@ func isRetryableError(err error) bool {
 
 // RetryableTransaction wraps a transaction function with retry logic
 func RetryableTransaction(ctx context.Context, db *sql.DB, config common.DatabaseConfig, fn func(tx *sql.Tx) error) error {
-	return ExecuteWithRetry(ctx, config, func() error {
+	return LegacyExecuteWithRetry(ctx, config, func() error {
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -275,7 +281,7 @@ func RetryableTransaction(ctx context.Context, db *sql.DB, config common.Databas
 
 // RetryableQuery wraps a query with retry logic and returns multiple rows
 func RetryableQuery[T any](ctx context.Context, db *sql.DB, config common.DatabaseConfig, query string, scanFunc func(*sql.Rows) (T, error), args ...any) ([]T, error) {
-	return ExecuteWithRetryResult(ctx, config, func() ([]T, error) {
+	return LegacyExecuteWithRetryResult(ctx, config, func() ([]T, error) {
 		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
@@ -297,14 +303,15 @@ func RetryableQuery[T any](ctx context.Context, db *sql.DB, config common.Databa
 
 // RetryableQueryRow wraps a single row query with retry logic
 func RetryableQueryRow[T any](ctx context.Context, db *sql.DB, config common.DatabaseConfig, query string, scanFunc func(*sql.Row) (T, error), args ...any) (T, error) {
-	return ExecuteWithRetryResult(ctx, config, func() (T, error) {
+	return LegacyExecuteWithRetryResult(ctx, config, func() (T, error) {
 		row := db.QueryRowContext(ctx, query, args...)
 		return scanFunc(row)
 	})
 }
 
-// RetryableExec wraps an exec operation with retry logic
-func RetryableExec(ctx context.Context, db *sql.DB, config common.DatabaseConfig, query string, args ...any) (sql.Result, error) {
+// LegacyRetryableExec wraps an exec operation with retry logic
+// Deprecated: Use RetryableExec from retry.go instead
+func LegacyRetryableExec(ctx context.Context, db *sql.DB, config common.DatabaseConfig, query string, args ...any) (sql.Result, error) {
 	return ExecuteWithRetryResult(ctx, config, func() (sql.Result, error) {
 		return db.ExecContext(ctx, query, args...)
 	})

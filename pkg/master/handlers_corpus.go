@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/storage"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
@@ -86,10 +87,16 @@ func (s *Server) handleGetCorpusEvolution(w http.ResponseWriter, r *http.Request
 
 // handleSyncCorpus handles corpus synchronization for bots
 func (s *Server) handleSyncCorpus(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
 	vars := mux.Vars(r)
 	campaignID := vars["id"]
 
+	// Get request ID from context
+	requestID := r.Context().Value("request_id")
+	logger := s.logger.WithField("request_id", requestID)
+
 	if campaignID == "" {
+		logger.Error("Campaign ID is required")
 		s.writeErrorResponse(w, http.StatusBadRequest, "Campaign ID is required", nil)
 		return
 	}
@@ -100,9 +107,17 @@ func (s *Server) handleSyncCorpus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	logger = logger.WithFields(logrus.Fields{
+		"campaign_id": campaignID,
+		"bot_id":      req.BotID,
+	})
+
+	logger.Debug("Processing corpus sync request")
+
 	// Validate bot exists
 	_, err := s.services.Bot.GetBot(r.Context(), req.BotID)
 	if err != nil {
+		logger.WithError(err).Error("Bot not found")
 		s.writeErrorResponse(w, http.StatusNotFound, "Bot not found", err)
 		return
 	}
@@ -110,6 +125,7 @@ func (s *Server) handleSyncCorpus(w http.ResponseWriter, r *http.Request) {
 	// Sync corpus files
 	files, err := s.services.Corpus.SyncCorpus(r.Context(), campaignID, req.BotID)
 	if err != nil {
+		logger.WithError(err).Error("Failed to sync corpus")
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to sync corpus", err)
 		return
 	}
@@ -120,11 +136,10 @@ func (s *Server) handleSyncCorpus(w http.ResponseWriter, r *http.Request) {
 		totalSize += file.Size
 	}
 
-	s.logger.WithFields(logrus.Fields{
-		"campaign_id": campaignID,
-		"bot_id":      req.BotID,
-		"file_count":  len(files),
-		"total_size":  totalSize,
+	logger.WithFields(logrus.Fields{
+		"file_count": len(files),
+		"total_size": totalSize,
+		"duration":   time.Since(startTime).Seconds(),
 	}).Info("Corpus synced to bot")
 
 	response := CorpusSyncResponse{
@@ -225,14 +240,20 @@ func (s *Server) handleListCorpusFiles(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get all corpus files (in real implementation, would support pagination in storage layer)
-	// TODO: Implement GetCorpusFiles in state
-	// files, err := s.state.GetCorpusFiles(r.Context(), campaignID)
+	// Get all corpus files from database
 	var files []*common.CorpusFile
 	var err error
-	if err != nil {
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get corpus files", err)
-		return
+
+	// Try to get files from storage
+	if db, ok := s.state.db.(*storage.SQLiteStorage); ok {
+		files, err = db.GetCorpusFiles(r.Context(), campaignID)
+		if err != nil {
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get corpus files", err)
+			return
+		}
+	} else {
+		// Return empty list if storage not available
+		files = []*common.CorpusFile{}
 	}
 
 	// Apply filters
@@ -427,7 +448,7 @@ func (s *Server) handleCorpusImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate import directory
-	if !strings.HasPrefix(importDir, s.config.Storage.BasePath) {
+	if !strings.HasPrefix(importDir, s.getStorageBasePath()) {
 		s.writeErrorResponse(w, http.StatusForbidden, "Import directory must be within storage path", nil)
 		return
 	}
@@ -504,5 +525,72 @@ func (s *Server) handleCorpusCleanup(w http.ResponseWriter, r *http.Request) {
 		"timestamp":   time.Now(),
 	}
 
+	s.writeJSONResponse(w, response)
+}
+
+// PromoteCrashToCorpusRequest represents a request to promote a crash to corpus
+type PromoteCrashToCorpusRequest struct {
+	CrashID    string `json:"crash_id" validate:"required"`
+	CampaignID string `json:"campaign_id" validate:"required"`
+}
+
+// PromoteCrashToCorpusResponse represents a response for crash promotion
+type PromoteCrashToCorpusResponse struct {
+	Status     string             `json:"status"`
+	CrashID    string             `json:"crash_id"`
+	CampaignID string             `json:"campaign_id"`
+	CorpusFile *common.CorpusFile `json:"corpus_file"`
+	Message    string             `json:"message"`
+}
+
+// handleCorpusPromote handles promoting a crash to the corpus
+func (s *Server) handleCorpusPromote(w http.ResponseWriter, r *http.Request) {
+	var req PromoteCrashToCorpusRequest
+	if err := s.decodeJSONBody(w, r, &req); err != nil {
+		// Error response already written by decodeJSONBody
+		return
+	}
+
+	// Validate crash exists
+	crash, err := s.state.GetCrash(r.Context(), req.CrashID)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Crash not found", err)
+		return
+	}
+
+	// Validate campaign exists
+	campaign, err := s.services.Campaign.Get(r.Context(), req.CampaignID)
+	if err != nil {
+		if err == common.ErrCampaignNotFound {
+			s.writeErrorResponse(w, http.StatusNotFound, "Campaign not found", err)
+		} else {
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get campaign", err)
+		}
+		return
+	}
+
+	// Promote crash to corpus
+	corpusFile, err := s.services.Corpus.PromoteCrashToCorpus(r.Context(), req.CrashID, req.CampaignID)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to promote crash to corpus", err)
+		return
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"crash_id":    req.CrashID,
+		"campaign_id": req.CampaignID,
+		"corpus_file": corpusFile.ID,
+		"hash":        corpusFile.Hash,
+	}).Info("Crash promoted to corpus")
+
+	response := PromoteCrashToCorpusResponse{
+		Status:     "promoted",
+		CrashID:    req.CrashID,
+		CampaignID: req.CampaignID,
+		CorpusFile: corpusFile,
+		Message:    fmt.Sprintf("Crash %s successfully promoted to corpus for campaign %s", crash.ID, campaign.Name),
+	}
+
+	w.WriteHeader(http.StatusCreated)
 	s.writeJSONResponse(w, response)
 }

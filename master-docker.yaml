@@ -25,13 +25,10 @@ master:
 
   # Storage configuration - Updated to use /app/data which has a volume mount
   storage:
-    base_path: "/app/data"
-    corpus_path: "/app/data/corpus"
-    crash_path: "/app/data/crashes"
-    log_path: "/app/data/logs"
-    backup_path: "/app/data/backups"
-    temp_path: "/app/data/temp"
-    permissions: 0755
+    type: "filesystem"
+    filesystem:
+      base_path: "/app/data"
+    max_file_size: 104857600  # 100MB
 
   # Timeout configuration
   timeouts:

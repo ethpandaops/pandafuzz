@@ -117,12 +117,18 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 	}
 
 	// Configure fuzzer
+	// Set default timeout if not specified (AFL++ needs a reasonable timeout)
+	fuzzerTimeout := time.Duration(job.Config.Timeout) * time.Second
+	if fuzzerTimeout <= 0 {
+		fuzzerTimeout = 10 * time.Second // Default 10 second timeout for AFL++
+	}
+
 	config := fuzzer.FuzzConfig{
 		JobID:           job.ID, // Set the actual job ID
 		Target:          targetPath,
 		WorkDirectory:   workDir,
 		Duration:        time.Duration(job.Config.Duration) * time.Second,
-		Timeout:         time.Duration(job.Config.Timeout) * time.Second,
+		Timeout:         fuzzerTimeout,
 		MemoryLimit:     job.Config.MemoryLimit,
 		SeedDirectory:   filepath.Join(workDir, "input"),
 		OutputDirectory: filepath.Join(workDir, "output"),
@@ -160,27 +166,26 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 	}
 	fuzz.SetEventHandler(handler)
 
-	// Create execution context with timeout
+	// Create execution context with timeout based on job duration
 	var ctx context.Context
 	var cancel context.CancelFunc
 
-	// Use timeout if specified, otherwise use duration, otherwise default to 1 hour
-	timeout := time.Hour // Default
-	if job.Config.Timeout > 0 {
-		timeout = time.Duration(job.Config.Timeout) * time.Second
-	} else if job.Config.Duration > 0 {
-		// Add some buffer time for fuzzer to start/stop
-		timeout = time.Duration(job.Config.Duration)*time.Second + 30*time.Second
+	// Use duration as the overall job timeout, not the per-test timeout
+	jobTimeout := time.Hour // Default to 1 hour if not specified
+	if job.Config.Duration > 0 {
+		// Add some buffer time for fuzzer to start/stop gracefully
+		jobTimeout = time.Duration(job.Config.Duration)*time.Second + 30*time.Second
 	}
 
-	ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	ctx, cancel = context.WithTimeout(context.Background(), jobTimeout)
 	defer cancel()
 
 	fje.logger.WithFields(logrus.Fields{
-		"job_id":   job.ID,
-		"timeout":  timeout,
-		"duration": time.Duration(job.Config.Duration) * time.Second,
-	}).Debug("Created execution context")
+		"job_id":           job.ID,
+		"job_timeout":      jobTimeout,
+		"duration":         time.Duration(job.Config.Duration) * time.Second,
+		"per_test_timeout": time.Duration(job.Config.Timeout) * time.Second,
+	}).Info("Created execution context with job timeout")
 
 	// Start event handler goroutine
 	go fje.handleFuzzerEvents(job.ID)
@@ -197,6 +202,8 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	var timedOut bool
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -206,10 +213,35 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 				fje.logger.WithError(err).Warn("Failed to stop fuzzer gracefully")
 			}
 
+			fje.logger.WithField("job_id", job.ID).Debug("Fuzzer stop called, waiting for it to stop")
+
+			// Wait for fuzzer to actually stop
+			stopTimeout := time.NewTimer(10 * time.Second)
+			defer stopTimeout.Stop()
+
+		stopWaitLoop:
+			for fuzz.IsRunning() {
+				fje.logger.WithField("job_id", job.ID).Debug("Waiting for fuzzer to stop, IsRunning=true")
+				select {
+				case <-stopTimeout.C:
+					fje.logger.WithField("job_id", job.ID).Warn("Fuzzer did not stop within timeout")
+					break stopWaitLoop
+				case <-time.After(100 * time.Millisecond):
+					// Check again
+				}
+				if !fuzz.IsRunning() {
+					break
+				}
+			}
+
+			fje.logger.WithField("job_id", job.ID).Debug("Exited fuzzer stop wait loop")
+
 			if ctx.Err() == context.DeadlineExceeded {
 				msg := fmt.Sprintf("%s job completed (timeout/duration reached)", job.Fuzzer)
 				fje.logger.WithField("job_id", job.ID).Info(msg)
-				return true, msg, nil
+				timedOut = true
+				// Exit the outer loop
+				goto exitLoop
 			} else {
 				msg := fmt.Sprintf("%s job was cancelled", job.Fuzzer)
 				fje.logger.WithField("job_id", job.ID).Info(msg)
@@ -230,26 +262,66 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 		}
 	}
 
-	// Get final results
-	results, err := fuzz.GetResults()
-	if err != nil {
-		fje.logger.WithError(err).Warn("Failed to get fuzzer results")
+exitLoop:
+	fje.logger.WithField("job_id", job.ID).Debug("Reached exitLoop label")
+
+	// Get final results only if we didn't timeout
+	// Skip results collection on timeout as the fuzzer process may be in an inconsistent state
+	if !timedOut {
+		fje.logger.WithField("job_id", job.ID).Debug("Getting final results")
+
+		// Add a timeout for GetResults to prevent blocking
+		resultCtx, resultCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer resultCancel()
+
+		resultChan := make(chan struct {
+			results *fuzzer.FuzzerResults
+			err     error
+		}, 1)
+
+		go func() {
+			results, err := fuzz.GetResults()
+			resultChan <- struct {
+				results *fuzzer.FuzzerResults
+				err     error
+			}{results, err}
+		}()
+
+		select {
+		case res := <-resultChan:
+			if res.err != nil {
+				fje.logger.WithError(res.err).Warn("Failed to get fuzzer results")
+			} else if res.results != nil {
+				fje.logger.WithFields(logrus.Fields{
+					"job_id":           job.ID,
+					"total_executions": res.results.Summary.TotalExecutions,
+					"unique_crashes":   res.results.Summary.UniqueCrashes,
+					"coverage":         res.results.Summary.CoverageAchieved,
+					"new_inputs":       res.results.Summary.NewInputsFound,
+				}).Info("Fuzzing completed")
+			}
+		case <-resultCtx.Done():
+			fje.logger.WithField("job_id", job.ID).Warn("Timeout waiting for fuzzer results")
+		}
 	} else {
-		fje.logger.WithFields(logrus.Fields{
-			"job_id":           job.ID,
-			"total_executions": results.Summary.TotalExecutions,
-			"unique_crashes":   results.Summary.UniqueCrashes,
-			"coverage":         results.Summary.CoverageAchieved,
-			"new_inputs":       results.Summary.NewInputsFound,
-		}).Info("Fuzzing completed")
+		fje.logger.WithField("job_id", job.ID).Info("Skipping results collection due to timeout")
 	}
+
+	fje.logger.WithField("job_id", job.ID).Debug("After getting results")
 
 	// Close the log file if it was opened
 	if logFile != nil {
 		logFile.Close()
 	}
 
+	if timedOut {
+		msg := fmt.Sprintf("%s execution completed (timeout reached after %d seconds)", job.Fuzzer, job.Config.Duration)
+		fje.logger.WithField("job_id", job.ID).Info("Returning from ExecuteJob with timeout")
+		return true, msg, nil
+	}
+
 	msg := fmt.Sprintf("%s execution completed successfully", job.Fuzzer)
+	fje.logger.WithField("job_id", job.ID).Info("Returning from ExecuteJob successfully")
 	return true, msg, nil
 }
 

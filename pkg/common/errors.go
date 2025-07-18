@@ -5,6 +5,71 @@ import (
 	"time"
 )
 
+// ErrorCode represents standardized error codes for the system
+type ErrorCode string
+
+const (
+	// General errors
+	ErrCodeInternal      ErrorCode = "INTERNAL_ERROR"
+	ErrCodeInvalidInput  ErrorCode = "INVALID_INPUT"
+	ErrCodeNotFound      ErrorCode = "NOT_FOUND"
+	ErrCodeAlreadyExists ErrorCode = "ALREADY_EXISTS"
+	ErrCodeUnauthorized  ErrorCode = "UNAUTHORIZED"
+	ErrCodeForbidden     ErrorCode = "FORBIDDEN"
+
+	// Fuzzing-specific errors
+	ErrCodeFuzzerInit     ErrorCode = "FUZZER_INIT_ERROR"
+	ErrCodeFuzzerExec     ErrorCode = "FUZZER_EXEC_ERROR"
+	ErrCodeFuzzerTimeout  ErrorCode = "FUZZER_TIMEOUT"
+	ErrCodeCorpusSync     ErrorCode = "CORPUS_SYNC_ERROR"
+	ErrCodeCorpusInvalid  ErrorCode = "CORPUS_INVALID"
+	ErrCodeJobInvalid     ErrorCode = "JOB_INVALID"
+	ErrCodeJobNotFound    ErrorCode = "JOB_NOT_FOUND"
+	ErrCodeBinaryNotFound ErrorCode = "BINARY_NOT_FOUND"
+
+	// Storage errors
+	ErrCodeStorageRead  ErrorCode = "STORAGE_READ_ERROR"
+	ErrCodeStorageWrite ErrorCode = "STORAGE_WRITE_ERROR"
+	ErrCodeStorageFull  ErrorCode = "STORAGE_FULL"
+
+	// Network errors
+	ErrCodeNetworkTimeout    ErrorCode = "NETWORK_TIMEOUT"
+	ErrCodeNetworkConnection ErrorCode = "NETWORK_CONNECTION_ERROR"
+)
+
+// Error represents a standardized error in the system
+type Error struct {
+	Code    ErrorCode              `json:"code"`
+	Message string                 `json:"message"`
+	Details map[string]interface{} `json:"details,omitempty"`
+}
+
+// NewError creates a new standardized error
+func NewError(code ErrorCode, message string) *Error {
+	return &Error{
+		Code:    code,
+		Message: message,
+		Details: make(map[string]interface{}),
+	}
+}
+
+// Error implements the error interface
+func (e *Error) Error() string {
+	if len(e.Details) > 0 {
+		return fmt.Sprintf("[%s] %s (details: %v)", e.Code, e.Message, e.Details)
+	}
+	return fmt.Sprintf("[%s] %s", e.Code, e.Message)
+}
+
+// WithDetails adds additional details to the error
+func (e *Error) WithDetails(key string, value interface{}) *Error {
+	if e.Details == nil {
+		e.Details = make(map[string]interface{})
+	}
+	e.Details[key] = value
+	return e
+}
+
 // TimeoutError represents an error when an operation times out
 type TimeoutError struct {
 	Operation string

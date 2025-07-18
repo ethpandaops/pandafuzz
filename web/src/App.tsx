@@ -14,7 +14,7 @@ import Bots from './pages/Bots';
 import Jobs from './pages/Jobs';
 import Crashes from './pages/Crashes';
 import Coverage from './pages/Coverage';
-import { Corpus } from './pages/Corpus';
+import CorpusCollection from './pages/CorpusCollection';
 import { theme, darkTheme } from './theme';
 
 function App() {
@@ -62,9 +62,9 @@ function App() {
                 <Coverage />
               </PageTransition>
             } />
-            <Route path="/corpus" element={
+            <Route path="/corpus-collection" element={
               <PageTransition>
-                <Corpus />
+                <CorpusCollection />
               </PageTransition>
             } />
           </Routes>

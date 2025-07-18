@@ -1,0 +1,9 @@
+# Filesystem storage configuration
+type: filesystem
+filesystem:
+  base_path: /var/pandafuzz/corpus
+
+# Common settings (optional)
+max_file_size: 104857600  # 100MB
+enable_dedup: true
+enable_compression: false

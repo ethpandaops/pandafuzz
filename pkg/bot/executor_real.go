@@ -263,21 +263,76 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 		rje.writeLog(execution.LogWriter, "info", "system", "Proceeding with fuzzing despite test failure...")
 	}
 
+	// Create input directory for AFL++
+	inputDir := filepath.Join(job.WorkDir, "input")
+	if err := os.MkdirAll(inputDir, 0755); err != nil {
+		msg := fmt.Sprintf("Failed to create input directory: %v", err)
+		rje.writeLog(execution.LogWriter, "error", "system", msg)
+		execution.LogWriter.Flush()
+		return false, msg, err
+	}
+
+	// Check if input directory has any files
+	inputFiles, err := os.ReadDir(inputDir)
+	if err != nil {
+		rje.writeLog(execution.LogWriter, "warning", "system", fmt.Sprintf("Failed to read input directory: %v", err))
+		inputFiles = []os.DirEntry{}
+	}
+
+	// If no input files exist, create a minimal seed file
+	if len(inputFiles) == 0 {
+		seedFile := filepath.Join(inputDir, "seed_0")
+		if err := os.WriteFile(seedFile, []byte("test"), 0644); err != nil {
+			msg := fmt.Sprintf("Failed to create seed file: %v", err)
+			rje.writeLog(execution.LogWriter, "error", "system", msg)
+			execution.LogWriter.Flush()
+			return false, msg, err
+		}
+		rje.writeLog(execution.LogWriter, "info", "system", "Created minimal seed file for AFL++")
+	} else {
+		rje.writeLog(execution.LogWriter, "info", "system", fmt.Sprintf("Found %d input files in corpus directory", len(inputFiles)))
+	}
+
+	// Create output directory for AFL++
+	outputDir := filepath.Join(job.WorkDir, "output")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		msg := fmt.Sprintf("Failed to create output directory: %v", err)
+		rje.writeLog(execution.LogWriter, "error", "system", msg)
+		execution.LogWriter.Flush()
+		return false, msg, err
+	}
+
 	// Prepare AFL++ command
 	args := []string{
-		"-i", filepath.Join(job.WorkDir, "input"), // Input directory
-		"-o", filepath.Join(job.WorkDir, "output"), // Output directory
+		"-i", inputDir, // Input directory
+		"-o", outputDir, // Output directory
 		"-t", fmt.Sprintf("%d", job.Config.Timeout/time.Millisecond), // Timeout in ms
 		"-m", fmt.Sprintf("%d", job.Config.MemoryLimit), // Memory limit
 	}
+
+	// Add non-instrumented mode flag for AFL++ to work with any binary
+	args = append(args, "-n")
 
 	// Add target
 	args = append(args, "--", localBinaryPath)
 	// TODO: Add support for target arguments when they're added to the Job struct
 
+	// Log the full command for debugging
+	fullCmd := append([]string{"afl-fuzz"}, args...)
+	rje.writeLog(execution.LogWriter, "info", "afl++", fmt.Sprintf("Full AFL++ command: %s", strings.Join(fullCmd, " ")))
+
 	// Create command
 	cmd := exec.CommandContext(execution.Context, "afl-fuzz", args...)
 	cmd.Dir = job.WorkDir
+
+	// Set up environment for AFL++
+	cmd.Env = append(os.Environ(),
+		"AFL_SKIP_CPUFREQ=1",
+		"AFL_NO_AFFINITY=1",
+		"AFL_NO_UI=1",
+		"AFL_SKIP_BIN_CHECK=1",
+		"AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1",
+	)
 
 	// Capture output
 	stdout, err := cmd.StdoutPipe()
@@ -330,7 +385,14 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 	}()
 
 	// Wait for process to finish
+	rje.writeLog(execution.LogWriter, "info", "afl++", "Waiting for AFL++ process to complete...")
+	execution.LogWriter.Flush() // Flush before waiting
+
 	err = cmd.Wait()
+
+	rje.writeLog(execution.LogWriter, "info", "afl++", "AFL++ process finished, waiting for output capture...")
+	execution.LogWriter.Flush()
+
 	wg.Wait()
 
 	if err != nil {
@@ -364,6 +426,7 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 
 	msg := "AFL++ execution completed successfully"
 	rje.writeLog(execution.LogWriter, "info", "afl++", msg)
+	execution.LogWriter.Flush() // Ensure final logs are written
 	return true, msg, nil
 }
 
@@ -528,11 +591,36 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 	// Prepare LibFuzzer arguments
 	args := []string{}
 
-	// Add corpus directory if it exists
-	corpusDir := filepath.Join(job.WorkDir, "corpus")
-	if err := os.MkdirAll(corpusDir, 0755); err == nil {
-		args = append(args, corpusDir)
+	// Check if corpus collection was downloaded to input directory
+	inputDir := filepath.Join(job.WorkDir, "input")
+	inputDirExists := false
+	inputDirHasFiles := false
+
+	if info, err := os.Stat(inputDir); err == nil && info.IsDir() {
+		inputDirExists = true
+		// Check if it has files
+		if files, err := os.ReadDir(inputDir); err == nil && len(files) > 0 {
+			inputDirHasFiles = true
+		}
 	}
+
+	// LibFuzzer can run with just the binary (no corpus directory argument) if no corpus is needed
+	// But if a corpus collection was specified, we should use it
+	if inputDirExists && inputDirHasFiles {
+		// Use input directory as corpus (contains corpus collection files)
+		args = append(args, inputDir)
+		rje.writeLog(execution.LogWriter, "info", "libfuzzer", fmt.Sprintf("Using input directory as corpus: %s", inputDir))
+	} else if inputDirExists && !inputDirHasFiles {
+		// Input directory exists but is empty - corpus collection might have been specified but no files downloaded
+		// Create a minimal seed file to allow LibFuzzer to start
+		seedFile := filepath.Join(inputDir, "seed_0")
+		if err := os.WriteFile(seedFile, []byte("test"), 0644); err == nil {
+			args = append(args, inputDir)
+			rje.writeLog(execution.LogWriter, "info", "libfuzzer", fmt.Sprintf("Created seed file in empty input directory: %s", inputDir))
+		}
+	}
+	// If no input directory exists, LibFuzzer will run without corpus directory argument
+	// This allows it to generate inputs from scratch
 
 	// Add memory limit if specified
 	if job.Config.MemoryLimit > 0 {

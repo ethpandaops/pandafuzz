@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ func TestRecoveryOnStartup(t *testing.T) {
 	orphanedJob.AssignedBot = &botID
 	now := time.Now()
 	orphanedJob.StartedAt = &now
-	err = env.state.SaveJobWithRetry(orphanedJob)
+	err = env.state.SaveJobWithRetry(context.Background(), orphanedJob)
 	require.NoError(t, err)
 
 	// Create offline bot
@@ -36,29 +37,29 @@ func TestRecoveryOnStartup(t *testing.T) {
 		LastSeen:     time.Now().Add(-10 * time.Minute), // Old last seen
 		RegisteredAt: time.Now().Add(-1 * time.Hour),
 	}
-	err = env.state.SaveBotWithRetry(offlineBot)
+	err = env.state.SaveBotWithRetry(context.Background(), offlineBot)
 	require.NoError(t, err)
 
 	// Create stuck pending job
 	stuckJob, err := env.CreateTestJob("stuck-job")
 	require.NoError(t, err)
 	stuckJob.CreatedAt = time.Now().Add(-25 * time.Hour) // Old job
-	err = env.state.SaveJobWithRetry(stuckJob)
+	err = env.state.SaveJobWithRetry(context.Background(), stuckJob)
 	require.NoError(t, err)
 
 	// Perform recovery
-	err = env.recoveryMgr.RecoverOnStartup()
+	err = env.recoveryMgr.RecoverOnStartup(context.Background())
 	require.NoError(t, err)
 
 	// Check orphaned job is reset to pending
-	recoveredJob, err := env.state.GetJob(orphanedJob.ID)
+	recoveredJob, err := env.state.GetJob(context.Background(), orphanedJob.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.JobStatusPending, recoveredJob.Status)
 	assert.Nil(t, recoveredJob.AssignedBot)
 	assert.Nil(t, recoveredJob.StartedAt)
 
 	// Check offline bot is reset
-	recoveredBot, err := env.state.GetBot(botID)
+	recoveredBot, err := env.state.GetBot(context.Background(), botID)
 	require.NoError(t, err)
 	assert.Equal(t, common.BotStatusTimedOut, recoveredBot.Status)
 	assert.Nil(t, recoveredBot.CurrentJob)
@@ -71,7 +72,7 @@ func TestRecoveryOnStartup(t *testing.T) {
 // TestOrphanedJobRecovery tests recovery of orphaned jobs
 func TestOrphanedJobRecovery(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -87,38 +88,38 @@ func TestOrphanedJobRecovery(t *testing.T) {
 	job.AssignedBot = &bot1.ID
 	now := time.Now()
 	job.StartedAt = &now
-	err = env.state.SaveJobWithRetry(job)
+	err = env.state.SaveJobWithRetry(context.Background(), job)
 	require.NoError(t, err)
 
 	// Update bot status
 	bot1.Status = common.BotStatusBusy
 	bot1.CurrentJob = &job.ID
-	err = env.state.SaveBotWithRetry(bot1)
+	err = env.state.SaveBotWithRetry(context.Background(), bot1)
 	require.NoError(t, err)
 
 	// Simulate bot going offline (no heartbeat)
 	bot1.LastSeen = time.Now().Add(-10 * time.Minute)
 	bot1.Status = common.BotStatusTimedOut
-	err = env.state.SaveBotWithRetry(bot1)
+	err = env.state.SaveBotWithRetry(context.Background(), bot1)
 	require.NoError(t, err)
 
 	// Run recovery
-	err = env.recoveryMgr.RecoverOnStartup()
+	err = env.recoveryMgr.RecoverOnStartup(context.Background())
 	require.NoError(t, err)
 
 	// Verify job is recovered
-	recoveredJob, err := env.state.GetJob(job.ID)
+	recoveredJob, err := env.state.GetJob(context.Background(), job.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.JobStatusPending, recoveredJob.Status)
 	assert.Nil(t, recoveredJob.AssignedBot)
 
 	// Create new bot to pick up the job
 	bot2Client, err := bot.NewRetryClient(&common.BotConfig{
-		ID:            "bot-2",
-		MasterURL:     env.masterURL,
-		Capabilities:  []string{"afl++"},
+		ID:           "bot-2",
+		MasterURL:    env.masterURL,
+		Capabilities: []string{"afl++"},
 		// WorkDirectory: env.tempDir, // TODO: WorkDirectory doesn't exist on BotConfig
-	})
+	}, env.logger)
 	require.NoError(t, err)
 	defer bot2Client.Close()
 
@@ -135,13 +136,13 @@ func TestOrphanedJobRecovery(t *testing.T) {
 // TestBotFailureRecovery tests handling of bot failures
 func TestBotFailureRecovery(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master
 	err := env.StartMaster()
 	require.NoError(t, err)
 
 	// Create and register bot
-	botClient, err := bot.NewRetryClient(env.botConfig)
+	botClient, err := bot.NewRetryClient(env.botConfig, env.logger)
 	require.NoError(t, err)
 	defer botClient.Close()
 
@@ -157,17 +158,17 @@ func TestBotFailureRecovery(t *testing.T) {
 	require.NotNil(t, assignedJob)
 
 	// Simulate bot failure
-	err = env.recoveryMgr.HandleBotFailureWithRetry(env.botConfig.ID)
+	err = env.recoveryMgr.HandleBotFailureWithRetry(context.Background(), env.botConfig.ID)
 	require.NoError(t, err)
 
 	// Check bot is marked as failed
-	failedBot, err := env.state.GetBot(env.botConfig.ID)
+	failedBot, err := env.state.GetBot(context.Background(), env.botConfig.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.BotStatusFailed, failedBot.Status)
 	assert.Greater(t, failedBot.FailureCount, 0)
 
 	// Check job is reassigned
-	reassignedJob, err := env.state.GetJob(job.ID)
+	reassignedJob, err := env.state.GetJob(context.Background(), job.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.JobStatusPending, reassignedJob.Status)
 	assert.Nil(t, reassignedJob.AssignedBot)
@@ -176,7 +177,7 @@ func TestBotFailureRecovery(t *testing.T) {
 // TestMaintenanceRecovery tests periodic maintenance recovery
 func TestMaintenanceRecovery(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -188,7 +189,7 @@ func TestMaintenanceRecovery(t *testing.T) {
 		job.Status = common.JobStatusCompleted
 		completedAt := time.Now().Add(-50 * time.Hour) // Very old
 		job.CompletedAt = &completedAt
-		err = env.state.SaveJobWithRetry(job)
+		err = env.state.SaveJobWithRetry(context.Background(), job)
 		require.NoError(t, err)
 	}
 
@@ -199,15 +200,15 @@ func TestMaintenanceRecovery(t *testing.T) {
 		LastSeen:     time.Now().Add(-1 * time.Hour),
 		RegisteredAt: time.Now().Add(-2 * time.Hour),
 	}
-	err = env.state.SaveBotWithRetry(stuckBot)
+	err = env.state.SaveBotWithRetry(context.Background(), stuckBot)
 	require.NoError(t, err)
 
 	// Run maintenance recovery
-	err = env.recoveryMgr.PerformMaintenanceRecovery()
+	err = env.recoveryMgr.PerformMaintenanceRecovery(context.Background())
 	require.NoError(t, err)
 
 	// Check stuck bot is reset
-	recoveredBot, err := env.state.GetBot(stuckBot.ID)
+	recoveredBot, err := env.state.GetBot(context.Background(), stuckBot.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.BotStatusTimedOut, recoveredBot.Status)
 
@@ -219,7 +220,7 @@ func TestMaintenanceRecovery(t *testing.T) {
 // TestConcurrentRecovery tests recovery under concurrent operations
 func TestConcurrentRecovery(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -234,14 +235,14 @@ func TestConcurrentRecovery(t *testing.T) {
 		job.AssignedBot = &botID
 		now := time.Now()
 		job.StartedAt = &now
-		err = env.state.SaveJobWithRetry(job)
+		err = env.state.SaveJobWithRetry(context.Background(), job)
 		require.NoError(t, err)
 	}
 
 	// Run recovery in parallel with new operations
 	recoveryDone := make(chan error, 1)
 	go func() {
-		recoveryDone <- env.recoveryMgr.RecoverOnStartup()
+		recoveryDone <- env.recoveryMgr.RecoverOnStartup(context.Background())
 	}()
 
 	// Meanwhile, create new jobs
@@ -255,9 +256,9 @@ func TestConcurrentRecovery(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify all orphaned jobs are recovered
-	jobs, err := env.state.ListJobs()
+	jobs, err := env.state.ListJobs(context.Background())
 	require.NoError(t, err)
-	
+
 	pendingCount := 0
 	for _, job := range jobs {
 		if job.Status == common.JobStatusPending {
@@ -270,14 +271,14 @@ func TestConcurrentRecovery(t *testing.T) {
 // TestTimeoutRecovery tests recovery of timed-out operations
 func TestTimeoutRecovery(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Use very short timeouts
 	env.masterConfig.Timeouts.JobExecution = 2 * time.Second
 	env.masterConfig.Timeouts.BotHeartbeat = 1 * time.Second
-	
+
 	// Recreate timeout manager with new config
-	env.timeoutMgr = master.NewTimeoutManager(env.state, env.masterConfig)
-	
+	env.timeoutMgr = master.NewTimeoutManager(env.state, env.masterConfig, env.logger)
+
 	// Start master
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -286,7 +287,7 @@ func TestTimeoutRecovery(t *testing.T) {
 	bot, err := env.CreateTestBot("timeout-bot")
 	require.NoError(t, err)
 	bot.Status = common.BotStatusBusy
-	err = env.state.SaveBotWithRetry(bot)
+	err = env.state.SaveBotWithRetry(context.Background(), bot)
 	require.NoError(t, err)
 
 	job, err := env.CreateTestJob("timeout-job")
@@ -296,11 +297,11 @@ func TestTimeoutRecovery(t *testing.T) {
 	job.TimeoutAt = time.Now().Add(1 * time.Second)
 	now := time.Now()
 	job.StartedAt = &now
-	err = env.state.SaveJobWithRetry(job)
+	err = env.state.SaveJobWithRetry(context.Background(), job)
 	require.NoError(t, err)
 
 	bot.CurrentJob = &job.ID
-	err = env.state.SaveBotWithRetry(bot)
+	err = env.state.SaveBotWithRetry(context.Background(), bot)
 	require.NoError(t, err)
 
 	// Wait for timeout
@@ -310,13 +311,13 @@ func TestTimeoutRecovery(t *testing.T) {
 	// env.timeoutMgr.CheckTimeouts() // TODO: This method doesn't exist
 
 	// Verify job is timed out
-	timedOutJob, err := env.state.GetJob(job.ID)
+	timedOutJob, err := env.state.GetJob(context.Background(), job.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.JobStatusFailed, timedOutJob.Status)
 	// assert.Contains(t, timedOutJob.Message, "timeout") // TODO: Message field doesn't exist
 
 	// Verify bot is reset
-	timedOutBot, err := env.state.GetBot(bot.ID)
+	timedOutBot, err := env.state.GetBot(context.Background(), bot.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.BotStatusIdle, timedOutBot.Status)
 	assert.Nil(t, timedOutBot.CurrentJob)
@@ -325,7 +326,7 @@ func TestTimeoutRecovery(t *testing.T) {
 // TestSystemStateValidation tests system state validation
 func TestSystemStateValidation(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Start master
 	err := env.StartMaster()
 	require.NoError(t, err)
@@ -338,7 +339,7 @@ func TestSystemStateValidation(t *testing.T) {
 		CurrentJob: func() *string { s := "non-existent-job"; return &s }(),
 		LastSeen:   time.Now(),
 	}
-	err = env.state.SaveBotWithRetry(bot1)
+	err = env.state.SaveBotWithRetry(context.Background(), bot1)
 	require.NoError(t, err)
 
 	// Job assigned to non-existent bot
@@ -347,20 +348,20 @@ func TestSystemStateValidation(t *testing.T) {
 	job1.Status = common.JobStatusAssigned
 	nonExistentBot := "non-existent-bot"
 	job1.AssignedBot = &nonExistentBot
-	err = env.state.SaveJobWithRetry(job1)
+	err = env.state.SaveJobWithRetry(context.Background(), job1)
 	require.NoError(t, err)
 
 	// Run recovery with validation
-	err = env.recoveryMgr.RecoverOnStartup()
+	err = env.recoveryMgr.RecoverOnStartup(context.Background())
 	require.NoError(t, err)
 
 	// Check inconsistencies are fixed
-	fixedBot, err := env.state.GetBot(bot1.ID)
+	fixedBot, err := env.state.GetBot(context.Background(), bot1.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.BotStatusIdle, fixedBot.Status)
 	assert.Nil(t, fixedBot.CurrentJob)
 
-	fixedJob, err := env.state.GetJob(job1.ID)
+	fixedJob, err := env.state.GetJob(context.Background(), job1.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.JobStatusPending, fixedJob.Status)
 	assert.Nil(t, fixedJob.AssignedBot)
@@ -369,10 +370,10 @@ func TestSystemStateValidation(t *testing.T) {
 // TestRecoveryMetrics tests recovery metrics collection
 func TestRecoveryMetrics(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Reset stats
 	env.recoveryMgr.ResetStats()
-	
+
 	// Create scenarios for recovery
 	// Orphaned jobs
 	for i := 0; i < 3; i++ {
@@ -381,7 +382,7 @@ func TestRecoveryMetrics(t *testing.T) {
 		job.Status = common.JobStatusAssigned
 		botID := fmt.Sprintf("offline-%d", i)
 		job.AssignedBot = &botID
-		err = env.state.SaveJobWithRetry(job)
+		err = env.state.SaveJobWithRetry(context.Background(), job)
 		require.NoError(t, err)
 	}
 
@@ -392,12 +393,12 @@ func TestRecoveryMetrics(t *testing.T) {
 			Status:   common.BotStatusBusy,
 			LastSeen: time.Now().Add(-1 * time.Hour),
 		}
-		err := env.state.SaveBotWithRetry(bot)
+		err := env.state.SaveBotWithRetry(context.Background(), bot)
 		require.NoError(t, err)
 	}
 
 	// Run recovery
-	err := env.recoveryMgr.RecoverOnStartup()
+	err := env.recoveryMgr.RecoverOnStartup(context.Background())
 	require.NoError(t, err)
 
 	// Check metrics
@@ -412,14 +413,14 @@ func TestRecoveryMetrics(t *testing.T) {
 // TestRecoveryErrorHandling tests recovery error handling
 func TestRecoveryErrorHandling(t *testing.T) {
 	env := SetupTestEnvironment(t)
-	
+
 	// Close database to simulate error
-	env.database.Close()
-	
+	env.database.Close(context.Background())
+
 	// Try recovery (should handle error gracefully)
-	err := env.recoveryMgr.RecoverOnStartup()
+	err := env.recoveryMgr.RecoverOnStartup(context.Background())
 	assert.Error(t, err)
-	
+
 	// Check error counter increased
 	stats := env.recoveryMgr.GetStats()
 	assert.Greater(t, stats.RecoveryErrors, int64(0))

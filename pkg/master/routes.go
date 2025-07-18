@@ -107,6 +107,7 @@ func (s *Server) setupAPIRoutes(router *mux.Router) {
 	router.HandleFunc("/jobs", s.handleJobCreate).Methods("POST")
 	router.HandleFunc("/jobs/upload", s.handleJobCreateWithUpload).Methods("POST")
 	router.HandleFunc("/jobs", s.handleJobList).Methods("GET")
+	router.HandleFunc("/jobs/available-corpora", s.handleListAvailableCorpora).Methods("GET")
 	router.HandleFunc("/jobs/{id}", s.handleJobGet).Methods("GET")
 	router.HandleFunc("/jobs/{id}/cancel", s.handleJobCancel).Methods("PUT")
 	router.HandleFunc("/jobs/{id}/logs", s.handleJobLogsV2).Methods("GET")
@@ -158,6 +159,48 @@ func (s *Server) setupAPIRoutes(router *mux.Router) {
 	// Crash analysis routes
 	router.HandleFunc("/campaigns/{id}/crashes", s.handleGetCrashGroups).Methods("GET")
 	router.HandleFunc("/crashes/{id}/stacktrace", s.handleGetStackTrace).Methods("GET")
+
+	// Corpus quarantine routes
+	router.HandleFunc("/campaigns/{campaignID}/quarantine", s.handleQuarantineCorpusFile).Methods("POST")
+	router.HandleFunc("/campaigns/{campaignID}/quarantine", s.handleGetQuarantinedFiles).Methods("GET")
+	router.HandleFunc("/campaigns/{campaignID}/quarantine/restore", s.handleRestoreQuarantinedFile).Methods("POST")
+	router.HandleFunc("/campaigns/{campaignID}/quarantine/delete", s.handleDeleteQuarantinedFile).Methods("DELETE")
+	router.HandleFunc("/quarantine/rules", s.handleGetQuarantineRules).Methods("GET")
+	router.HandleFunc("/quarantine/rules", s.handleSetQuarantineRule).Methods("PUT")
+	router.HandleFunc("/quarantine/thresholds", s.handleSetQuarantineThresholds).Methods("PUT")
+	router.HandleFunc("/corpus/files/{fileID}/metrics", s.handleUpdateCorpusFileMetrics).Methods("PUT")
+
+	// Crash reproducibility routes
+	router.HandleFunc("/crashes/{crashID}/reproduce", s.handleCrashReproduce).Methods("POST")
+	router.HandleFunc("/crashes/{crashID}/reproduction", s.handleGetCrashReproduction).Methods("GET")
+	router.HandleFunc("/reproduction/results", s.handleSubmitReproductionResult).Methods("POST")
+	router.HandleFunc("/crashes/{crashID}/reproduction/results", s.handleGetReproductionResults).Methods("GET")
+
+	// Corpus promotion routes
+	router.HandleFunc("/corpus/promote", s.handleCorpusPromote).Methods("POST")
+	// Note: /jobs/{id}/corpus GET route already exists above
+
+	// Corpus collection routes
+	router.HandleFunc("/corpus/collections", s.handleListCorpusCollections).Methods("GET")
+	router.HandleFunc("/corpus/collections", s.handleCreateCorpusCollection).Methods("POST")
+	router.HandleFunc("/corpus/collections/{id}", s.handleGetCorpusCollection).Methods("GET")
+	router.HandleFunc("/corpus/collections/{id}", s.handleDeleteCorpusCollection).Methods("DELETE")
+	router.HandleFunc("/corpus/collections/{id}/upload", s.handleUploadCorpusToCollection).Methods("POST")
+	router.HandleFunc("/corpus/collections/{id}/files", s.handleGetCollectionFiles).Methods("GET")
+	router.HandleFunc("/corpus/collections/{id}/files/{fileId}/download", s.handleDownloadCollectionFile).Methods("GET")
+
+	// Crash minimization routes
+	s.registerMinimizationRoutes(router)
+
+	// S3 presigned URL routes for corpus
+	router.HandleFunc("/corpus/{id}/files/{hash}/download-url", s.handleGetCorpusDownloadURL).Methods("GET")
+	router.HandleFunc("/corpus/{id}/upload-url", s.handleGetCorpusUploadURL).Methods("POST")
+
+	// Analytics routes
+	router.HandleFunc("/analytics/coverage-trend", s.handleGetCoverageTrend).Methods("GET")
+	router.HandleFunc("/analytics/crash-timeline", s.handleGetCrashTimeline).Methods("GET")
+	router.HandleFunc("/analytics/fuzzer-comparison", s.handleGetFuzzerComparison).Methods("GET")
+	router.HandleFunc("/campaigns/{id}/insights", s.handleGetCampaignInsights).Methods("GET")
 
 	s.logger.Info("API v1 routes configured")
 }

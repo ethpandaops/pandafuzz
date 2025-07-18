@@ -1,0 +1,1 @@
+/* Swagger UI assets would go here */

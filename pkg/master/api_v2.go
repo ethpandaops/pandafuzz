@@ -56,8 +56,8 @@ func (s *Server) circuitBreakerMiddleware(next http.Handler) http.Handler {
 
 // setupAPIv2Routes configures all v2 API routes
 func (s *Server) setupAPIv2Routes(r *mux.Router) {
-	// Create v2 subrouter
-	v2 := r.PathPrefix("/api/v2").Subrouter()
+	// Note: r is already the /api/v2 subrouter from routes.go
+	v2 := r
 
 	// Apply middleware
 	v2.Use(s.metricsMiddleware)
@@ -112,6 +112,12 @@ func (s *Server) setupAPIv2Routes(r *mux.Router) {
 	// System endpoints
 	v2.HandleFunc("/system/stats", s.handleSystemStats).Methods("GET")
 	v2.HandleFunc("/system/maintenance", s.handleMaintenanceTrigger).Methods("POST")
+
+	// Analytics endpoints
+	v2.HandleFunc("/analytics/coverage-trend", s.handleGetCoverageTrend).Methods("GET")
+	v2.HandleFunc("/analytics/crash-timeline", s.handleGetCrashTimeline).Methods("GET")
+	v2.HandleFunc("/analytics/fuzzer-comparison", s.handleGetFuzzerComparison).Methods("GET")
+	v2.HandleFunc("/campaigns/{id}/insights", s.handleGetCampaignInsights).Methods("GET")
 
 	// WebSocket endpoint
 	v2.HandleFunc("/ws", s.handleWebSocket).Methods("GET")

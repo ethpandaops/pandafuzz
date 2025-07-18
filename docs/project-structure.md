@@ -54,14 +54,15 @@ pandafuzz/
 │   ├── run_tests.sh     # Unit test runner
 │   └── test_crash_report.sh  # Crash reporting test
 │
-├── test_data/             # Test data
-│   ├── seeds/           # Fuzzing seed inputs
-│   └── corpus/          # Test corpus (generated)
-│
-├── test_targets/          # Test programs
-│   ├── crashers/        # Programs that crash
-│   ├── fuzzers/         # Fuzzer test harnesses
-│   └── vulnerable/      # Vulnerable test programs
+├── test-resources/        # Consolidated test resources
+│   ├── test-data/       # Test data
+│   │   ├── seeds/       # Fuzzing seed inputs
+│   │   └── corpus/      # Test corpus (generated)
+│   ├── test-targets/    # Test programs
+│   │   ├── crashers/    # Programs that crash
+│   │   ├── fuzzers/     # Fuzzer test harnesses
+│   │   └── vulnerable/  # Vulnerable test programs
+│   └── test-corpus/     # Sample corpus files
 │
 ├── tests/                 # Integration tests
 │   └── e2e/             # End-to-end tests
@@ -84,8 +85,9 @@ pandafuzz/
 2. **Test Files**
    - Unit tests: Same directory as code (`*_test.go`)
    - Integration tests: `tests/`
-   - Test programs: `test_targets/<category>/`
-   - Test data: `test_data/`
+   - Test programs: `test-resources/test-targets/<category>/`
+   - Test data: `test-resources/test-data/`
+   - Test corpus: `test-resources/test-corpus/`
 
 3. **Scripts**
    - All shell scripts: `scripts/`

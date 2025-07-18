@@ -10,6 +10,7 @@ import (
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/httputil"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
+	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
@@ -37,6 +38,7 @@ type Server struct {
 	version         string
 	buildTime       string
 	gitCommit       string
+	storageBackend  backend.StorageBackend
 }
 
 // ServerStats tracks server performance metrics
@@ -246,9 +248,101 @@ func (s *Server) IsRunning() bool {
 // SetRecoveryManager sets the recovery manager (to avoid circular dependencies)
 func (s *Server) SetRecoveryManager(rm *RecoveryManager) {
 	s.recoveryManager = rm
-	// Initialize services after recovery manager is set
+	// Don't initialize services here anymore - wait for storage to be initialized
+}
+
+// InitializeStorage creates and initializes the storage backend based on configuration
+func (s *Server) InitializeStorage() error {
+	s.logger.Info("Initializing storage backend")
+
+	// Create storage backend based on configuration
+	storageBackend, err := backend.NewStorageBackend(s.config.Storage, s.logger)
+	if err != nil {
+		return fmt.Errorf("failed to initialize storage backend: %w", err)
+	}
+
+	// Perform health check
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := storageBackend.HealthCheck(ctx); err != nil {
+		return fmt.Errorf("storage backend health check failed: %w", err)
+	}
+
+	s.storageBackend = storageBackend
+	s.logger.WithField("type", s.config.Storage.Type).Info("Storage backend initialized successfully")
+
+	// Now initialize services with the storage backend
+	s.initializeServices()
+
+	return nil
+}
+
+// initializeServices initializes the service manager with storage backend
+func (s *Server) initializeServices() {
+	// Initialize services after storage backend is ready
 	stateAdapter := NewStateStoreAdapter(s.state)
-	s.services = service.NewManager(stateAdapter, s.timeoutManager, s.recoveryManager, s.config, s.logger)
+
+	// Create custom service manager initialization to use storage backend
+	s.services = s.createServiceManager(stateAdapter)
+
 	// Initialize bot poller with 5 second interval for more responsive updates
 	s.botPoller = NewBotPoller(s.state, s.services, s.logger, 5*time.Second)
+}
+
+// createServiceManager creates a service manager with the storage backend
+func (s *Server) createServiceManager(stateAdapter service.StateStore) *service.Manager {
+	// Create a custom state adapter that provides the storage backend
+	customStateAdapter := &storageBackendAdapter{
+		StateStore:     stateAdapter,
+		storageBackend: s.storageBackend,
+		config:         s.config,
+		logger:         s.logger,
+	}
+
+	// Use the NewManager constructor with proper dependency injection
+	return service.NewManager(
+		customStateAdapter,
+		s.timeoutManager,
+		s.recoveryManager,
+		s.config,
+		s.logger,
+	)
+}
+
+// GetStorageBackend returns the storage backend instance
+func (s *Server) GetStorageBackend() backend.StorageBackend {
+	return s.storageBackend
+}
+
+// getStorageBasePath returns the base path for storage operations
+// For filesystem backend, it returns the configured base path
+// For S3/MinIO backends, it returns a default local path for temporary files
+func (s *Server) getStorageBasePath() string {
+	if s.config.Storage.Type == "filesystem" {
+		return s.config.Storage.Filesystem.BasePath
+	}
+	// For S3/MinIO backends, return a default local path for temporary files
+	return "./storage"
+}
+
+// storageBackendAdapter wraps StateStore to provide storage backend access
+type storageBackendAdapter struct {
+	service.StateStore
+	storageBackend backend.StorageBackend
+	config         *common.MasterConfig
+	logger         *logrus.Logger
+}
+
+// GetFileStorage returns appropriate file storage based on configuration
+func (a *storageBackendAdapter) GetFileStorage() common.FileStorage {
+	if a.storageBackend != nil {
+		return service.NewBackendFileStorage(a.storageBackend, a.logger)
+	}
+	// Fallback to local file storage
+	basePath := "./storage"
+	if a.config.Storage.Type == "filesystem" {
+		basePath = a.config.Storage.Filesystem.BasePath
+	}
+	return service.NewLocalFileStorage(basePath, a.logger)
 }

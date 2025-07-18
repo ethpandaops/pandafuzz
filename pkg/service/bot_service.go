@@ -278,6 +278,76 @@ func (s *botService) Stop() error {
 	return nil
 }
 
+// DeregisterBot deregisters a bot
+func (s *botService) DeregisterBot(ctx context.Context, botID string) error {
+	// Same as DeleteBot
+	return s.DeleteBot(ctx, botID)
+}
+
+// Heartbeat updates bot heartbeat (simple version)
+func (s *botService) Heartbeat(ctx context.Context, botID string) error {
+	// Get current bot to maintain status
+	bot, err := s.GetBot(ctx, botID)
+	if err != nil {
+		return err
+	}
+	return s.UpdateHeartbeat(ctx, botID, bot.Status, bot.CurrentJob)
+}
+
+// GetCurrentJob retrieves the current job for a bot
+func (s *botService) GetCurrentJob(ctx context.Context, botID string) (*common.Job, error) {
+	if botID == "" {
+		return nil, errors.NewValidationError("get_current_job", "Bot ID is required")
+	}
+
+	bot, err := s.GetBot(ctx, botID)
+	if err != nil {
+		return nil, err
+	}
+
+	if bot.CurrentJob == nil || *bot.CurrentJob == "" {
+		return nil, nil
+	}
+
+	// Get job details from state
+	if jobGetter, ok := s.state.(interface {
+		GetJob(jobID string) (*common.Job, error)
+	}); ok {
+		return jobGetter.GetJob(*bot.CurrentJob)
+	}
+
+	return nil, errors.New(errors.ErrorTypeMethodNotFound, "get_current_job", "GetJob method not available on state store")
+}
+
+// GetMetrics retrieves metrics for a bot
+func (s *botService) GetMetrics(ctx context.Context, botID string) (*BotMetrics, error) {
+	if botID == "" {
+		return nil, errors.NewValidationError("get_metrics", "Bot ID is required")
+	}
+
+	// Try to get metrics from state if available
+	if metricsGetter, ok := s.state.(interface {
+		GetBotMetrics(ctx context.Context, botID string) (*BotMetrics, error)
+	}); ok {
+		return metricsGetter.GetBotMetrics(ctx, botID)
+	}
+
+	// Otherwise, create basic metrics from available data
+	bot, err := s.GetBot(ctx, botID)
+	if err != nil {
+		return nil, err
+	}
+
+	metrics := &BotMetrics{
+		BotID:      botID,
+		LastActive: bot.LastSeen,
+		// Other fields would need to be populated from job history
+		// This is a simplified implementation
+	}
+
+	return metrics, nil
+}
+
 // monitorBotHeartbeats monitors bot heartbeats in the background
 func (s *botService) monitorBotHeartbeats() {
 	ticker := time.NewTicker(30 * time.Second)

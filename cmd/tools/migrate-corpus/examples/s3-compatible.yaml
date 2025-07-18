@@ -1,0 +1,32 @@
+# S3-compatible storage configuration (e.g., DigitalOcean Spaces, Wasabi)
+type: s3
+s3:
+  # Custom endpoint for S3-compatible service
+  endpoint: s3.wasabisys.com
+  region: us-east-1
+  
+  # Authentication
+  access_key_id: YOUR_ACCESS_KEY
+  secret_access_key: YOUR_SECRET_KEY
+  
+  # Bucket configuration
+  corpus_bucket: pandafuzz-corpus
+  quarantine_bucket: pandafuzz-quarantine
+  backup_bucket: pandafuzz-backup
+  
+  # Connection settings
+  use_ssl: true
+  use_path_style: true  # Required for some S3-compatible services
+  
+  # Performance tuning
+  part_size: 67108864      # 64MB
+  concurrency: 4
+  
+  # Retry configuration
+  max_retries: 3
+  retry_delay: 1s
+
+# Common settings
+max_file_size: 524288000   # 500MB
+enable_dedup: true
+enable_compression: false

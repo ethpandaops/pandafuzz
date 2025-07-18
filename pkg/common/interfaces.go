@@ -28,6 +28,9 @@ type CorpusService interface {
 	GetEvolution(ctx context.Context, campaignID string) ([]*CorpusEvolution, error)
 	SyncCorpus(ctx context.Context, campaignID string, botID string) ([]*CorpusFile, error)
 	ShareCorpus(ctx context.Context, fromCampaign, toCampaign string) error
+	PromoteCrashToCorpus(ctx context.Context, crashID, campaignID string) (*CorpusFile, error)
+	GetCorpusForJob(ctx context.Context, jobID string) ([]*CorpusFile, error)
+	LinkJobCorpus(ctx context.Context, jobID, campaignID string) error
 }
 
 // FileStorage defines the interface for file storage operations
@@ -65,6 +68,65 @@ type JobService interface {
 	GetJobsByStatus(ctx context.Context, status JobStatus) ([]*Job, error)
 }
 
+// ReproducibilityService defines the interface for crash reproducibility management
+type ReproducibilityService interface {
+	// Lifecycle methods
+	Start(ctx context.Context) error
+	Stop() error
+
+	// QueueReproduction adds a crash to the reproduction queue
+	QueueReproduction(ctx context.Context, crashID string, priority int) error
+
+	// QueueBatchReproduction queues multiple crashes for reproduction testing
+	QueueBatchReproduction(ctx context.Context, crashIDs []string, priority int) error
+
+	// GetReproductionStatus gets the current status of a reproduction task
+	GetReproductionStatus(ctx context.Context, crashID string) (*ReproductionRequest, error)
+
+	// RecordReproductionResult records the result of a reproduction attempt
+	RecordReproductionResult(ctx context.Context, result *ReproductionResult) error
+
+	// GetReproductionResults gets all reproduction results for a crash
+	GetReproductionResults(ctx context.Context, crashID string) ([]*ReproductionResult, error)
+
+	// CalculateReproducibilityScore calculates the reproducibility score for a crash
+	CalculateReproducibilityScore(ctx context.Context, crashID string) (float64, error)
+
+	// GetDetailedScore returns the full reproducibility score with all components
+	GetDetailedScore(ctx context.Context, crashID string) (interface{}, error)
+
+	// GetPlatformAnalysis returns platform-specific reproduction analysis
+	GetPlatformAnalysis(ctx context.Context, crashID string) (map[string]interface{}, error)
+
+	// GetTrendAnalysis returns reproduction trend analysis over time
+	GetTrendAnalysis(ctx context.Context, crashID string) (map[string]interface{}, error)
+
+	// VerifyFix triggers verification of a fix for a crash
+	VerifyFix(ctx context.Context, crashID, fixCommit string) error
+
+	// GetQueueStatus returns the current queue status
+	GetQueueStatus() map[string]interface{}
+}
+
+// CrashMinimizerService defines the interface for crash test case minimization
+type CrashMinimizerService interface {
+	// Lifecycle methods
+	Start(ctx context.Context) error
+	Stop() error
+
+	// MinimizeCrash minimizes a crash input using the specified strategy
+	MinimizeCrash(ctx context.Context, crashID string, strategy string) (*MinimizationResult, error)
+
+	// GetMinimizationResult retrieves a previous minimization result
+	GetMinimizationResult(ctx context.Context, resultID string) (*MinimizationResult, error)
+
+	// ListMinimizationResults lists minimization results for a crash
+	ListMinimizationResults(ctx context.Context, crashID string) ([]*MinimizationResult, error)
+
+	// GetBestMinimization returns the best (smallest) minimization for a crash
+	GetBestMinimization(ctx context.Context, crashID string) (*MinimizationResult, error)
+}
+
 // Storage defines the main storage interface (extending the existing one)
 type Storage interface {
 	// Campaign operations
@@ -89,12 +151,25 @@ type Storage interface {
 	// Corpus operations
 	AddCorpusFile(ctx context.Context, cf *CorpusFile) error
 	GetCorpusFiles(ctx context.Context, campaignID string) ([]*CorpusFile, error)
+	GetCorpusFile(ctx context.Context, fileID string) (*CorpusFile, error)
 	GetCorpusFileByHash(ctx context.Context, hash string) (*CorpusFile, error)
+	UpdateCorpusFile(ctx context.Context, fileID string, updates map[string]interface{}) error
+	DeleteCorpusFile(ctx context.Context, fileID string) error
 	UpdateCorpusCoverage(ctx context.Context, id string, coverage, newCoverage int64) error
 	RecordCorpusEvolution(ctx context.Context, ce *CorpusEvolution) error
 	GetCorpusEvolution(ctx context.Context, campaignID string, limit int) ([]*CorpusEvolution, error)
 	GetUnsyncedCorpusFiles(ctx context.Context, campaignID, botID string) ([]*CorpusFile, error)
 	MarkCorpusFilesSynced(ctx context.Context, fileIDs []string, botID string) error
+
+	// Quarantine operations
+	AddQuarantinedFile(ctx context.Context, qf *QuarantinedFile) error
+	GetQuarantinedFile(ctx context.Context, fileID string) (*QuarantinedFile, error)
+	GetQuarantinedFiles(ctx context.Context, campaignID string) ([]*QuarantinedFile, error)
+	UpdateQuarantinedFile(ctx context.Context, id string, updates map[string]interface{}) error
+
+	// Corpus metrics operations
+	GetCorpusFileMetrics(ctx context.Context, fileID string) (*CorpusFileMetrics, error)
+	UpdateCorpusFileMetrics(ctx context.Context, fileID string, metrics *CorpusFileMetrics) error
 
 	// Existing operations (to ensure compatibility)
 	CreateBot(ctx context.Context, bot *Bot) error
@@ -112,6 +187,7 @@ type Storage interface {
 	CreateCrash(ctx context.Context, crash *CrashResult) error
 	GetCrash(ctx context.Context, id string) (*CrashResult, error)
 	ListCrashes(ctx context.Context, jobID string, limit, offset int) ([]*CrashResult, error)
+	GetCrashesByCampaign(ctx context.Context, campaignID string) ([]*CrashResult, error)
 	UpdateCrashWithCampaign(ctx context.Context, crashID, campaignID string) error
 
 	CreateCoverage(ctx context.Context, coverage *CoverageResult) error
@@ -131,4 +207,26 @@ type Storage interface {
 	// Health check
 	Ping(ctx context.Context) error
 	Close() error
+
+	// Reproduction operations
+	CreateReproductionResult(ctx context.Context, result *ReproductionResult) error
+	GetReproductionResults(ctx context.Context, crashID string) ([]*ReproductionResult, error)
+
+	// Minimization operations
+	CreateMinimizationResult(ctx context.Context, result *MinimizationResult) error
+	GetMinimizationResult(ctx context.Context, resultID string) (*MinimizationResult, error)
+	ListMinimizationResults(ctx context.Context, crashID string) ([]*MinimizationResult, error)
+	GetMinimizationStats(ctx context.Context, campaignID string) (map[string]interface{}, error)
+
+	// Corpus collection operations
+	CreateCorpusCollection(ctx context.Context, collection *CorpusCollection) error
+	GetCorpusCollection(ctx context.Context, collectionID string) (*CorpusCollection, error)
+	GetCorpusCollections(ctx context.Context) ([]*CorpusCollection, error)
+	UpdateCorpusCollection(ctx context.Context, collection *CorpusCollection) error
+	DeleteCorpusCollection(ctx context.Context, collectionID string) error
+
+	// Corpus collection file operations
+	AddCorpusCollectionFile(ctx context.Context, file *CorpusCollectionFile) error
+	GetCorpusCollectionFiles(ctx context.Context, collectionID string) ([]*CorpusCollectionFile, error)
+	DeleteCorpusCollectionFile(ctx context.Context, fileID string) error
 }

@@ -17,6 +17,7 @@ type jobService struct {
 	timeoutManager TimeoutManager
 	config         *common.MasterConfig
 	logger         *logrus.Logger
+	corpusService  common.CorpusService
 
 	// Lifecycle management
 	ctx    context.Context
@@ -32,12 +33,14 @@ func NewJobService(
 	timeoutManager TimeoutManager,
 	config *common.MasterConfig,
 	logger *logrus.Logger,
+	corpusService common.CorpusService,
 ) JobService {
 	return &jobService{
 		state:          state,
 		timeoutManager: timeoutManager,
 		config:         config,
 		logger:         logger,
+		corpusService:  corpusService,
 	}
 }
 
@@ -72,17 +75,40 @@ func (s *jobService) CreateJob(ctx context.Context, req CreateJobRequest) (*comm
 		duration = s.config.Timeouts.JobExecution
 	}
 
+	// Handle campaign/corpus linking
+	var campaignID *string
+	var collectionID *string
+	useCampaignCorpus := req.UseCampaignCorpus
+
+	// If a corpus collection is specified
+	if req.CollectionID != "" {
+		collectionID = &req.CollectionID
+	} else if req.CorpusID != "" {
+		// If a standalone corpus is specified, treat it as a campaign
+		campaignID = &req.CorpusID
+		useCampaignCorpus = true
+	} else if req.CampaignID != "" {
+		campaignID = &req.CampaignID
+		// Use campaign corpus if explicitly requested or by default
+		if !req.UseCampaignCorpus {
+			useCampaignCorpus = true // Default to using campaign corpus
+		}
+	}
+
 	job := &common.Job{
-		ID:        jobID,
-		Name:      req.Name,
-		Target:    req.Target,
-		Fuzzer:    req.Fuzzer,
-		Status:    common.JobStatusPending,
-		CreatedAt: now,
-		TimeoutAt: now.Add(duration),
-		WorkDir:   fmt.Sprintf("job_%s", jobID), // Use relative path that bot will resolve
-		Config:    req.Config,
-		Progress:  0, // Initialize progress to 0
+		ID:                jobID,
+		Name:              req.Name,
+		Target:            req.Target,
+		Fuzzer:            req.Fuzzer,
+		Status:            common.JobStatusPending,
+		CreatedAt:         now,
+		TimeoutAt:         now.Add(duration),
+		WorkDir:           fmt.Sprintf("job_%s", jobID), // Use relative path that bot will resolve
+		Config:            req.Config,
+		Progress:          0, // Initialize progress to 0
+		CampaignID:        campaignID,
+		CollectionID:      collectionID,
+		UseCampaignCorpus: useCampaignCorpus,
 	}
 
 	// Save job with context
@@ -90,16 +116,47 @@ func (s *jobService) CreateJob(ctx context.Context, req CreateJobRequest) (*comm
 		return nil, errors.Wrap(errors.ErrorTypeDatabase, "create_job", "Failed to save job", err)
 	}
 
+	// Link job to campaign/corpus if provided
+	linkID := ""
+	if req.CorpusID != "" {
+		linkID = req.CorpusID
+	} else if req.CampaignID != "" {
+		linkID = req.CampaignID
+	}
+
+	if linkID != "" && s.corpusService != nil {
+		if err := s.corpusService.LinkJobCorpus(ctx, jobID, linkID); err != nil {
+			// Log error but don't fail job creation
+			s.logger.WithFields(logrus.Fields{
+				"job_id":    jobID,
+				"link_id":   linkID,
+				"is_corpus": req.CorpusID != "",
+				"error":     err,
+			}).Warn("Failed to link job to campaign/corpus")
+		}
+	}
+
 	// Set job timeout
 	s.timeoutManager.SetJobTimeout(jobID, duration)
 
-	s.logger.WithFields(logrus.Fields{
+	logFields := logrus.Fields{
 		"job_id":   jobID,
 		"job_name": req.Name,
 		"fuzzer":   req.Fuzzer,
 		"target":   req.Target,
 		"duration": duration,
-	}).Info("Job created successfully")
+	}
+	if req.CollectionID != "" {
+		logFields["collection_id"] = req.CollectionID
+		logFields["use_collection"] = true
+	} else if req.CorpusID != "" {
+		logFields["corpus_id"] = req.CorpusID
+		logFields["use_corpus"] = true
+	} else if req.CampaignID != "" {
+		logFields["campaign_id"] = req.CampaignID
+		logFields["use_campaign_corpus"] = useCampaignCorpus
+	}
+	s.logger.WithFields(logFields).Info("Job created successfully")
 
 	return job, nil
 }
@@ -220,6 +277,12 @@ func (s *jobService) AssignJob(ctx context.Context, botID string) (*common.Job, 
 	}).Info("Job assigned to bot")
 
 	return job, nil
+}
+
+// AssignNextJob assigns the next available job to a bot
+func (s *jobService) AssignNextJob(ctx context.Context, botID string) (*common.Job, error) {
+	// This is just an alias for AssignJob for compatibility
+	return s.AssignJob(ctx, botID)
 }
 
 // CompleteJob marks a job as completed
@@ -356,6 +419,40 @@ func (s *jobService) Start(ctx context.Context) error {
 	return nil
 }
 
+// GetJobCorpus retrieves corpus files for a job
+func (s *jobService) GetJobCorpus(ctx context.Context, jobID string) ([]*common.CorpusFile, error) {
+	if jobID == "" {
+		return nil, errors.NewValidationError("get_job_corpus", "Job ID is required")
+	}
+
+	// Verify job exists
+	_, err := s.state.GetJob(jobID)
+	if err != nil {
+		if common.IsNotFoundError(err) {
+			return nil, errors.NewNotFoundError("get_job_corpus", "job")
+		}
+		return nil, errors.Wrap(errors.ErrorTypeDatabase, "get_job_corpus", "Failed to get job", err)
+	}
+
+	// Check if corpus service is available
+	if s.corpusService == nil {
+		return nil, errors.New(errors.ErrorTypeSystem, "get_job_corpus", "Corpus service not available")
+	}
+
+	// Delegate to corpus service
+	corpusFiles, err := s.corpusService.GetCorpusForJob(ctx, jobID)
+	if err != nil {
+		return nil, errors.Wrap(errors.ErrorTypeDatabase, "get_job_corpus", "Failed to get corpus files", err)
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"job_id":     jobID,
+		"file_count": len(corpusFiles),
+	}).Debug("Retrieved corpus files for job")
+
+	return corpusFiles, nil
+}
+
 // Stop stops the job service
 func (s *jobService) Stop() error {
 	if s.cancel != nil {
@@ -367,4 +464,95 @@ func (s *jobService) Stop() error {
 
 	s.logger.Info("Job service stopped")
 	return nil
+}
+
+// StreamLogs streams job logs
+func (s *jobService) StreamLogs(ctx context.Context, jobID string) (<-chan string, error) {
+	if jobID == "" {
+		return nil, errors.NewValidationError("stream_logs", "Job ID is required")
+	}
+
+	// Create a channel for streaming logs
+	logsChan := make(chan string, 100)
+
+	// TODO: Implement actual log streaming from storage or log files
+	// For now, return a channel that closes immediately
+	close(logsChan)
+
+	return logsChan, nil
+}
+
+// GetLogs retrieves job logs
+func (s *jobService) GetLogs(ctx context.Context, jobID string) ([]string, error) {
+	if jobID == "" {
+		return nil, errors.NewValidationError("get_logs", "Job ID is required")
+	}
+
+	// TODO: Implement actual log retrieval from storage
+	// For now, return empty logs
+	return []string{}, nil
+}
+
+// GetJobStats retrieves statistics for a job
+func (s *jobService) GetJobStats(ctx context.Context, jobID string) (*JobStats, error) {
+	if jobID == "" {
+		return nil, errors.NewValidationError("get_job_stats", "Job ID is required")
+	}
+
+	// Get job details
+	job, err := s.GetJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get crashes for this job
+	crashes, err := s.GetJobCrashes(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get corpus files
+	corpusFiles, err := s.GetJobCorpus(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Calculate statistics
+	stats := &JobStats{
+		JobID:         jobID,
+		CrashesFound:  len(crashes),
+		UniqueCrashes: len(crashes), // TODO: Implement proper deduplication
+		CorpusSize:    len(corpusFiles),
+		StartTime:     job.CreatedAt,
+	}
+
+	if job.StartedAt != nil {
+		stats.StartTime = *job.StartedAt
+	}
+
+	if job.CompletedAt != nil {
+		stats.EndTime = job.CompletedAt
+		stats.Duration = stats.EndTime.Sub(stats.StartTime)
+	} else if job.Status == common.JobStatusRunning {
+		stats.Duration = time.Since(stats.StartTime)
+	}
+
+	// TODO: Get actual coverage and execution metrics from fuzzer
+	stats.CoveragePercent = 0.0
+	stats.ExecutionsTotal = 0
+	stats.ExecutionsPerSec = 0.0
+
+	return stats, nil
+}
+
+// GetJobCrashes retrieves crashes for a job
+func (s *jobService) GetJobCrashes(ctx context.Context, jobID string) ([]*common.CrashResult, error) {
+	if jobID == "" {
+		return nil, errors.NewValidationError("get_job_crashes", "Job ID is required")
+	}
+
+	// TODO: Implement crash retrieval
+	// This requires access to the storage interface which is not exposed through StateStore
+	// For now, return empty list
+	return []*common.CrashResult{}, nil
 }

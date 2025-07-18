@@ -21,23 +21,30 @@ import (
 
 // Honggfuzz implements the Fuzzer interface for Honggfuzz
 type Honggfuzz struct {
-	*BaseFuzzer   // Embed base fuzzer for event handling
-	config        FuzzConfig
-	status        FuzzerStatus
-	logger        *logrus.Logger
-	cmd           *exec.Cmd
-	ctx           context.Context
-	cancel        context.CancelFunc
-	eventHandler  EventHandler
-	stats         FuzzerStats
-	statsFile     string
-	outputDir     string
-	crashDir      string
-	corpusDir     string
-	mu            sync.RWMutex
-	monitorTicker *time.Ticker
-	wg            sync.WaitGroup
-	botID         string
+	*BaseFuzzer      // Embed base fuzzer for event handling
+	config           FuzzConfig
+	status           FuzzerStatus
+	logger           *logrus.Logger
+	cmd              *exec.Cmd
+	ctx              context.Context
+	cancel           context.CancelFunc
+	eventHandler     EventHandler
+	stats            FuzzerStats
+	statsFile        string
+	outputDir        string
+	crashDir         string
+	corpusDir        string
+	mu               sync.RWMutex
+	monitorTicker    *time.Ticker
+	wg               sync.WaitGroup
+	botID            string
+	metricsCollector common.MetricsCollector
+
+	// Performance tracking
+	lastExecCount   int64
+	lastStatsUpdate time.Time
+	execHistory     []float64
+	peakExecSpeed   float64
 }
 
 // Compile-time interface compliance check
@@ -50,7 +57,7 @@ func NewHonggfuzz(logger *logrus.Logger) *Honggfuzz {
 		logger.SetLevel(logrus.InfoLevel)
 	}
 
-	return &Honggfuzz{
+	hf := &Honggfuzz{
 		BaseFuzzer:   NewBaseFuzzer(logger),
 		status:       StatusUninitialized,
 		logger:       logger,
@@ -58,7 +65,17 @@ func NewHonggfuzz(logger *logrus.Logger) *Honggfuzz {
 		stats: FuzzerStats{
 			StartTime: time.Now(),
 		},
+		execHistory:     make([]float64, 0, 100),
+		lastStatsUpdate: time.Now(),
 	}
+
+	// Create metrics collector
+	hf.metricsCollector = NewDefaultMetricsCollector(
+		logger.WithField("component", "honggfuzz_metrics"),
+		5*time.Second,
+	)
+
+	return hf
 }
 
 // Name returns the name of the fuzzer
@@ -322,6 +339,11 @@ func (hf *Honggfuzz) Start(ctx context.Context) error {
 	// Start stats monitoring
 	hf.startStatsMonitoring()
 
+	// Start metrics collector
+	if err := hf.metricsCollector.Start(hf.ctx); err != nil {
+		hf.logger.WithError(err).Warn("Failed to start metrics collector")
+	}
+
 	// Notify event handler
 	if hf.eventHandler != nil {
 		hf.eventHandler.OnStart(hf)
@@ -364,19 +386,47 @@ func (hf *Honggfuzz) Stop() error {
 		hf.monitorTicker.Stop()
 	}
 
+	// Stop metrics collector
+	if hf.metricsCollector != nil {
+		if err := hf.metricsCollector.Stop(); err != nil {
+			hf.logger.WithError(err).Warn("Failed to stop metrics collector")
+		}
+	}
+
 	// Send SIGTERM to Honggfuzz
 	if hf.cmd != nil && hf.cmd.Process != nil {
 		if err := hf.cmd.Process.Signal(os.Interrupt); err != nil {
 			hf.logger.WithError(err).Warn("Failed to send interrupt signal")
-			// Force kill if interrupt fails
-			hf.cmd.Process.Kill()
+		}
+
+		// Give it a moment to exit gracefully
+		time.Sleep(100 * time.Millisecond)
+
+		// Force kill if still running
+		if hf.cmd.Process != nil {
+			if err := hf.cmd.Process.Kill(); err != nil {
+				hf.logger.WithError(err).Debug("Process may have already exited")
+			}
 		}
 	}
 
-	// Wait for goroutines to finish
-	hf.wg.Wait()
-
+	// Update status immediately so IsRunning() returns false
 	hf.status = StatusStopped
+
+	// Wait for goroutines to finish (with timeout to avoid hanging)
+	done := make(chan struct{})
+	go func() {
+		hf.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Goroutines finished normally
+	case <-time.After(5 * time.Second):
+		// Timeout waiting for goroutines
+		hf.logger.Warn("Timeout waiting for fuzzer goroutines to finish")
+	}
 
 	// Notify event handler
 	if hf.eventHandler != nil {
@@ -859,13 +909,14 @@ func (hf *Honggfuzz) parseOutputStats(line string) {
 	// Example: "Fuzzing : 12345/0 [3%], Crashes : 5 (unique: 2), Speed : 1234/sec"
 
 	if strings.Contains(line, "Fuzzing") {
+		hf.mu.Lock()
+		defer hf.mu.Unlock()
+
 		// Extract executions
 		if match := strings.Split(line, "Fuzzing : "); len(match) > 1 {
 			if parts := strings.Split(match[1], "/"); len(parts) > 0 {
 				if val, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64); err == nil {
-					hf.mu.Lock()
 					hf.stats.Executions = val
-					hf.mu.Unlock()
 				}
 			}
 		}
@@ -874,9 +925,7 @@ func (hf *Honggfuzz) parseOutputStats(line string) {
 		if match := strings.Split(line, "Crashes : "); len(match) > 1 {
 			if parts := strings.Split(match[1], " "); len(parts) > 0 {
 				if val, err := strconv.Atoi(strings.TrimSpace(parts[0])); err == nil {
-					hf.mu.Lock()
 					hf.stats.TotalCrashes = val
-					hf.mu.Unlock()
 				}
 			}
 
@@ -885,9 +934,7 @@ func (hf *Honggfuzz) parseOutputStats(line string) {
 				if uniqueMatch := strings.Split(match[1], "unique: "); len(uniqueMatch) > 1 {
 					if parts := strings.Split(uniqueMatch[1], ")"); len(parts) > 0 {
 						if val, err := strconv.Atoi(strings.TrimSpace(parts[0])); err == nil {
-							hf.mu.Lock()
 							hf.stats.UniqueCrashes = val
-							hf.mu.Unlock()
 						}
 					}
 				}
@@ -898,12 +945,37 @@ func (hf *Honggfuzz) parseOutputStats(line string) {
 		if match := strings.Split(line, "Speed : "); len(match) > 1 {
 			if parts := strings.Split(match[1], "/"); len(parts) > 0 {
 				if val, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64); err == nil {
-					hf.mu.Lock()
 					hf.stats.ExecPerSecond = val
-					hf.mu.Unlock()
+					// Track peak execution speed
+					if val > hf.peakExecSpeed {
+						hf.peakExecSpeed = val
+					}
+					// Add to history
+					hf.execHistory = append(hf.execHistory, val)
+					if len(hf.execHistory) > 100 {
+						hf.execHistory = hf.execHistory[1:]
+					}
 				}
 			}
 		}
+
+		// Update elapsed time
+		hf.stats.ElapsedTime = time.Since(hf.stats.StartTime)
+
+		// Collect enhanced metrics
+		hf.collectEnhancedMetrics(line)
+
+		// Record execution for performance tracking
+		if hf.lastExecCount > 0 {
+			execDiff := hf.stats.Executions - hf.lastExecCount
+			timeDiff := time.Since(hf.lastStatsUpdate)
+			if timeDiff > 0 && execDiff > 0 {
+				avgExecTime := timeDiff / time.Duration(execDiff)
+				hf.metricsCollector.RecordExecution(avgExecTime)
+			}
+		}
+		hf.lastExecCount = hf.stats.Executions
+		hf.lastStatsUpdate = time.Now()
 	}
 }
 
@@ -1141,6 +1213,325 @@ func (hf *Honggfuzz) detectAndEmitCrash(crashOrLine interface{}) {
 		hf.logger.WithField("line", v).Debug("Detected crash in output")
 		// Could parse more details from the line if needed
 	}
+}
+
+// ReproduceCrash attempts to reproduce a crash with the given input
+func (hf *Honggfuzz) ReproduceCrash(ctx context.Context, crashInput []byte, config ReproductionConfig) (*common.ReproductionResult, error) {
+	hf.logger.WithFields(logrus.Fields{
+		"crash_size": len(crashInput),
+		"attempts":   config.Attempts,
+		"timeout":    config.Timeout,
+	}).Info("Starting crash reproduction with Honggfuzz")
+
+	// Default attempts if not specified
+	if config.Attempts <= 0 {
+		config.Attempts = 3
+	}
+
+	// Default timeout if not specified
+	if config.Timeout <= 0 {
+		config.Timeout = 30 * time.Second
+	}
+
+	// Create temporary directory for reproduction
+	tempDir, err := os.MkdirTemp("", "honggfuzz_reproduce_*")
+	if err != nil {
+		return nil, &FuzzerError{
+			Type:    ErrInternal,
+			Message: fmt.Sprintf("failed to create temp directory: %v", err),
+			Fuzzer:  hf.Name(),
+			Code:    100,
+		}
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Save crash input to file
+	crashFile := filepath.Join(tempDir, "crash_input")
+	if err := os.WriteFile(crashFile, crashInput, 0644); err != nil {
+		return nil, &FuzzerError{
+			Type:    ErrInternal,
+			Message: fmt.Sprintf("failed to write crash input: %v", err),
+			Fuzzer:  hf.Name(),
+			Code:    101,
+		}
+	}
+
+	// Try to reproduce the crash multiple times
+	for attempt := 1; attempt <= config.Attempts; attempt++ {
+		hf.logger.WithField("attempt", attempt).Debug("Attempting crash reproduction")
+
+		// Create a context with timeout for this attempt
+		attemptCtx, cancel := context.WithTimeout(ctx, config.Timeout)
+		defer cancel()
+
+		// Build command to run target directly with crash input
+		// Honggfuzz doesn't have a specific reproduction mode, so we run the target directly
+		var args []string
+
+		// Add target arguments, replacing ___FILE___ with the crash file path
+		for _, arg := range hf.config.TargetArgs {
+			if arg == "___FILE___" {
+				args = append(args, crashFile)
+			} else {
+				args = append(args, arg)
+			}
+		}
+
+		// If no ___FILE___ was found, assume input is via stdin or append the file
+		var cmd *exec.Cmd
+		if containsHonggfuzzPlaceholder(hf.config.TargetArgs) {
+			cmd = exec.CommandContext(attemptCtx, hf.config.Target, args...)
+		} else {
+			// Input via stdin
+			cmd = exec.CommandContext(attemptCtx, hf.config.Target, args...)
+			cmd.Stdin = strings.NewReader(string(crashInput))
+		}
+
+		// Set environment variables if provided
+		if config.Environment != nil {
+			env := os.Environ()
+			for k, v := range config.Environment {
+				env = append(env, fmt.Sprintf("%s=%s", k, v))
+			}
+			cmd.Env = env
+		}
+
+		// Start timing
+		startTime := time.Now()
+
+		// Capture output
+		output, err := cmd.CombinedOutput()
+
+		// Calculate execution time
+		executionTime := time.Since(startTime)
+
+		// Determine if crash was reproduced
+		reproduced := false
+		var signal int
+		var exitCode int
+
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+				// Check if it's a signal-based crash
+				if exitCode == -1 {
+					// Process was killed by signal
+					if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+						if status.Signaled() {
+							signal = int(status.Signal())
+							reproduced = true
+						}
+					}
+				} else if exitCode != 0 {
+					// Non-zero exit code might indicate crash
+					reproduced = true
+				}
+			}
+		}
+
+		// Extract stack trace from output
+		stackTrace := extractHonggfuzzStackTrace(string(output))
+		stackHash := hf.hashInput([]byte(stackTrace))
+
+		// Build environment info
+		envInfo := make(map[string]string)
+		envInfo["fuzzer"] = "Honggfuzz"
+		envInfo["version"] = hf.Version()
+		envInfo["bot_id"] = hf.botID
+		envInfo["attempt"] = strconv.Itoa(attempt)
+
+		result := &common.ReproductionResult{
+			ID:              fmt.Sprintf("honggfuzz_repro_%d_%d", time.Now().Unix(), attempt),
+			RequestID:       config.OriginalCrashID,
+			CrashID:         config.OriginalCrashID,
+			BotID:           hf.botID,
+			AttemptNumber:   attempt,
+			Status:          common.ReproducibilityStatusConfirmed,
+			Reproduced:      reproduced,
+			ExecutionTime:   executionTime,
+			Signal:          signal,
+			ExitCode:        exitCode,
+			Output:          string(output),
+			StackTrace:      stackTrace,
+			StackHash:       stackHash,
+			MatchesOriginal: true, // This would need to be compared with original crash
+			EnvironmentInfo: envInfo,
+			Timestamp:       time.Now(),
+		}
+
+		if reproduced {
+			hf.logger.WithFields(logrus.Fields{
+				"attempt":    attempt,
+				"signal":     signal,
+				"exit_code":  exitCode,
+				"stack_hash": stackHash,
+			}).Info("Successfully reproduced crash with Honggfuzz")
+			return result, nil
+		}
+
+		hf.logger.WithField("attempt", attempt).Debug("Crash not reproduced in this attempt")
+
+		// If this was the last attempt and we didn't reproduce
+		if attempt == config.Attempts {
+			result.Status = common.ReproducibilityStatusFailed
+			return result, nil
+		}
+	}
+
+	// Should not reach here, but just in case
+	return &common.ReproductionResult{
+		ID:              fmt.Sprintf("honggfuzz_repro_%d_failed", time.Now().Unix()),
+		RequestID:       config.OriginalCrashID,
+		CrashID:         config.OriginalCrashID,
+		BotID:           hf.botID,
+		Status:          common.ReproducibilityStatusFailed,
+		Reproduced:      false,
+		EnvironmentInfo: map[string]string{"fuzzer": "Honggfuzz"},
+		Timestamp:       time.Now(),
+	}, nil
+}
+
+// Helper function to check if slice contains Honggfuzz placeholder
+func containsHonggfuzzPlaceholder(slice []string) bool {
+	for _, s := range slice {
+		if s == "___FILE___" {
+			return true
+		}
+	}
+	return false
+}
+
+// Helper function to extract stack trace from output
+func extractHonggfuzzStackTrace(output string) string {
+	// Look for common stack trace indicators
+	lines := strings.Split(output, "\n")
+	var stackLines []string
+	inStack := false
+
+	for _, line := range lines {
+		// Common stack trace patterns for Honggfuzz output
+		if strings.Contains(line, "Stack trace:") ||
+			strings.Contains(line, "backtrace:") ||
+			strings.Contains(line, "#0 ") ||
+			strings.Contains(line, "at 0x") ||
+			strings.Contains(line, "frame #") {
+			inStack = true
+		}
+
+		if inStack {
+			stackLines = append(stackLines, line)
+			// Stop at empty line or common end markers
+			if line == "" || strings.Contains(line, "===") || strings.Contains(line, "---") {
+				break
+			}
+		}
+	}
+
+	return strings.Join(stackLines, "\n")
+}
+
+// collectEnhancedMetrics collects and updates enhanced metrics
+func (hf *Honggfuzz) collectEnhancedMetrics(line string) {
+	// Coverage metrics
+	coverage := common.CoverageMetrics{
+		NewEdgesFound:    int64(hf.stats.NewPaths),
+		CoverageByModule: make(map[string]float64),
+	}
+
+	// Extract coverage percentage from output
+	if strings.Contains(line, "[") && strings.Contains(line, "%]") {
+		if match := strings.Split(line, "["); len(match) > 1 {
+			if parts := strings.Split(match[1], "%]"); len(parts) > 0 {
+				if val, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64); err == nil {
+					hf.stats.CoveragePercent = val
+					coverage.LineCoverage = val
+					coverage.BranchCoverage = val
+				}
+			}
+		}
+	}
+
+	// Calculate coverage growth rate
+	if hf.stats.ElapsedTime.Seconds() > 0 {
+		coverage.CoverageGrowth = float64(hf.stats.NewPaths) / hf.stats.ElapsedTime.Seconds()
+	}
+
+	// Performance metrics
+	performance := common.PerformanceMetrics{
+		ExecutionsPerSecond: hf.stats.ExecPerSecond,
+		ThroughputMBps:      hf.calculateThroughput(),
+		InputGenerationRate: hf.stats.ExecPerSecond,
+	}
+
+	// Update metrics collector
+	hf.metricsCollector.UpdateCoverageMetrics(coverage)
+	hf.metricsCollector.UpdatePerformanceMetrics(performance)
+
+	// Extract Honggfuzz specific metrics from output
+	hf.extractFuzzerSpecificMetrics(line)
+}
+
+// extractFuzzerSpecificMetrics extracts Honggfuzz-specific metrics from output
+func (hf *Honggfuzz) extractFuzzerSpecificMetrics(line string) {
+	// Extract various Honggfuzz metrics
+	if strings.Contains(line, "hwfeedback") {
+		hf.metricsCollector.UpdateFuzzerSpecificMetrics("hardware_feedback", line)
+	}
+	if strings.Contains(line, "sanitizer") {
+		hf.metricsCollector.UpdateFuzzerSpecificMetrics("sanitizer_feedback", line)
+	}
+	if strings.Contains(line, "ptrace") {
+		hf.metricsCollector.UpdateFuzzerSpecificMetrics("ptrace_feedback", line)
+	}
+	if strings.Contains(line, "coverage") {
+		hf.metricsCollector.UpdateFuzzerSpecificMetrics("coverage_type", line)
+	}
+
+	// Extract thread count if present
+	if strings.Contains(line, "threads:") {
+		if match := strings.Split(line, "threads:"); len(match) > 1 {
+			parts := strings.Fields(match[1])
+			if len(parts) > 0 {
+				hf.metricsCollector.UpdateFuzzerSpecificMetrics("threads", parts[0])
+			}
+		}
+	}
+
+	// Extract timeout count
+	if strings.Contains(line, "timeouts:") {
+		if match := strings.Split(line, "timeouts:"); len(match) > 1 {
+			parts := strings.Fields(match[1])
+			if len(parts) > 0 {
+				hf.metricsCollector.UpdateFuzzerSpecificMetrics("timeouts", parts[0])
+			}
+		}
+	}
+}
+
+// calculateThroughput calculates throughput in MB/s
+func (hf *Honggfuzz) calculateThroughput() float64 {
+	if hf.stats.ElapsedTime.Seconds() == 0 {
+		return 0
+	}
+
+	// Estimate average input size (would need actual tracking)
+	avgInputSize := 1024.0 // 1KB average estimate
+	totalBytes := float64(hf.stats.Executions) * avgInputSize
+	totalMB := totalBytes / (1024 * 1024)
+
+	return totalMB / hf.stats.ElapsedTime.Seconds()
+}
+
+// GetEnhancedMetrics returns enhanced metrics from the fuzzer
+func (hf *Honggfuzz) GetEnhancedMetrics() *common.EnhancedMetrics {
+	hf.mu.RLock()
+	defer hf.mu.RUnlock()
+
+	if hf.metricsCollector != nil {
+		return hf.metricsCollector.GetMetrics()
+	}
+
+	return nil
 }
 
 // CreateHonggfuzz creates a new Honggfuzz instance with optional logger

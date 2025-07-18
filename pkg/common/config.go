@@ -9,6 +9,8 @@ import (
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
+
+	"github.com/ethpandaops/pandafuzz/pkg/config"
 )
 
 // Config represents the complete PandaFuzz configuration
@@ -19,16 +21,16 @@ type Config struct {
 
 // MasterConfig holds all master node configuration
 type MasterConfig struct {
-	Server     ServerConfig     `yaml:"server" json:"server" validate:"required"`
-	Database   DatabaseConfig   `yaml:"database" json:"database" validate:"required"`
-	Storage    StorageConfig    `yaml:"storage" json:"storage" validate:"required"`
-	Timeouts   TimeoutConfig    `yaml:"timeouts" json:"timeouts" validate:"required"`
-	Limits     ResourceLimits   `yaml:"limits" json:"limits" validate:"required"`
-	Retry      RetryConfigs     `yaml:"retry" json:"retry"`
-	Circuit    CircuitConfig    `yaml:"circuit" json:"circuit"`
-	Monitoring MonitoringConfig `yaml:"monitoring" json:"monitoring"`
-	Security   SecurityConfig   `yaml:"security" json:"security"`
-	Logging    LoggingConfig    `yaml:"logging" json:"logging"`
+	Server     ServerConfig         `yaml:"server" json:"server" validate:"required"`
+	Database   DatabaseConfig       `yaml:"database" json:"database" validate:"required"`
+	Storage    config.StorageConfig `yaml:"storage" json:"storage" validate:"required"`
+	Timeouts   TimeoutConfig        `yaml:"timeouts" json:"timeouts" validate:"required"`
+	Limits     ResourceLimits       `yaml:"limits" json:"limits" validate:"required"`
+	Retry      RetryConfigs         `yaml:"retry" json:"retry"`
+	Circuit    CircuitConfig        `yaml:"circuit" json:"circuit"`
+	Monitoring MonitoringConfig     `yaml:"monitoring" json:"monitoring"`
+	Security   SecurityConfig       `yaml:"security" json:"security"`
+	Logging    LoggingConfig        `yaml:"logging" json:"logging"`
 }
 
 // BotConfig holds all bot agent configuration
@@ -60,17 +62,6 @@ type ServerConfig struct {
 	CORSOrigins    []string      `yaml:"cors_origins" json:"cors_origins"`
 	RateLimitRPS   int           `yaml:"rate_limit_rps" json:"rate_limit_rps"`
 	RateLimitBurst int           `yaml:"rate_limit_burst" json:"rate_limit_burst"`
-}
-
-// StorageConfig holds storage path configuration
-type StorageConfig struct {
-	BasePath    string `yaml:"base_path" json:"base_path" validate:"required"`
-	CorpusPath  string `yaml:"corpus_path" json:"corpus_path"`
-	CrashPath   string `yaml:"crash_path" json:"crash_path"`
-	LogPath     string `yaml:"log_path" json:"log_path"`
-	BackupPath  string `yaml:"backup_path" json:"backup_path"`
-	TempPath    string `yaml:"temp_path" json:"temp_path"`
-	Permissions int    `yaml:"permissions" json:"permissions"`
 }
 
 // TimeoutConfig holds all timeout configurations
@@ -263,7 +254,7 @@ func (cm *ConfigManager) LoadBotConfig(configPath string) (*BotConfig, error) {
 // setDefaults sets default values for configuration
 func (cm *ConfigManager) setDefaults(config *Config) {
 	if config.Master != nil {
-		cm.setMasterDefaults(config.Master)
+		cm.SetMasterDefaults(config.Master)
 	}
 
 	if config.Bot != nil {
@@ -271,8 +262,8 @@ func (cm *ConfigManager) setDefaults(config *Config) {
 	}
 }
 
-// setMasterDefaults sets default values for master configuration
-func (cm *ConfigManager) setMasterDefaults(master *MasterConfig) {
+// SetMasterDefaults sets default values for master configuration
+func (cm *ConfigManager) SetMasterDefaults(master *MasterConfig) {
 	// Server defaults
 	if master.Server.Host == "" {
 		master.Server.Host = "0.0.0.0"
@@ -314,26 +305,70 @@ func (cm *ConfigManager) setMasterDefaults(master *MasterConfig) {
 	master.Database.SetDefaults()
 
 	// Storage defaults
-	if master.Storage.BasePath == "" {
-		master.Storage.BasePath = "/storage"
+	if master.Storage.Type == "" {
+		master.Storage.Type = config.StorageTypeFilesystem
 	}
-	if master.Storage.CorpusPath == "" {
-		master.Storage.CorpusPath = filepath.Join(master.Storage.BasePath, "corpus")
+
+	// Set defaults based on storage type
+	switch master.Storage.Type {
+	case config.StorageTypeFilesystem:
+		if master.Storage.Filesystem.BasePath == "" {
+			master.Storage.Filesystem.BasePath = "./storage/corpus"
+		}
+	case config.StorageTypeMinIO:
+		if master.Storage.MinIO.Endpoint == "" {
+			master.Storage.MinIO.Endpoint = "localhost:9000"
+		}
+		if master.Storage.MinIO.CorpusBucket == "" {
+			master.Storage.MinIO.CorpusBucket = "corpus"
+		}
+		if master.Storage.MinIO.QuarantineBucket == "" {
+			master.Storage.MinIO.QuarantineBucket = "quarantine"
+		}
+		if master.Storage.MinIO.BackupBucket == "" {
+			master.Storage.MinIO.BackupBucket = "backup"
+		}
+		// Default MinIO settings
+		if master.Storage.MinIO.PartSize == 0 {
+			master.Storage.MinIO.PartSize = 64 * 1024 * 1024 // 64MB
+		}
+		if master.Storage.MinIO.Concurrency == 0 {
+			master.Storage.MinIO.Concurrency = 4
+		}
+		if master.Storage.MinIO.MaxRetries == 0 {
+			master.Storage.MinIO.MaxRetries = 3
+		}
+		if master.Storage.MinIO.RetryDelay == 0 {
+			master.Storage.MinIO.RetryDelay = 1 * time.Second
+		}
+	case config.StorageTypeS3:
+		if master.Storage.S3.CorpusBucket == "" {
+			master.Storage.S3.CorpusBucket = "pandafuzz-corpus"
+		}
+		if master.Storage.S3.QuarantineBucket == "" {
+			master.Storage.S3.QuarantineBucket = "pandafuzz-quarantine"
+		}
+		if master.Storage.S3.BackupBucket == "" {
+			master.Storage.S3.BackupBucket = "pandafuzz-backup"
+		}
+		// Default S3 settings
+		if master.Storage.S3.PartSize == 0 {
+			master.Storage.S3.PartSize = 64 * 1024 * 1024 // 64MB
+		}
+		if master.Storage.S3.Concurrency == 0 {
+			master.Storage.S3.Concurrency = 4
+		}
+		if master.Storage.S3.MaxRetries == 0 {
+			master.Storage.S3.MaxRetries = 3
+		}
+		if master.Storage.S3.RetryDelay == 0 {
+			master.Storage.S3.RetryDelay = 1 * time.Second
+		}
 	}
-	if master.Storage.CrashPath == "" {
-		master.Storage.CrashPath = filepath.Join(master.Storage.BasePath, "crashes")
-	}
-	if master.Storage.LogPath == "" {
-		master.Storage.LogPath = filepath.Join(master.Storage.BasePath, "logs")
-	}
-	if master.Storage.BackupPath == "" {
-		master.Storage.BackupPath = filepath.Join(master.Storage.BasePath, "backups")
-	}
-	if master.Storage.TempPath == "" {
-		master.Storage.TempPath = filepath.Join(master.Storage.BasePath, "temp")
-	}
-	if master.Storage.Permissions == 0 {
-		master.Storage.Permissions = 0755
+
+	// Common storage defaults
+	if master.Storage.MaxFileSize == 0 {
+		master.Storage.MaxFileSize = 100 * 1024 * 1024 // 100MB
 	}
 
 	// Timeout defaults
@@ -542,9 +577,9 @@ func (cm *ConfigManager) validateMasterConfig(master *MasterConfig) error {
 		return fmt.Errorf("database config validation failed: %w", err)
 	}
 
-	// Validate storage paths
-	if master.Storage.BasePath == "" {
-		return fmt.Errorf("storage base path is required")
+	// Validate storage configuration
+	if err := master.Storage.Validate(); err != nil {
+		return fmt.Errorf("storage config validation failed: %w", err)
 	}
 
 	// Validate timeouts
