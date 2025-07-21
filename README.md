@@ -15,14 +15,12 @@ docker-compose up -d
 # Access the web dashboard at http://localhost:8080
 
 # Run the test script to verify AFL++ and LibFuzzer integration
-./scripts/run-afl-simple-test.sh
+./scripts/run-test-with-corpus.sh
 
 # Or test individual fuzzers
-./scripts/run-afl-simple-test.sh afl++      # Test only AFL++
-./scripts/run-afl-simple-test.sh libfuzzer  # Test only LibFuzzer
+./scripts/run-test-with-corpus.sh afl++      # Test only AFL++
+./scripts/run-test-with-corpus.sh libfuzzer  # Test only LibFuzzer
 
-# Create a custom fuzzing job (see examples/)
-cd examples && ./create-fuzzing-job.sh
 ```
 
 ### Docker Compose Example
