@@ -631,11 +631,8 @@ func (rje *RealJobExecutor) executeLibFuzzerJob(execution *RealJobExecution) (bo
 	duration := job.Config.Duration
 	if duration == 0 {
 		duration = 60 * time.Second
-	} else if duration < time.Second {
-		// If duration looks like it's in seconds (less than 1 second as time.Duration),
-		// it was likely unmarshaled as an integer number of seconds
-		duration = time.Duration(duration) * time.Second
 	}
+	// job.Config.Duration is already a time.Duration, no conversion needed
 	args = append(args, fmt.Sprintf("-max_total_time=%d", int(duration.Seconds())))
 
 	// Set artifact prefix to ensure crashes are written to the work directory

@@ -97,7 +97,7 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 		fmt.Fprintf(logFile, "%s Starting fuzzer job %s\n", time.Now().Format(time.RFC3339), job.ID)
 		fmt.Fprintf(logFile, "Fuzzer: %s\n", job.Fuzzer)
 		fmt.Fprintf(logFile, "Target: %s\n", job.Target)
-		fmt.Fprintf(logFile, "Duration: %d seconds\n", job.Config.Duration)
+		fmt.Fprintf(logFile, "Duration: %v\n", job.Config.Duration)
 		fmt.Fprintf(logFile, "WorkDir: %s\n", workDir)
 		fmt.Fprintf(logFile, "\n")
 		logWriter = logFile
@@ -117,8 +117,8 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 	}
 
 	// Configure fuzzer
-	// Set default timeout if not specified (AFL++ needs a reasonable timeout)
-	fuzzerTimeout := time.Duration(job.Config.Timeout) * time.Second
+	// job.Config.Timeout is already a time.Duration, no need to multiply by time.Second
+	fuzzerTimeout := job.Config.Timeout
 	if fuzzerTimeout <= 0 {
 		fuzzerTimeout = 10 * time.Second // Default 10 second timeout for AFL++
 	}
@@ -127,7 +127,7 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 		JobID:           job.ID, // Set the actual job ID
 		Target:          targetPath,
 		WorkDirectory:   workDir,
-		Duration:        time.Duration(job.Config.Duration) * time.Second,
+		Duration:        job.Config.Duration,
 		Timeout:         fuzzerTimeout,
 		MemoryLimit:     job.Config.MemoryLimit,
 		SeedDirectory:   filepath.Join(workDir, "input"),
@@ -174,7 +174,7 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 	jobTimeout := time.Hour // Default to 1 hour if not specified
 	if job.Config.Duration > 0 {
 		// Add some buffer time for fuzzer to start/stop gracefully
-		jobTimeout = time.Duration(job.Config.Duration)*time.Second + 30*time.Second
+		jobTimeout = job.Config.Duration + 30*time.Second
 	}
 
 	ctx, cancel = context.WithTimeout(context.Background(), jobTimeout)
@@ -183,8 +183,8 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 	fje.logger.WithFields(logrus.Fields{
 		"job_id":           job.ID,
 		"job_timeout":      jobTimeout,
-		"duration":         time.Duration(job.Config.Duration) * time.Second,
-		"per_test_timeout": time.Duration(job.Config.Timeout) * time.Second,
+		"duration":         job.Config.Duration,
+		"per_test_timeout": job.Config.Timeout,
 	}).Info("Created execution context with job timeout")
 
 	// Start event handler goroutine
@@ -315,7 +315,7 @@ exitLoop:
 	}
 
 	if timedOut {
-		msg := fmt.Sprintf("%s execution completed (timeout reached after %d seconds)", job.Fuzzer, job.Config.Duration)
+		msg := fmt.Sprintf("%s execution completed (timeout reached after %v)", job.Fuzzer, job.Config.Duration)
 		fje.logger.WithField("job_id", job.ID).Info("Returning from ExecuteJob with timeout")
 		return true, msg, nil
 	}
