@@ -14,8 +14,13 @@ docker-compose up -d
 
 # Access the web dashboard at http://localhost:8080
 
-# Create a fuzzing job with crash detection (see examples/)
-cd examples && ./create-fuzzing-job.sh
+# Run the test script to verify AFL++ and LibFuzzer integration
+./scripts/run-test-with-corpus.sh
+
+# Or test individual fuzzers
+./scripts/run-test-with-corpus.sh afl++      # Test only AFL++
+./scripts/run-test-with-corpus.sh libfuzzer  # Test only LibFuzzer
+
 ```
 
 ### Docker Compose Example
