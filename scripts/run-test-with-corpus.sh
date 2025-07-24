@@ -18,10 +18,10 @@ NC='\033[0m' # No Color
 # Check for command line arguments
 FUZZER_ARG="${1:-both}"  # Default to running both tests
 
-if [[ "$FUZZER_ARG" != "afl++" && "$FUZZER_ARG" != "libfuzzer" && "$FUZZER_ARG" != "both" ]]; then
+if [[ "$FUZZER_ARG" != "afl++" && "$FUZZER_ARG" != "libfuzzer" && "$FUZZER_ARG" != "honggfuzz" && "$FUZZER_ARG" != "both" ]]; then
     echo -e "${RED}Invalid fuzzer type: $FUZZER_ARG${NC}"
-    echo "Usage: $0 [afl++|libfuzzer|both]"
-    echo "  Default: both (runs AFL++ then LibFuzzer)"
+    echo "Usage: $0 [afl++|libfuzzer|honggfuzz|both]"
+    echo "  Default: both (runs AFL++, LibFuzzer, then HongFuzz)"
     exit 1
 fi
 
@@ -362,6 +362,69 @@ EOF
         TEST_BINARY="$TEMP_BUILD_DIR/libfuzzer_test"
         echo -e "${GREEN}✓ Created LibFuzzer test binary: ${TEST_BINARY}${NC}"
     fi
+    
+    if [[ "$FUZZER_TYPE" == "honggfuzz" ]]; then
+        # Create HongFuzz test program
+        cat > honggfuzz_test.c << 'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <stdint.h>
+
+int main(int argc, char **argv) {
+    unsigned char buf[256] = {0};
+    ssize_t n = 0;
+
+    // HongFuzz passes filename as argument
+    if (argc > 1) {
+        fprintf(stderr, "Reading from file: %s\n", argv[1]);
+        int fd = open(argv[1], O_RDONLY);
+        if (fd >= 0) {
+            n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            fprintf(stderr, "Read %ld bytes\n", n);
+        } else {
+            fprintf(stderr, "Failed to open file\n");
+            return 1;
+        }
+    } else {
+        // Fallback to stdin for testing
+        n = read(0, buf, sizeof(buf) - 1);
+    }
+
+    if (n > 0) {
+        // Check for crash patterns
+        if (n >= 5 && memcmp(buf, "HFUZZ", 5) == 0) {
+            fprintf(stderr, "HFUZZ pattern detected - triggering abort\n");
+            abort();
+        }
+        if (n >= 5 && memcmp(buf, "CRASH", 5) == 0) {
+            fprintf(stderr, "CRASH pattern detected - triggering segfault\n");
+            *((int*)0) = 42;
+        }
+        if (n >= 5 && memcmp(buf, "ABORT", 5) == 0) {
+            fprintf(stderr, "ABORT pattern detected\n");
+            abort();
+        }
+        if (n >= 4 && memcmp(buf, "SEGV", 4) == 0) {
+            fprintf(stderr, "SEGV pattern detected\n");
+            raise(11);
+        }
+    }
+
+    return 0;
+}
+EOF
+        
+        # Compile the HongFuzz test program
+        echo -e "${YELLOW}Compiling HongFuzz test binary...${NC}"
+        gcc -g -O0 -o honggfuzz_test honggfuzz_test.c
+        echo -e "${GREEN}✓ Created HongFuzz test binary${NC}"
+        
+        TEST_BINARY="$TEMP_BUILD_DIR/honggfuzz_test"
+    fi
 
     # Step 2: Create corpus collection
     echo -e "\n${YELLOW}Step 2: Creating corpus collection...${NC}"
@@ -416,6 +479,9 @@ EOF
     if [[ "$FUZZER_TYPE" == "libfuzzer" ]]; then
         echo "DIV" > "$TEMP_DIR/seed_13_div.txt"
         echo -e "${GREEN}✓ Created 13 seed files (including 4 that trigger crashes)${NC}"
+    elif [[ "$FUZZER_TYPE" == "honggfuzz" ]]; then
+        echo "HFUZZ" > "$TEMP_DIR/seed_13_hfuzz.txt"
+        echo -e "${GREEN}✓ Created 13 seed files (including 4 that trigger crashes)${NC}"
     else
         echo -e "${GREEN}✓ Created 12 seed files (including 3 that trigger crashes)${NC}"
     fi
@@ -439,6 +505,21 @@ EOF
           -F "files=@$TEMP_DIR/seed_11_segv.txt" \
           -F "files=@$TEMP_DIR/seed_12_fuzz_pattern.txt" \
           -F "files=@$TEMP_DIR/seed_13_div.txt")
+    elif [[ "$FUZZER_TYPE" == "honggfuzz" ]]; then
+        UPLOAD_RESPONSE=$(curl -s -X POST "${API_BASE}/corpus/collections/${COLLECTION_ID}/upload" \
+          -F "files=@$TEMP_DIR/seed_01_normal.txt" \
+          -F "files=@$TEMP_DIR/seed_02_hello.txt" \
+          -F "files=@$TEMP_DIR/seed_03_world.txt" \
+          -F "files=@$TEMP_DIR/seed_04_fuzz.txt" \
+          -F "files=@$TEMP_DIR/seed_05_aaaa.txt" \
+          -F "files=@$TEMP_DIR/seed_06_numbers.txt" \
+          -F "files=@$TEMP_DIR/seed_07_afl.txt" \
+          -F "files=@$TEMP_DIR/seed_08_single.txt" \
+          -F "files=@$TEMP_DIR/seed_09_crash.txt" \
+          -F "files=@$TEMP_DIR/seed_10_abort.txt" \
+          -F "files=@$TEMP_DIR/seed_11_segv.txt" \
+          -F "files=@$TEMP_DIR/seed_12_fuzz_pattern.txt" \
+          -F "files=@$TEMP_DIR/seed_13_hfuzz.txt")
     else
         UPLOAD_RESPONSE=$(curl -s -X POST "${API_BASE}/corpus/collections/${COLLECTION_ID}/upload" \
           -F "files=@$TEMP_DIR/seed_01_normal.txt" \
@@ -565,6 +646,21 @@ EOF
             FIRST_UPDATE=false
         fi
         
+        # Check if job is running for HongFuzz corpus debugging
+        if [[ "$FUZZER_TYPE" == "honggfuzz" ]] && [[ "$STATUS" == "assigned" || "$STATUS" == "running" ]] && [ $ELAPSED -eq 10 ]; then
+            echo -e "\n\n${YELLOW}Checking corpus download...${NC}"
+            # Look for corpus download in bot logs
+            docker logs pandafuzz-bot-1 2>&1 | grep -A5 -B5 "$JOB_ID" | grep -i "collection\|corpus\|download" | tail -5 || echo "  No corpus download logs found"
+
+            # Check job directory
+            JOB_DIR=$(docker exec pandafuzz-bot-1 find /app/work/jobs -name "*$JOB_ID*" -type d 2>/dev/null | head -1)
+            if [ -n "$JOB_DIR" ]; then
+                echo -e "\n${YELLOW}Job directory contents:${NC}"
+                docker exec pandafuzz-bot-1 ls -la "$JOB_DIR/input/" 2>/dev/null | head -10 || echo "  No input directory found"
+            fi
+            echo ""
+        fi
+        
         # Check if job completed or failed
         if [[ "$STATUS" == "completed" ]] || [[ "$STATUS" == "failed" ]] || [[ "$STATUS" == "cancelled" ]]; then
             if [ "$STATUS" != "$LAST_STATUS" ]; then
@@ -628,6 +724,30 @@ except Exception as e:
             echo "$JOB_LOGS" | jq -r '.logs[] | "\(.timestamp) [\(.level)] \(.message)"' 2>/dev/null | tail -20 || echo "$JOB_LOGS" | tail -20
         fi
     fi
+    
+    # For HongFuzz, check detailed logs and output
+    if [[ "$FUZZER_TYPE" == "honggfuzz" ]]; then
+        echo -e "\n${YELLOW}Checking HongFuzz job logs...${NC}"
+        # Give time for logs to be written
+        sleep 5
+
+        # Check log file in container
+        echo -e "${YELLOW}Checking log file in bot container...${NC}"
+        JOB_DIR="/app/work/jobs/job_$JOB_ID"
+        echo "Job directory: $JOB_DIR"
+        echo -e "\n${YELLOW}Log file contents:${NC}"
+        docker exec pandafuzz-bot-1 cat "$JOB_DIR/job.log" 2>/dev/null || echo "No log file found"
+
+        echo -e "\n${YELLOW}HongFuzz output directory:${NC}"
+        docker exec pandafuzz-bot-1 ls -la "$JOB_DIR/output/honggfuzz_output/" 2>/dev/null || echo "No output directory"
+
+        echo -e "\n${YELLOW}HongFuzz stats file:${NC}"
+        docker exec pandafuzz-bot-1 cat "$JOB_DIR/output/honggfuzz_output/honggfuzz.stats" 2>/dev/null || echo "No stats file found"
+
+        # Check if HongFuzz process is running
+        echo -e "\n${YELLOW}HongFuzz process:${NC}"
+        docker exec pandafuzz-bot-1 ps aux | grep honggfuzz | grep -v grep || echo "HongFuzz process not found"
+    fi
 
     # Step 8: Check for crashes
     echo -e "\n${YELLOW}Step 8: Checking for crashes...${NC}"
@@ -679,15 +799,21 @@ except Exception as e:
     echo -e "  docker exec -it pandafuzz-bot-1 /bin/sh"
     echo -e "  cd /app/work/jobs/job_${JOB_ID}"
     echo -e "  ls -la"
-    echo -e "  ./target_binary -help=1  # Check if binary responds correctly"
-    echo -e "  ls -la input/  # Check corpus files"
+    if [[ "$FUZZER_TYPE" == "honggfuzz" ]]; then
+        echo -e "  ls -la input/  # Check downloaded corpus files"
+        echo -e "  ls -la output/honggfuzz_output/corpus/  # Check generated corpus"
+        echo -e "  ls -la output/honggfuzz_output/crashes/  # Check crashes"
+    else
+        echo -e "  ./target_binary -help=1  # Check if binary responds correctly"
+        echo -e "  ls -la input/  # Check corpus files"
+    fi
 
     echo -e "\n${BLUE}=== $FUZZER_TYPE Test Complete ===${NC}"
 }
 
 # Main execution
 if [[ "$FUZZER_ARG" == "both" ]]; then
-    echo -e "${BLUE}Running both AFL++ and LibFuzzer tests sequentially${NC}"
+    echo -e "${BLUE}Running AFL++, LibFuzzer, and HongFuzz tests sequentially${NC}"
     
     # Run AFL++ test
     if run_fuzzer_test "afl++"; then
@@ -697,13 +823,23 @@ if [[ "$FUZZER_ARG" == "both" ]]; then
     fi
     
     # Add a separator
-    echo -e "\n${BLUE}$==========================================${NC}"
+    echo -e "\n${BLUE}==========================================${NC}"
     
     # Run LibFuzzer test
     if run_fuzzer_test "libfuzzer"; then
         echo -e "\n${GREEN}✓ LibFuzzer test completed successfully${NC}"
     else
         echo -e "\n${RED}✗ LibFuzzer test failed${NC}"
+    fi
+    
+    # Add a separator
+    echo -e "\n${BLUE}==========================================${NC}"
+    
+    # Run HongFuzz test
+    if run_fuzzer_test "honggfuzz"; then
+        echo -e "\n${GREEN}✓ HongFuzz test completed successfully${NC}"
+    else
+        echo -e "\n${RED}✗ HongFuzz test failed${NC}"
     fi
     
     echo -e "\n${BLUE}=== All Tests Complete ===${NC}"

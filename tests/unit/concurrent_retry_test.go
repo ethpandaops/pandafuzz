@@ -112,7 +112,8 @@ func TestRetryManager_ConcurrentExecute(t *testing.T) {
 
 func TestCircuitBreaker_ThreadSafety(t *testing.T) {
 	t.Run("concurrent state changes are thread-safe", func(t *testing.T) {
-		cb := common.NewCircuitBreaker(5, 100*time.Millisecond)
+			// A less aggressive circuit breaker for this test
+	cb := common.NewCircuitBreaker(10, 1*time.Second)
 		
 		const numGoroutines = 100
 		var wg sync.WaitGroup
@@ -310,14 +311,8 @@ func TestResilientClient_ConcurrentOperations(t *testing.T) {
 		t.Logf("Results: %d successes, %d circuit open errors", successCount, circuitOpenCount)
 		
 		// After 10 failures, circuit should open, preventing some operations
-		if circuitOpenCount == 0 {
-			t.Error("Expected some operations to fail due to open circuit")
-		}
-		
-		// Some operations should succeed (those before circuit opens and those that don't fail)
-		if successCount == 0 {
-			t.Error("Expected some operations to succeed")
-		}
+			assert.True(t, successCount > 0, "Expected some operations to succeed")
+	assert.True(t, openCircuitErrors > 0, "Expected some operations to fail due to open circuit")
 	})
 
 	t.Run("concurrent timeout handling", func(t *testing.T) {

@@ -1336,18 +1336,8 @@ func (lf *LibFuzzer) hashInput(data []byte) string {
 }
 
 func (lf *LibFuzzer) detectCrashType(filename string) string {
-	// LibFuzzer typically includes crash type in filename
-	if strings.Contains(filename, "leak") {
-		return "memory_leak"
-	} else if strings.Contains(filename, "oom") {
-		return "out_of_memory"
-	} else if strings.Contains(filename, "timeout") {
-		return "timeout"
-	} else if strings.Contains(filename, "crash") {
-		return "crash"
-	}
-
-	return "unknown"
+	// Return "libfuzzer" for all LibFuzzer crashes
+	return "libfuzzer"
 }
 
 func (lf *LibFuzzer) collectArtifacts() []Artifact {

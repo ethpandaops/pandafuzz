@@ -396,3 +396,14 @@ const (
 	WSMessageTypeJobStatus      WSMessageType = "job_status"
 	WSMessageTypeMetrics        WSMessageType = "metrics"
 )
+
+// HongFuzzReport represents the parsed report data from HongFuzz
+type HongFuzzReport struct {
+	Iterations     uint64  `json:"iterations"`      // Total iterations performed
+	Crashes        uint64  `json:"crashes"`         // Total crashes found
+	Timeouts       uint64  `json:"timeouts"`        // Total timeouts encountered
+	Coverage       float64 `json:"coverage"`        // Coverage percentage
+	Speed          float64 `json:"speed"`           // Executions per second
+	GuardCoverage  uint64  `json:"guard_coverage"`  // Guard coverage count
+	BranchCoverage uint64  `json:"branch_coverage"` // Branch coverage count
+}

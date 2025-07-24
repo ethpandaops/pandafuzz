@@ -359,9 +359,18 @@ func (s *Server) handleDeleteCorpusFile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Sanitize filename
-	filename = filepath.Base(filename)
-	filename = strings.ReplaceAll(filename, "..", "")
+	// Sanitize filename to prevent path traversal
+	// Note: this logic is based on the security fix suggestion in docs/development.md
+	cleanPath := filepath.Clean(filepath.Join("/", filename))
+	if !strings.HasPrefix(cleanPath, "/") {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid filename", nil)
+		return
+	}
+	filename = filepath.Base(cleanPath)
+	if filename == "." || filename == "/" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid filename", nil)
+		return
+	}
 
 	// Get file path
 	filePath := filepath.Join(job.WorkDir, "corpus", filename)

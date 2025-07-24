@@ -13,7 +13,7 @@ bot:
   capabilities:
     - "aflplusplus"         # AFL++ fuzzer support
     - "libfuzzer"           # LibFuzzer support
-    # - "honggfuzz"         # Honggfuzz support (if available)
+    - "honggfuzz"         # Honggfuzz support (if available)
     # - "custom"            # Custom fuzzer support
   
   # Fuzzing configuration

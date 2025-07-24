@@ -54,7 +54,7 @@ var _ Fuzzer = (*Honggfuzz)(nil)
 func NewHonggfuzz(logger *logrus.Logger) *Honggfuzz {
 	if logger == nil {
 		logger = logrus.New()
-		logger.SetLevel(logrus.InfoLevel)
+		logger.SetLevel(logrus.DebugLevel) // Ensure debug level for Honggfuzz logs
 	}
 
 	hf := &Honggfuzz{
@@ -147,6 +147,8 @@ func (hf *Honggfuzz) Configure(config FuzzConfig) error {
 	}
 
 	hf.config = config
+
+	// Note: Persistent mode detection removed as it should be configured via HongFuzzConfig
 
 	// Set up directories
 	hf.outputDir = filepath.Join(config.OutputDirectory, "honggfuzz_output")
@@ -292,7 +294,31 @@ func (hf *Honggfuzz) Start(ctx context.Context) error {
 
 	// Build Honggfuzz command
 	args := hf.buildHonggfuzzArgs()
+
+	// Log the full command for debugging
+	hf.logger.WithFields(logrus.Fields{
+		"command": "honggfuzz",
+		"args":    args,
+		"workdir": hf.outputDir,
+	}).Info("Starting HongFuzz with command")
+
 	hf.cmd = exec.CommandContext(hf.ctx, "honggfuzz", args...)
+	hf.cmd.Dir = hf.outputDir
+
+	// Set environment variables for network fuzzing if configured
+	if hongFuzzConfig, ok := hf.config.FuzzerOptions["honggfuzz_config"].(*HongFuzzConfig); ok {
+		if hongFuzzConfig.NetworkPort > 0 {
+			env := os.Environ()
+			env = append(env, fmt.Sprintf("HFND_TCP_PORT=%d", hongFuzzConfig.NetworkPort))
+			hf.cmd.Env = env
+		}
+	} else if hongFuzzConfig, ok := hf.config.FuzzerOptions["honggfuzz_config"].(HongFuzzConfig); ok {
+		if hongFuzzConfig.NetworkPort > 0 {
+			env := os.Environ()
+			env = append(env, fmt.Sprintf("HFND_TCP_PORT=%d", hongFuzzConfig.NetworkPort))
+			hf.cmd.Env = env
+		}
+	}
 
 	// Set up pipes for output
 	stdout, err := hf.cmd.StdoutPipe()
@@ -331,6 +357,21 @@ func (hf *Honggfuzz) Start(ctx context.Context) error {
 	hf.status = StatusRunning
 	hf.stats.StartTime = time.Now()
 
+	// Write initial command info to OutputWriter
+	if hf.config.OutputWriter != nil {
+		timestamp := time.Now().Format("15:04:05")
+		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Starting HongFuzz\n", timestamp, "info", "fuzzer")
+		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Command: honggfuzz %s\n", timestamp, "info", "fuzzer", strings.Join(args, " "))
+		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Working directory: %s\n", timestamp, "info", "fuzzer", hf.outputDir)
+	}
+
+	// Set environment to ensure output is not buffered
+	if hf.cmd.Env == nil {
+		hf.cmd.Env = os.Environ()
+	}
+	// Force line buffering for better output capture
+	hf.cmd.Env = append(hf.cmd.Env, "LIBC_FATAL_STDERR_=1")
+
 	// Start output monitoring
 	hf.wg.Add(2)
 	go hf.monitorOutput(stdout, "stdout")
@@ -343,6 +384,12 @@ func (hf *Honggfuzz) Start(ctx context.Context) error {
 	if err := hf.metricsCollector.Start(hf.ctx); err != nil {
 		hf.logger.WithError(err).Warn("Failed to start metrics collector")
 	}
+
+	// Give HongFuzz a moment to start and create stats file
+	go func() {
+		time.Sleep(2 * time.Second)
+		hf.monitorStatsFile() // Initial stats read
+	}()
 
 	// Notify event handler
 	if hf.eventHandler != nil {
@@ -614,84 +661,173 @@ func (hf *Honggfuzz) GetCrashes() ([]*common.CrashResult, error) {
 	crashes := make([]*common.CrashResult, 0)
 
 	hf.logger.WithFields(logrus.Fields{
-		"crash_dir": hf.crashDir,
-		"job_id":    hf.config.Target,
-	}).Info("Scanning Honggfuzz crash directory for new crashes")
+		"corpus_dir": hf.corpusDir,
+		"crash_dir":  hf.crashDir,
+		"job_id":     hf.config.Target,
+		"status":     hf.status,
+		"bot_id":     hf.botID,
+	}).Info("Scanning Honggfuzz directories for crashes")
 
-	// Read crashes from Honggfuzz crash directory
+	// HongFuzz primarily saves crashes to the corpus directory (workspace)
+	// Check corpus directory first as it's the primary location
+	if _, err := os.Stat(hf.corpusDir); err == nil {
+		files, err := os.ReadDir(hf.corpusDir)
+		if err != nil {
+			hf.logger.WithError(err).Warn("Failed to read corpus directory")
+		} else {
+			hf.logger.WithFields(logrus.Fields{
+				"corpus_dir": hf.corpusDir,
+				"file_count": len(files),
+			}).Debug("Scanning corpus directory for crash files")
+
+			for _, file := range files {
+				fileName := file.Name()
+
+				// Log every file for debugging
+				hf.logger.WithFields(logrus.Fields{
+					"file_name":       fileName,
+					"is_dir":          file.IsDir(),
+					"starts_with_dot": strings.HasPrefix(fileName, "."),
+				}).Debug("Checking file in corpus directory")
+
+				if file.IsDir() || strings.HasPrefix(fileName, ".") {
+					continue
+				}
+
+				// Check if this is a crash file (contains SIGABRT, SIGSEGV, etc.)
+				// HongFuzz crash files have pattern: SIGNAL.PC.address.STACK.hash.CODE.code.ADDR.addr.INSTR.[UNKNOWN].timestamp.fuzz
+				if strings.Contains(fileName, "SIG") || strings.Contains(fileName, "crash") {
+					hf.logger.WithFields(logrus.Fields{
+						"file_name":      fileName,
+						"contains_sig":   strings.Contains(fileName, "SIG"),
+						"contains_crash": strings.Contains(fileName, "crash"),
+					}).Info("File name matches crash pattern")
+					crashPath := filepath.Join(hf.corpusDir, file.Name())
+
+					hf.logger.WithFields(logrus.Fields{
+						"crash_file": file.Name(),
+						"crash_path": crashPath,
+					}).Info("Found HongFuzz crash file in corpus directory")
+
+					crashData, err := os.ReadFile(crashPath)
+					if err != nil {
+						hf.logger.WithError(err).WithField("file", file.Name()).Warn("Failed to read crash file from corpus")
+						continue
+					}
+
+					info, err := file.Info()
+					if err != nil {
+						continue
+					}
+
+					crashType := hf.detectCrashType(file.Name())
+					crashHash := hf.hashInput(crashData)
+
+					crash := &common.CrashResult{
+						ID:          file.Name(),
+						JobID:       hf.config.Target,
+						BotID:       hf.botID,
+						Timestamp:   info.ModTime(),
+						FilePath:    crashPath,
+						Size:        int64(len(crashData)),
+						Hash:        crashHash,
+						Type:        crashType,
+						Input:       crashData,
+						InputBase64: base64.StdEncoding.EncodeToString(crashData),
+					}
+
+					hf.logger.WithFields(logrus.Fields{
+						"crash_id":   crash.ID,
+						"crash_type": crashType,
+						"crash_hash": crashHash,
+						"crash_size": crash.Size,
+						"source":     "corpus",
+					}).Info("Detected HongFuzz crash")
+
+					crashes = append(crashes, crash)
+				}
+			}
+		}
+	} else {
+		hf.logger.WithFields(logrus.Fields{
+			"corpus_dir": hf.corpusDir,
+			"error":      err,
+		}).Debug("HongFuzz corpus directory does not exist yet")
+	}
+
+	// Also check the crashes directory (though HongFuzz rarely uses it)
 	if _, err := os.Stat(hf.crashDir); err == nil {
 		files, err := os.ReadDir(hf.crashDir)
 		if err != nil {
-			return nil, err
-		}
-
-		hf.logger.WithFields(logrus.Fields{
-			"crash_dir":  hf.crashDir,
-			"file_count": len(files),
-		}).Debug("Found files in Honggfuzz crash directory")
-
-		for _, file := range files {
-			if file.IsDir() || strings.HasPrefix(file.Name(), ".") {
-				continue
-			}
-
-			crashPath := filepath.Join(hf.crashDir, file.Name())
-
+			hf.logger.WithError(err).Warn("Failed to read crash directory")
+		} else if len(files) > 0 {
 			hf.logger.WithFields(logrus.Fields{
-				"crash_file": file.Name(),
-				"crash_path": crashPath,
-			}).Info("Found Honggfuzz crash file")
+				"crash_dir":  hf.crashDir,
+				"file_count": len(files),
+			}).Debug("Checking crash directory for additional crashes")
 
-			crashData, err := os.ReadFile(crashPath)
-			if err != nil {
-				hf.logger.WithError(err).WithField("file", file.Name()).Warn("Failed to read crash file")
-				continue
+			for _, file := range files {
+				if file.IsDir() || strings.HasPrefix(file.Name(), ".") {
+					continue
+				}
+
+				crashPath := filepath.Join(hf.crashDir, file.Name())
+
+				crashData, err := os.ReadFile(crashPath)
+				if err != nil {
+					hf.logger.WithError(err).WithField("file", file.Name()).Warn("Failed to read crash file")
+					continue
+				}
+
+				info, err := file.Info()
+				if err != nil {
+					continue
+				}
+
+				crashType := hf.detectCrashType(file.Name())
+				crashHash := hf.hashInput(crashData)
+
+				// Check if we already have this crash from corpus
+				duplicate := false
+				for _, existing := range crashes {
+					if existing.Hash == crashHash {
+						duplicate = true
+						break
+					}
+				}
+
+				if !duplicate {
+					crash := &common.CrashResult{
+						ID:          file.Name(),
+						JobID:       hf.config.Target,
+						BotID:       hf.botID,
+						Timestamp:   info.ModTime(),
+						FilePath:    crashPath,
+						Size:        int64(len(crashData)),
+						Hash:        crashHash,
+						Type:        crashType,
+						Input:       crashData,
+						InputBase64: base64.StdEncoding.EncodeToString(crashData),
+					}
+
+					hf.logger.WithFields(logrus.Fields{
+						"crash_id":   crash.ID,
+						"crash_type": crashType,
+						"crash_hash": crashHash,
+						"source":     "crashes",
+					}).Info("Found additional crash in crashes directory")
+
+					crashes = append(crashes, crash)
+				}
 			}
-
-			info, err := file.Info()
-			if err != nil {
-				continue
-			}
-
-			crashType := hf.detectCrashType(file.Name())
-			crashHash := hf.hashInput(crashData)
-
-			crash := &common.CrashResult{
-				ID:          file.Name(),
-				JobID:       hf.config.Target,
-				BotID:       hf.botID,
-				Timestamp:   info.ModTime(),
-				FilePath:    filepath.Join(hf.crashDir, file.Name()),
-				Size:        int64(len(crashData)),
-				Hash:        crashHash,
-				Type:        crashType,
-				Input:       crashData,                                    // Include the crash input data
-				InputBase64: base64.StdEncoding.EncodeToString(crashData), // Base64 encode the crash data
-			}
-
-			hf.logger.WithFields(logrus.Fields{
-				"crash_id":   crash.ID,
-				"crash_type": crashType,
-				"crash_hash": crashHash,
-				"crash_size": crash.Size,
-				"job_id":     crash.JobID,
-				"bot_id":     crash.BotID,
-				"file_name":  file.Name(),
-			}).Info("Detected Honggfuzz crash")
-
-			crashes = append(crashes, crash)
 		}
-
-		hf.logger.WithFields(logrus.Fields{
-			"crash_count": len(crashes),
-			"job_id":      hf.config.Target,
-		}).Info("Completed Honggfuzz crash scan")
-	} else {
-		hf.logger.WithFields(logrus.Fields{
-			"crash_dir": hf.crashDir,
-			"error":     err,
-		}).Debug("Honggfuzz crash directory does not exist yet")
 	}
+
+	hf.logger.WithFields(logrus.Fields{
+		"total_crashes": len(crashes),
+		"corpus_dir":    hf.corpusDir,
+		"job_id":        hf.config.Target,
+	}).Info("Completed HongFuzz crash scan")
 
 	return crashes, nil
 }
@@ -822,10 +958,8 @@ func (hf *Honggfuzz) buildHonggfuzzArgs() []string {
 	// Workspace directory (for corpus)
 	args = append(args, "--workspace", hf.corpusDir)
 
-	// Number of threads (default to CPU count)
-	if threads, ok := hf.config.FuzzerOptions["threads"].(int); ok {
-		args = append(args, "--threads", strconv.Itoa(threads))
-	}
+	// Number of threads - set to 1 for controlled resource usage
+	args = append(args, "-n", "1")
 
 	// Memory limit
 	args = append(args, "--rlimit_rss", fmt.Sprintf("%d", hf.config.MemoryLimit))
@@ -841,6 +975,60 @@ func (hf *Honggfuzz) buildHonggfuzzArgs() []string {
 	if hf.config.Dictionary != "" {
 		args = append(args, "--dict", hf.config.Dictionary)
 	}
+
+	// Extract HongFuzzConfig from FuzzerOptions
+	var hongFuzzConfig *HongFuzzConfig
+	if hongFuzzOpts, ok := hf.config.FuzzerOptions["honggfuzz_config"].(HongFuzzConfig); ok {
+		hongFuzzConfig = &hongFuzzOpts
+	} else if hongFuzzOpts, ok := hf.config.FuzzerOptions["honggfuzz_config"].(*HongFuzzConfig); ok {
+		hongFuzzConfig = hongFuzzOpts
+	}
+
+	// Apply HongFuzz-specific configuration if available
+	if hongFuzzConfig != nil {
+		// Persistent mode support
+		if hongFuzzConfig.PersistentMode {
+			args = append(args, "-P")
+		}
+
+		// Instrumentation support
+		if hongFuzzConfig.UseInstrumentation {
+			args = append(args, "-z")
+		}
+
+		// Crash verification
+		if hongFuzzConfig.VerifyCrashes {
+			args = append(args, "-V")
+		}
+
+		// Hardware feedback flags
+		switch hongFuzzConfig.HardwareFeedback {
+		case "instructions":
+			args = append(args, "--linux_perf_instr")
+		case "branches":
+			args = append(args, "--linux_perf_branch")
+		case "edges":
+			args = append(args, "--linux_perf_bts_edge")
+		}
+
+		// Report file
+		if hongFuzzConfig.ReportFile != "" {
+			args = append(args, "-R", hongFuzzConfig.ReportFile)
+		}
+
+		// Mutations per run
+		if hongFuzzConfig.MutationsPerRun > 0 {
+			args = append(args, "--mutations_per_run", strconv.Itoa(hongFuzzConfig.MutationsPerRun))
+		}
+
+		// Max file size
+		if hongFuzzConfig.MaxFileSize > 0 {
+			args = append(args, "--max_file_size", strconv.Itoa(hongFuzzConfig.MaxFileSize))
+		}
+	}
+
+	// Don't exit upon crash - we want to continue fuzzing to find more crashes
+	// args = append(args, "--exit_upon_crash")
 
 	// Enable sanitizers if available
 	if sanitizers, ok := hf.config.FuzzerOptions["sanitizers"].(bool); ok && sanitizers {
@@ -889,18 +1077,70 @@ func (hf *Honggfuzz) buildHonggfuzzArgs() []string {
 func (hf *Honggfuzz) monitorOutput(pipe io.Reader, name string) {
 	defer hf.wg.Done()
 
+	// Write that we started monitoring
+	if hf.config.OutputWriter != nil {
+		timestamp := time.Now().Format("15:04:05")
+		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Started monitoring %s\n", timestamp, "info", "fuzzer", name)
+	}
+
 	scanner := bufio.NewScanner(pipe)
+	// Increase buffer size for scanner to handle long lines
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
 	for scanner.Scan() {
 		line := scanner.Text()
-		hf.logger.WithField("stream", name).Debug(line)
+
+		// Write to output file if available
+		if hf.config.OutputWriter != nil {
+			timestamp := time.Now().Format("15:04:05")
+			_, err := fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] [%s] %s\n", timestamp, "info", name, "honggfuzz", line)
+			if err != nil {
+				hf.logger.WithError(err).Error("Failed to write to OutputWriter")
+			}
+		}
+
+		// Log output - use Info for both streams to ensure we see everything
+		hf.logger.WithFields(logrus.Fields{
+			"stream": name,
+			"line":   line,
+		}).Info("HongFuzz output")
 
 		// Parse Honggfuzz output for important information
-		if strings.Contains(line, "Crash") || strings.Contains(line, "crash") {
+		// Look for specific crash indicators, not just any line containing "crash"
+		// HongFuzz reports crashes in format: "Crashes: X (unique: Y, blacklist: Z, verified: W)"
+		if strings.Contains(line, "Crashes:") && strings.Contains(line, "(unique:") {
+			// Extract crash count from line
+			if parts := strings.Split(line, "Crashes:"); len(parts) > 1 {
+				if crashParts := strings.Fields(parts[1]); len(crashParts) > 0 {
+					if crashCount, err := strconv.Atoi(crashParts[0]); err == nil && crashCount > 0 {
+						hf.detectAndEmitCrash(line)
+					}
+				}
+			}
+		}
+		// Also detect specific crash messages from HongFuzz
+		if strings.Contains(line, "Crash found") || strings.Contains(line, "Found issue!") {
 			hf.detectAndEmitCrash(line)
 		}
 
 		// Parse stats from output
 		hf.parseOutputStats(line)
+	}
+
+	// Check for scanner errors
+	if err := scanner.Err(); err != nil {
+		hf.logger.WithError(err).WithField("stream", name).Error("Scanner error in monitorOutput")
+		if hf.config.OutputWriter != nil {
+			timestamp := time.Now().Format("15:04:05")
+			fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Scanner error on %s: %v\n", timestamp, "error", "fuzzer", name, err)
+		}
+	}
+
+	// Log that monitoring ended
+	if hf.config.OutputWriter != nil {
+		timestamp := time.Now().Format("15:04:05")
+		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Stopped monitoring %s\n", timestamp, "info", "fuzzer", name)
 	}
 }
 
@@ -982,14 +1222,43 @@ func (hf *Honggfuzz) parseOutputStats(line string) {
 func (hf *Honggfuzz) monitorProcess() {
 	defer hf.wg.Done()
 
+	// Log process start
+	if hf.config.OutputWriter != nil {
+		timestamp := time.Now().Format("15:04:05")
+		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Monitoring HongFuzz process\n", timestamp, "info", "fuzzer")
+	}
+
 	// Wait for process to exit
 	err := hf.cmd.Wait()
+
+	// Log process exit
+	if hf.config.OutputWriter != nil {
+		timestamp := time.Now().Format("15:04:05")
+		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] HongFuzz process exited\n", timestamp, "info", "fuzzer")
+		if err != nil {
+			fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Exit error: %v\n", timestamp, "error", "fuzzer", err)
+		}
+	}
 
 	hf.mu.Lock()
 	defer hf.mu.Unlock()
 
 	if err != nil {
-		hf.logger.WithError(err).Warn("Honggfuzz process exited with error")
+		exitCode := -1
+		if hf.cmd.ProcessState != nil {
+			exitCode = hf.cmd.ProcessState.ExitCode()
+		}
+		hf.logger.WithError(err).WithFields(logrus.Fields{
+			"exit_code": exitCode,
+			"pid":       hf.cmd.Process.Pid,
+		}).Warn("Honggfuzz process exited with error")
+
+		// Write exit info to OutputWriter
+		if hf.config.OutputWriter != nil {
+			timestamp := time.Now().Format("15:04:05")
+			fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Process exit code: %d\n", timestamp, "error", "fuzzer", exitCode)
+		}
+
 		hf.status = StatusError
 		if hf.eventHandler != nil {
 			hf.eventHandler.OnError(hf, err)
@@ -997,6 +1266,21 @@ func (hf *Honggfuzz) monitorProcess() {
 		// Emit error event through base fuzzer
 		hf.EmitErrorEvent(hf.ctx, hf.config.Target, err)
 	} else {
+		exitCode := 0
+		if hf.cmd.ProcessState != nil {
+			exitCode = hf.cmd.ProcessState.ExitCode()
+		}
+		hf.logger.WithFields(logrus.Fields{
+			"exit_code": exitCode,
+			"pid":       hf.cmd.Process.Pid,
+		}).Info("Honggfuzz process exited normally")
+
+		// Write exit info to OutputWriter
+		if hf.config.OutputWriter != nil {
+			timestamp := time.Now().Format("15:04:05")
+			fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Process exited normally with code: %d\n", timestamp, "info", "fuzzer", exitCode)
+		}
+
 		hf.status = StatusCompleted
 	}
 
@@ -1035,18 +1319,115 @@ func (hf *Honggfuzz) startStatsMonitoring() {
 				return
 			case <-hf.monitorTicker.C:
 				hf.updateStats()
+				// Also monitor the stats file and write to OutputWriter
+				hf.monitorStatsFile()
 			}
 		}
 	}()
 }
 
+// monitorStatsFile reads the HongFuzz stats file and writes it to the OutputWriter
+func (hf *Honggfuzz) monitorStatsFile() {
+	if hf.config.OutputWriter == nil {
+		return
+	}
+
+	// Read the stats file
+	data, err := os.ReadFile(hf.statsFile)
+	if err != nil {
+		// File might not exist yet early in fuzzing
+		return
+	}
+
+	// Only write if the file has content
+	if len(data) == 0 {
+		return
+	}
+
+	// Write stats file content to OutputWriter
+	timestamp := time.Now().Format("15:04:05")
+
+	// Add a separator for clarity
+	fmt.Fprintf(hf.config.OutputWriter, "\n[%s] [%s] [%s] === HongFuzz Stats Update ===\n", timestamp, "info", "stats")
+
+	// Parse and format key stats from the file
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		// Format important lines
+		if strings.Contains(line, "Summary iterations:") {
+			// Parse summary line for key metrics
+			fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] %s\n", timestamp, "info", "stats", line)
+		} else if strings.Contains(line, "Crash:") || strings.Contains(line, "Entering phase") || strings.Contains(line, "Launched") {
+			// Include important status updates
+			fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] %s\n", timestamp, "info", "stats", line)
+		} else if strings.Contains(line, "Start time:") {
+			// Include start info
+			fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] %s\n", timestamp, "info", "stats", line)
+		}
+	}
+
+	// Also check for the latest line which often contains the current stats
+	if len(lines) > 0 {
+		lastLine := lines[len(lines)-1]
+		if lastLine != "" && strings.Contains(lastLine, "speed:") {
+			fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Current: %s\n", timestamp, "info", "stats", lastLine)
+		}
+	}
+}
+
 func (hf *Honggfuzz) updateStats() {
-	// Read Honggfuzz stats file if available
-	if data, err := os.ReadFile(hf.statsFile); err == nil {
-		// Parse stats from log file
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			hf.parseOutputStats(line)
+	// Try to parse the HongFuzz report file for accurate statistics
+	report, err := hf.parseReportFile()
+	if err == nil && report != nil {
+		hf.mu.Lock()
+		// Update stats from report data
+		hf.stats.Executions = int64(report.Iterations)
+		hf.stats.UniqueCrashes = int(report.Crashes)
+		hf.stats.TotalCrashes = int(report.Crashes) // HongFuzz typically reports unique crashes
+		hf.stats.CoveragePercent = report.Coverage
+		hf.stats.ExecPerSecond = report.Speed
+
+		// Update corpus size based on coverage metrics
+		if report.GuardCoverage > 0 {
+			hf.stats.TotalEdges = int(report.GuardCoverage)
+		}
+		if report.BranchCoverage > 0 {
+			hf.stats.PathsTotal = int(report.BranchCoverage)
+		}
+
+		// Track peak execution speed
+		if report.Speed > hf.peakExecSpeed {
+			hf.peakExecSpeed = report.Speed
+		}
+
+		// Add to execution history
+		hf.execHistory = append(hf.execHistory, report.Speed)
+		if len(hf.execHistory) > 100 {
+			hf.execHistory = hf.execHistory[1:]
+		}
+
+		// Calculate coverage growth rate
+		elapsed := time.Since(hf.stats.StartTime)
+		if elapsed.Seconds() > 0 && hf.stats.NewPaths > 0 {
+			coverageGrowthRate := float64(hf.stats.NewPaths) / elapsed.Seconds()
+			hf.logger.WithFields(logrus.Fields{
+				"coverage_growth_rate": coverageGrowthRate,
+				"coverage_percent":     report.Coverage,
+			}).Debug("Calculated coverage growth rate")
+		}
+		hf.mu.Unlock()
+	} else {
+		// Fall back to parsing from stats file or output
+		if data, err := os.ReadFile(hf.statsFile); err == nil {
+			// Parse stats from log file
+			lines := strings.Split(string(data), "\n")
+			for _, line := range lines {
+				hf.parseOutputStats(line)
+			}
 		}
 	}
 
@@ -1056,7 +1437,10 @@ func (hf *Honggfuzz) updateStats() {
 	// Update derived stats
 	hf.stats.ElapsedTime = time.Since(hf.stats.StartTime)
 	if hf.stats.Executions > 0 && hf.stats.ElapsedTime.Seconds() > 0 {
-		hf.stats.ExecPerSecond = float64(hf.stats.Executions) / hf.stats.ElapsedTime.Seconds()
+		// Only update exec per second if not already set from report
+		if report == nil || report.Speed == 0 {
+			hf.stats.ExecPerSecond = float64(hf.stats.Executions) / hf.stats.ElapsedTime.Seconds()
+		}
 	}
 
 	// Get system resource usage
@@ -1067,19 +1451,23 @@ func (hf *Honggfuzz) updateStats() {
 		hf.stats.MemoryUsage = hf.config.MemoryLimit * 1024 * 1024
 	}
 
+	// Collect enhanced metrics with accurate data
+	hf.collectEnhancedMetricsFromReport(report)
+
 	// Notify event handler
 	if hf.eventHandler != nil {
 		hf.eventHandler.OnStats(hf, hf.stats)
 		hf.eventHandler.OnProgress(hf, hf.GetProgress())
 	}
 
-	// Emit stats event through base fuzzer
+	// Emit stats event through base fuzzer with accurate data
 	hf.parseAndEmitStats(map[string]string{
 		"execs_done":     strconv.FormatInt(hf.stats.Executions, 10),
 		"execs_per_sec":  strconv.FormatFloat(hf.stats.ExecPerSecond, 'f', 2, 64),
 		"paths_total":    strconv.Itoa(hf.stats.PathsTotal),
 		"unique_crashes": strconv.Itoa(hf.stats.UniqueCrashes),
 		"total_crashes":  strconv.Itoa(hf.stats.TotalCrashes),
+		"coverage":       strconv.FormatFloat(hf.stats.CoveragePercent, 'f', 2, 64),
 	})
 
 	// Check for new crashes
@@ -1089,8 +1477,14 @@ func (hf *Honggfuzz) updateStats() {
 func (hf *Honggfuzz) checkForNewCrashes() {
 	crashes, err := hf.GetCrashes()
 	if err != nil {
+		hf.logger.WithError(err).Error("Failed to get crashes in checkForNewCrashes")
 		return
 	}
+
+	hf.logger.WithFields(logrus.Fields{
+		"crashes_found":  len(crashes),
+		"previous_total": hf.stats.TotalCrashes,
+	}).Debug("Checking for new crashes")
 
 	// Simple check: if crash count increased, notify about latest crash
 	if len(crashes) > hf.stats.TotalCrashes {
@@ -1176,22 +1570,8 @@ func (hf *Honggfuzz) hashInput(data []byte) string {
 }
 
 func (hf *Honggfuzz) detectCrashType(filename string) string {
-	// Honggfuzz includes crash type in filename
-	if strings.Contains(filename, "SIGSEGV") || strings.Contains(filename, "sig11") {
-		return "segmentation_fault"
-	} else if strings.Contains(filename, "SIGABRT") || strings.Contains(filename, "sig6") {
-		return "abort"
-	} else if strings.Contains(filename, "SIGFPE") || strings.Contains(filename, "sig8") {
-		return "arithmetic_exception"
-	} else if strings.Contains(filename, "SIGILL") {
-		return "illegal_instruction"
-	} else if strings.Contains(filename, "SIGBUS") {
-		return "bus_error"
-	} else if strings.Contains(filename, "timeout") || strings.Contains(filename, "TIMEOUT") {
-		return "timeout"
-	}
-
-	return "unknown"
+	// Return "hongfuzz" for all HongFuzz crashes instead of specific signal types
+	return "hongfuzz"
 }
 
 // parseAndEmitStats parses Honggfuzz stats and emits stats event
@@ -1522,6 +1902,78 @@ func (hf *Honggfuzz) calculateThroughput() float64 {
 	return totalMB / hf.stats.ElapsedTime.Seconds()
 }
 
+// collectEnhancedMetricsFromReport collects enhanced metrics from HongFuzz report
+func (hf *Honggfuzz) collectEnhancedMetricsFromReport(report *common.HongFuzzReport) {
+	// Coverage metrics
+	coverage := common.CoverageMetrics{
+		NewEdgesFound:    int64(hf.stats.NewPaths),
+		CoverageByModule: make(map[string]float64),
+	}
+
+	if report != nil {
+		// Use accurate coverage data from report
+		coverage.LineCoverage = report.Coverage
+		coverage.BranchCoverage = report.Coverage
+
+		// Calculate coverage growth rate
+		if hf.stats.ElapsedTime.Seconds() > 0 {
+			coverage.CoverageGrowth = float64(hf.stats.NewPaths) / hf.stats.ElapsedTime.Seconds()
+		}
+
+		// Use guard and branch coverage if available
+		if report.GuardCoverage > 0 {
+			coverage.TotalEdges = int64(report.GuardCoverage)
+		}
+		if report.BranchCoverage > 0 {
+			coverage.BranchCoverage = float64(report.BranchCoverage) / float64(hf.stats.PathsTotal) * 100
+		}
+	} else {
+		// Use estimated coverage from stats
+		coverage.LineCoverage = hf.stats.CoveragePercent
+		coverage.BranchCoverage = hf.stats.CoveragePercent
+
+		// Calculate coverage growth rate
+		if hf.stats.ElapsedTime.Seconds() > 0 {
+			coverage.CoverageGrowth = float64(hf.stats.NewPaths) / hf.stats.ElapsedTime.Seconds()
+		}
+	}
+
+	// Performance metrics
+	performance := common.PerformanceMetrics{
+		ExecutionsPerSecond: hf.stats.ExecPerSecond,
+		ThroughputMBps:      hf.calculateThroughput(),
+		InputGenerationRate: hf.stats.ExecPerSecond,
+	}
+
+	// Calculate efficiency metrics
+	if report != nil && report.Speed > 0 {
+		// Calculate fuzzing efficiency (coverage per execution)
+		if report.Iterations > 0 {
+			efficiency := report.Coverage / float64(report.Iterations) * 1000000 // Coverage per million execs
+			hf.metricsCollector.UpdateFuzzerSpecificMetrics("efficiency", fmt.Sprintf("%.4f", efficiency))
+		}
+
+		// Track timeout rate
+		if report.Iterations > 0 {
+			timeoutRate := float64(report.Timeouts) / float64(report.Iterations) * 100
+			hf.metricsCollector.UpdateFuzzerSpecificMetrics("timeout_rate", fmt.Sprintf("%.2f%%", timeoutRate))
+		}
+	}
+
+	// Update metrics collector
+	hf.metricsCollector.UpdateCoverageMetrics(coverage)
+	hf.metricsCollector.UpdatePerformanceMetrics(performance)
+
+	// HongFuzz specific metrics
+	if report != nil {
+		hf.metricsCollector.UpdateFuzzerSpecificMetrics("report_iterations", strconv.FormatUint(report.Iterations, 10))
+		hf.metricsCollector.UpdateFuzzerSpecificMetrics("report_crashes", strconv.FormatUint(report.Crashes, 10))
+		hf.metricsCollector.UpdateFuzzerSpecificMetrics("report_timeouts", strconv.FormatUint(report.Timeouts, 10))
+		hf.metricsCollector.UpdateFuzzerSpecificMetrics("report_coverage", fmt.Sprintf("%.2f%%", report.Coverage))
+		hf.metricsCollector.UpdateFuzzerSpecificMetrics("report_speed", fmt.Sprintf("%.0f", report.Speed))
+	}
+}
+
 // GetEnhancedMetrics returns enhanced metrics from the fuzzer
 func (hf *Honggfuzz) GetEnhancedMetrics() *common.EnhancedMetrics {
 	hf.mu.RLock()
@@ -1532,6 +1984,63 @@ func (hf *Honggfuzz) GetEnhancedMetrics() *common.EnhancedMetrics {
 	}
 
 	return nil
+}
+
+// parseReportFile parses the HongFuzz report file for accurate statistics
+func (hf *Honggfuzz) parseReportFile() (*common.HongFuzzReport, error) {
+	// Check if report file is configured
+	reportFile, ok := hf.config.FuzzerOptions["report_file"].(string)
+	if !ok || reportFile == "" {
+		// Default report file name
+		reportFile = "honggfuzz.report"
+	}
+
+	reportPath := filepath.Join(hf.outputDir, reportFile)
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		// Report file might not exist yet early in fuzzing
+		return nil, err
+	}
+
+	report := &common.HongFuzzReport{}
+	lines := strings.Split(string(data), "\n")
+
+	// Parse key:value pairs from report file
+	for _, line := range lines {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		// Parse known fields
+		switch key {
+		case "Iterations":
+			report.Iterations, _ = strconv.ParseUint(value, 10, 64)
+		case "Crashes":
+			report.Crashes, _ = strconv.ParseUint(value, 10, 64)
+		case "Timeouts":
+			report.Timeouts, _ = strconv.ParseUint(value, 10, 64)
+		case "Coverage":
+			// Coverage might be a percentage like "85.3%"
+			value = strings.TrimSuffix(value, "%")
+			report.Coverage, _ = strconv.ParseFloat(value, 64)
+		case "Speed":
+			// Speed might include units like "1234 exec/s"
+			fields := strings.Fields(value)
+			if len(fields) > 0 {
+				report.Speed, _ = strconv.ParseFloat(fields[0], 64)
+			}
+		case "GuardCoverage":
+			report.GuardCoverage, _ = strconv.ParseUint(value, 10, 64)
+		case "BranchCoverage":
+			report.BranchCoverage, _ = strconv.ParseUint(value, 10, 64)
+		}
+	}
+
+	return report, nil
 }
 
 // CreateHonggfuzz creates a new Honggfuzz instance with optional logger

@@ -54,6 +54,7 @@ func main() {
 
 	// Setup logging
 	logger := setupLogging(*logLevel)
+	logger.SetLevel(logrus.DebugLevel)
 
 	// Load configuration
 	config, err := loadConfig(*configFile)

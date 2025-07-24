@@ -81,6 +81,7 @@ func NewRetryClient(config *common.BotConfig, logger *logrus.Logger) (*RetryClie
 	commRetryPolicy := config.Retry.Communication
 	if commRetryPolicy.MaxRetries == 0 {
 		commRetryPolicy = common.NetworkRetryPolicy
+		commRetryPolicy.MaxRetries = 10 // Increase retries
 	}
 
 	updateRetryPolicy := config.Retry.UpdateRecovery
@@ -89,7 +90,7 @@ func NewRetryClient(config *common.BotConfig, logger *logrus.Logger) (*RetryClie
 	}
 
 	// Setup circuit breaker
-	circuitBreaker := common.NewCircuitBreaker(5, 60*time.Second)
+	circuitBreaker := common.NewCircuitBreaker(10, 60*time.Second) // Increase failure threshold
 
 	return &RetryClient{
 		httpClient:     httpClient,
@@ -104,6 +105,11 @@ func NewRetryClient(config *common.BotConfig, logger *logrus.Logger) (*RetryClie
 
 // RegisterBot registers the bot with the master
 func (rc *RetryClient) RegisterBot(botID string, capabilities []string, apiEndpoint string) (*BotRegisterResponse, error) {
+	// Validate capabilities
+	if len(capabilities) == 0 {
+		return nil, common.NewValidationError("register_bot", fmt.Errorf("no capabilities provided"))
+	}
+
 	request := map[string]any{
 		"hostname":     rc.getHostname(),
 		"name":         rc.config.Name,
@@ -447,6 +453,9 @@ func (rc *RetryClient) doRequest(method, path string, requestBody any, responseB
 	}
 
 	// Check status code
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return common.NewNetworkError("service_unavailable", fmt.Errorf("service unavailable (503)"))
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Try to parse error response
 		var errorResp map[string]any

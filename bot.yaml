@@ -13,7 +13,7 @@ api_port: 9049                       # Port for bot's API server
 capabilities:
   - "aflplusplus"         # AFL++ fuzzer support
   - "libfuzzer"           # LibFuzzer support
-  # - "honggfuzz"         # Honggfuzz support (if available)
+  - "honggfuzz"         # Honggfuzz support (if available)
   # - "custom"            # Custom fuzzer support
 
 # Working directory
@@ -77,10 +77,11 @@ fuzzers:
     shrink: true              # Shrink inputs
     reduce_inputs: true       # Reduce corpus
     
-  # honggfuzz:
-  #   threads: 4              # Number of fuzzing threads
-  #   mutations_per_run: 6    # Mutations per run
-  #   enable_sanitizers: true # Enable sanitizers
+  honggfuzz:
+    threads: 4              # Number of fuzzing threads
+    mutations_per_run: 6    # Mutations per run
+    enable_sanitizers: true # Enable sanitizers
+    persistent_mode: true   # Enable persistent mode
 
 # Execution configuration
 execution:

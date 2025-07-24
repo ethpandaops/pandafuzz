@@ -436,3 +436,12 @@ const (
 	ErrCrash             = "crash"
 	ErrInternal          = "internal_error"
 )
+
+// Capability constants
+const (
+	CapabilityPersistentMode     = "persistent_mode"
+	CapabilityHardwareFeedback   = "hardware_feedback"
+	CapabilityCrashVerification  = "crash_verification"
+	CapabilityNetworkFuzzing     = "network_fuzzing"
+	CapabilityCorpusMinimization = "corpus_minimization"
+)

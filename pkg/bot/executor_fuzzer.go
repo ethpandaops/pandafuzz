@@ -60,17 +60,8 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 	fje.activeFuzzers[job.ID] = fuzz
 	fje.mu.Unlock()
 
-	// Ensure cleanup on exit
-	defer func() {
-		fje.mu.Lock()
-		delete(fje.activeFuzzers, job.ID)
-		fje.mu.Unlock()
-
-		// Clean up fuzzer
-		if cleanupErr := fuzz.Cleanup(); cleanupErr != nil {
-			fje.logger.WithError(cleanupErr).Warn("Failed to cleanup fuzzer")
-		}
-	}()
+	// Note: Cleanup is now handled by CleanupJob method to allow crash detection
+	// after job completion but before cleanup
 
 	// Ensure we have absolute paths
 	workDir := job.WorkDir
@@ -363,6 +354,41 @@ func (fje *FuzzerJobExecutor) GetJobStatus(jobID string) (string, bool) {
 // GetEventChannel returns the event channel for receiving fuzzer events
 func (fje *FuzzerJobExecutor) GetEventChannel() <-chan common.FuzzerEvent {
 	return fje.resultChan
+}
+
+// GetFuzzer returns the fuzzer instance for a given job ID
+func (fje *FuzzerJobExecutor) GetFuzzer(jobID string) (fuzzer.Fuzzer, bool) {
+	fje.mu.RLock()
+	defer fje.mu.RUnlock()
+
+	fuzz, exists := fje.activeFuzzers[jobID]
+	return fuzz, exists
+}
+
+// CleanupJob removes the fuzzer from active jobs and performs cleanup
+// This should be called AFTER crash detection is complete
+func (fje *FuzzerJobExecutor) CleanupJob(jobID string) error {
+	fje.mu.Lock()
+	fuzz, exists := fje.activeFuzzers[jobID]
+	if exists {
+		delete(fje.activeFuzzers, jobID)
+	}
+	fje.mu.Unlock()
+
+	if !exists {
+		fje.logger.WithField("job_id", jobID).Debug("Job already cleaned up")
+		return nil
+	}
+
+	fje.logger.WithField("job_id", jobID).Debug("Cleaning up fuzzer")
+
+	// Clean up fuzzer
+	if err := fuzz.Cleanup(); err != nil {
+		fje.logger.WithError(err).WithField("job_id", jobID).Warn("Failed to cleanup fuzzer")
+		return err
+	}
+
+	return nil
 }
 
 // createFuzzer creates the appropriate fuzzer instance based on job configuration

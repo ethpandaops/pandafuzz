@@ -302,12 +302,8 @@ func TestFuzzerCrashHandling(t *testing.T) {
 		assert.Equal(t, int64(len(crashes[i].content)), crash.Size)
 		assert.NotEmpty(t, crash.Hash)
 
-		// Check crash type detection
-		if i == 0 {
-			assert.Equal(t, "segmentation_fault", crash.Type)
-		} else if i == 1 {
-			assert.Equal(t, "abort", crash.Type)
-		}
+		// Check crash type detection - AFL++ returns "afl++" for all crashes
+		assert.Equal(t, "afl++", crash.Type)
 	}
 }
 

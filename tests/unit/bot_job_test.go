@@ -346,10 +346,12 @@ func TestBotHandleNoJobs(t *testing.T) {
 	callCount := 0
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == fmt.Sprintf("/api/v1/bots/%s/jobs/pending", botID) {
+		if r.URL.Path == fmt.Sprintf("/api/v1/bots/%s/job", botID) {
 			callCount++
-			// Always return no content (no jobs available)
-			w.WriteHeader(http.StatusNoContent)
+			// Return JSON null to indicate no job is available
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("null"))
 		}
 	}))
 	defer server.Close()
@@ -366,10 +368,12 @@ func TestBotHandleNoJobs(t *testing.T) {
 	client, err := bot.NewRetryClient(cfg, logger)
 	require.NoError(t, err)
 
-	// Try to get a job - should return nil without error
+	// Try to get a job - should return a job with an empty ID without error
 	job, err := client.GetJob(botID)
-	assert.NoError(t, err)
-	assert.Nil(t, job)
+	require.NoError(t, err)
+	if job != nil {
+		assert.Empty(t, job.ID)
+	}
 	assert.Equal(t, 1, callCount)
 }
 

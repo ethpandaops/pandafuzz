@@ -450,7 +450,7 @@ func (a *Agent) requestNewJob() {
 		return
 	}
 
-	if job == nil {
+	if job == nil || job.ID == "" {
 		a.logger.Debug("No jobs available")
 		return
 	}
@@ -718,6 +718,23 @@ func (a *Agent) executeJob(job *common.Job) {
 	if err != nil {
 		a.logger.WithError(err).WithField("job_id", job.ID).Error("Job execution failed")
 		a.stats.JobsFailed++
+
+		// Check for crashes even when job fails - crashes might still have been found
+		crashesFound := a.checkAndReportCrashes(job)
+		if crashesFound > 0 {
+			a.logger.WithFields(logrus.Fields{
+				"job_id":  job.ID,
+				"crashes": crashesFound,
+			}).Info("Crashes found and reported despite job failure")
+			// Update the error message to include crash count
+			err = fmt.Errorf("%v (but found %d crashes)", err, crashesFound)
+		}
+
+		// Clean up the fuzzer instance even on error
+		if cleanupErr := a.executor.CleanupJob(job.ID); cleanupErr != nil {
+			a.logger.WithError(cleanupErr).WithField("job_id", job.ID).Warn("Failed to cleanup job after error")
+		}
+
 		a.completeCurrentJob(false, fmt.Sprintf("Execution failed: %v", err))
 	} else if success {
 		a.logger.WithFields(logrus.Fields{
@@ -740,6 +757,11 @@ func (a *Agent) executeJob(job *common.Job) {
 			time.Sleep(1 * time.Second)
 		}
 
+		// Clean up the fuzzer instance after crash detection
+		if err := a.executor.CleanupJob(job.ID); err != nil {
+			a.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to cleanup job")
+		}
+
 		a.stats.JobsCompleted++
 		a.completeCurrentJob(true, message)
 	} else {
@@ -749,6 +771,12 @@ func (a *Agent) executeJob(job *common.Job) {
 			"message":  message,
 		}).Warn("Job completed with issues")
 		a.stats.JobsFailed++
+
+		// Clean up the fuzzer instance even on failure
+		if err := a.executor.CleanupJob(job.ID); err != nil {
+			a.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to cleanup job")
+		}
+
 		a.completeCurrentJob(false, message)
 	}
 }
@@ -766,7 +794,18 @@ func (a *Agent) continueCurrentJob() {
 	// Check if job has timed out
 	if time.Now().After(job.TimeoutAt) {
 		a.logger.WithField("job_id", job.ID).Warn("Job has timed out")
-		a.completeCurrentJob(false, "Job timeout")
+
+		// Check for crashes even when job times out
+		crashesFound := a.checkAndReportCrashes(job)
+		if crashesFound > 0 {
+			a.logger.WithFields(logrus.Fields{
+				"job_id":  job.ID,
+				"crashes": crashesFound,
+			}).Info("Crashes found and reported despite job timeout")
+			a.completeCurrentJob(false, fmt.Sprintf("Job timeout (but found %d crashes)", crashesFound))
+		} else {
+			a.completeCurrentJob(false, "Job timeout")
+		}
 		return
 	}
 
@@ -880,6 +919,55 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 		"work_dir": job.WorkDir,
 	}).Info("Scanning for crash files in job directory")
 
+	// First, try to get crashes from the fuzzer instance if it's still active
+	if fuzz, exists := a.executor.GetFuzzer(job.ID); exists {
+		a.logger.WithField("job_id", job.ID).Info("Using fuzzer instance to get crashes")
+		crashes, err := fuzz.GetCrashes()
+		if err != nil {
+			a.logger.WithError(err).WithField("job_id", job.ID).Error("Failed to get crashes from fuzzer")
+		} else {
+			a.logger.WithFields(logrus.Fields{
+				"job_id":                  job.ID,
+				"crashes_found_by_fuzzer": len(crashes),
+			}).Info("Fuzzer reported crashes")
+			for _, crash := range crashes {
+				// Update crash with job and bot information
+				crash.JobID = job.ID
+				crash.BotID = a.config.ID
+
+				a.logger.WithFields(logrus.Fields{
+					"crash_id":   crash.ID,
+					"job_id":     crash.JobID,
+					"bot_id":     crash.BotID,
+					"hash":       crash.Hash,
+					"size":       crash.Size,
+					"file_path":  crash.FilePath,
+					"crash_type": crash.Type,
+					"timestamp":  crash.Timestamp,
+				}).Info("Detected crash from fuzzer, attempting to report to master")
+
+				if err := a.ReportCrash(crash); err != nil {
+					a.logger.WithError(err).WithFields(logrus.Fields{
+						"crash_id": crash.ID,
+					}).Error("Failed to report crash to master")
+				} else {
+					a.logger.WithFields(logrus.Fields{
+						"crash_id": crash.ID,
+					}).Info("Successfully reported crash to master")
+					crashCount++
+				}
+			}
+
+			// If we got crashes from the fuzzer, return early
+			if len(crashes) > 0 {
+				return crashCount
+			}
+		}
+	}
+
+	// Fall back to manual directory scanning
+	a.logger.WithField("job_id", job.ID).Info("Falling back to manual directory scanning for crashes")
+
 	// Look for crash files in the working directory
 	entries, err := os.ReadDir(job.WorkDir)
 	if err != nil {
@@ -941,6 +1029,27 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 		}
 	}
 
+	// Check HongFuzz output directories
+	// HongFuzz can save crashes in both corpus and crashes directories
+	honggfuzzCorpus := filepath.Join(job.WorkDir, "output", "honggfuzz_output", "corpus")
+	if stat, err := os.Stat(honggfuzzCorpus); err == nil && stat.IsDir() {
+		dirsToCheck = append(dirsToCheck, honggfuzzCorpus)
+		a.logger.WithFields(logrus.Fields{
+			"job_id":               job.ID,
+			"honggfuzz_corpus_dir": honggfuzzCorpus,
+		}).Debug("Found HongFuzz corpus directory")
+	}
+
+	// Also check HongFuzz crashes directory (--output flag)
+	honggfuzzCrashes := filepath.Join(job.WorkDir, "output", "honggfuzz_output", "crashes")
+	if stat, err := os.Stat(honggfuzzCrashes); err == nil && stat.IsDir() {
+		dirsToCheck = append(dirsToCheck, honggfuzzCrashes)
+		a.logger.WithFields(logrus.Fields{
+			"job_id":                job.ID,
+			"honggfuzz_crashes_dir": honggfuzzCrashes,
+		}).Debug("Found HongFuzz crashes directory")
+	}
+
 	a.logger.WithFields(logrus.Fields{
 		"job_id": job.ID,
 		"dirs":   dirsToCheck,
@@ -976,6 +1085,15 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 				// Skip README files that AFL++ creates
 				isCrashFile = true
 				crashType = "afl++"
+			} else if (strings.Contains(dir, filepath.Join("honggfuzz_output", "corpus")) ||
+				strings.Contains(dir, filepath.Join("honggfuzz_output", "crashes"))) &&
+				(strings.Contains(entry.Name(), "SIG") || strings.Contains(entry.Name(), "crash") ||
+					!strings.HasPrefix(entry.Name(), ".")) {
+				// HongFuzz crash files can be in either corpus or crashes directory
+				// They often contain "SIG" or "crash" in the filename
+				// In the crashes directory, any non-hidden file is likely a crash
+				isCrashFile = true
+				crashType = "honggfuzz"
 			}
 
 			if isCrashFile {

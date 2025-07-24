@@ -70,7 +70,7 @@ func TestBotRegistration(t *testing.T) {
 				}))
 			},
 			expectedError: true,
-			errorContains: "registration failed",
+			errorContains: "server error (500)",
 		},
 		{
 			name: "invalid response format",
@@ -81,7 +81,7 @@ func TestBotRegistration(t *testing.T) {
 				}))
 			},
 			expectedError: true,
-			errorContains: "failed to decode",
+			errorContains: "failed to parse response",
 		},
 		{
 			name: "network error",
@@ -103,7 +103,7 @@ func TestBotRegistration(t *testing.T) {
 				}))
 			},
 			expectedError: true,
-			errorContains: "timeout",
+			errorContains: "context deadline exceeded",
 		},
 	}
 
@@ -140,10 +140,10 @@ func TestBotRegistration(t *testing.T) {
 			if tt.expectedError {
 				assert.Error(t, err)
 				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains)
+					assert.Contains(t, err.Error(), tt.errorContains, "error message should contain expected string")
 				}
 			} else {
-				// require.NoError(t, err)
+				require.NoError(t, err, "registration should succeed")
 				require.NotNil(t, result)
 				if tt.validateResult != nil {
 					tt.validateResult(t, result)
@@ -220,7 +220,8 @@ func TestBotReconnection(t *testing.T) {
 		// After 3rd attempt, server becomes healthy
 		isHealthy = true
 
-		if r.URL.Path == "/api/v1/bots/register" {
+		switch r.URL.Path {
+		case "/api/v1/bots/register":
 			resp := bot.BotRegisterResponse{
 				BotID:     "reconnect-bot",
 				Status:    "registered",
@@ -228,6 +229,8 @@ func TestBotReconnection(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
+		default:
+			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	defer server.Close()
@@ -248,8 +251,10 @@ func TestBotReconnection(t *testing.T) {
 	require.NoError(t, err)
 
 	// Try to register - should succeed after retries
+		// Try to register - should succeed after retries
 	result, err := client.RegisterBot(cfg.ID, cfg.Capabilities, "http://localhost:9000")
-	// require.NoError(t, err)
+	require.NoError(t, err, "registration should succeed")
+	require.NotNil(t, result, "Registration result should not be nil on success")
 	assert.Equal(t, "reconnect-bot", result.BotID)
 	assert.GreaterOrEqual(t, connectionAttempts, 3)
 }
@@ -387,7 +392,7 @@ func TestBotRegistrationValidation(t *testing.T) {
 			result, err := client.RegisterBot("test-bot", tt.capabilities, "http://localhost:9000")
 
 			if tt.expectedError != "" {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectedError)
 			} else {
 				assert.NoError(t, err)

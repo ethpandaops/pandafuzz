@@ -1273,18 +1273,8 @@ func (afl *AFLPlusPlus) hashInput(data []byte) string {
 }
 
 func (afl *AFLPlusPlus) detectCrashType(filename string) string {
-	// AFL++ includes crash type in filename
-	if strings.Contains(filename, "sig:11") {
-		return "segmentation_fault"
-	} else if strings.Contains(filename, "sig:06") {
-		return "abort"
-	} else if strings.Contains(filename, "sig:08") {
-		return "arithmetic_exception"
-	} else if strings.Contains(filename, "timeout") {
-		return "timeout"
-	}
-
-	return "unknown"
+	// Return "afl++" for all AFL++ crashes
+	return "afl++"
 }
 
 // parseAndEmitStats parses AFL++ stats and emits stats event

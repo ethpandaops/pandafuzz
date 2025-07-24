@@ -1,5 +1,48 @@
 # Multi-stage Dockerfile for PandaFuzz
 
+# Build stage for HongFuzz
+FROM ubuntu:22.04 AS honggfuzz-builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    libunwind-dev \
+    libblocksruntime-dev \
+    liblzma-dev \
+    libssl-dev \
+    zlib1g-dev \
+    pkg-config \
+    clang \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Build HongFuzz from source - use the latest release which has better build support
+RUN git clone --depth 1 --branch 2.6 https://github.com/google/honggfuzz.git && \
+    cd honggfuzz && \
+    # Disable BFD support which causes compilation issues
+    sed -i 's/linux\/bfd.c//g' Makefile && \
+    sed -i 's/linux\/bfd.o//g' Makefile && \
+    sed -i 's/-lbfd//g' Makefile && \
+    sed -i 's/-lopcodes//g' Makefile && \
+    sed -i 's/-liberty//g' Makefile && \
+    # Create stub bfd.c to satisfy dependencies
+    mkdir -p linux && \
+    echo '#include <stdlib.h>' > linux/bfd.c && \
+    echo 'void arch_bfdResolveSyms(void* a, void* b, void* c, void* d) { (void)a; (void)b; (void)c; (void)d; }' >> linux/bfd.c && \
+    echo 'void arch_bfdDisasm(void* a, void* b, void* c, void* d) { (void)a; (void)b; (void)c; (void)d; }' >> linux/bfd.c && \
+    echo 'char* arch_bfdDemangle(const char* str) { return (char*)str; }' >> linux/bfd.c && \
+    # Build HongFuzz
+    NO_BFD=1 make && \
+    # Install binaries
+    cp honggfuzz /usr/bin/ && \
+    # Create wrapper scripts if they don't exist
+    test -f hfuzz-cc && cp hfuzz-cc /usr/bin/ || echo '#!/bin/bash\nexec gcc "$@"' > /usr/bin/hfuzz-cc && \
+    test -f hfuzz-clang && cp hfuzz-clang /usr/bin/ || echo '#!/bin/bash\nexec clang "$@"' > /usr/bin/hfuzz-clang && \
+    chmod +x /usr/bin/hfuzz-* && \
+    cd / && rm -rf /build
+
 # Build stage for web UI
 FROM node:16-alpine AS web-builder
 
@@ -190,6 +233,17 @@ ENV AFL_SKIP_BIN_CHECK=1
 # Fix: Add path for AFL++ to find its support files
 ENV AFL_PATH=/usr/local/lib/afl
 
+# Install HongFuzz runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libunwind8 \
+    libblocksruntime0 \
+    libssl3 \
+    liblzma5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy HongFuzz binaries from builder stage
+COPY --from=honggfuzz-builder /usr/bin/honggfuzz /usr/local/bin/
+
 # Set proper permissions for AFL++
 RUN chmod 755 /usr/local/bin/afl-*
 
@@ -227,13 +281,7 @@ RUN apt-get update || apt-get update && \
 COPY --from=builder /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
 
-# Install additional fuzzing tools
-# Honggfuzz
-RUN git clone https://github.com/google/honggfuzz.git /tmp/honggfuzz && \
-    cd /tmp/honggfuzz && \
-    make && \
-    cp honggfuzz /usr/local/bin/ && \
-    rm -rf /tmp/honggfuzz
+# HongFuzz already copied in bot stage
 
 USER pandafuzz
 
