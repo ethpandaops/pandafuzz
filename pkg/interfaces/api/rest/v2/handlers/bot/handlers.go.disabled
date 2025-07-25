@@ -1,0 +1,642 @@
+package bot
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/service"
+	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
+)
+
+// Handler handles bot-related HTTP requests
+type Handler struct {
+	botService service.BotService
+	logger     logrus.FieldLogger
+	validator  *Validator
+}
+
+// NewHandler creates a new bot handler
+func NewHandler(botService service.BotService, logger logrus.FieldLogger) *Handler {
+	return &Handler{
+		botService: botService,
+		logger:     logger,
+		validator:  NewValidator(),
+	}
+}
+
+// RegisterRoutes registers bot routes
+func (h *Handler) RegisterRoutes(r *mux.Router) {
+	r.HandleFunc("/bots", h.ListBots).Methods("GET")
+	r.HandleFunc("/bots/{id}", h.GetBot).Methods("GET")
+	r.HandleFunc("/bots/{id}", h.DeleteBot).Methods("DELETE")
+	r.HandleFunc("/bots/{id}/metrics", h.StreamBotMetrics).Methods("GET")
+	r.HandleFunc("/bots/{id}/metrics/history", h.GetBotMetricsHistory).Methods("GET")
+	r.HandleFunc("/bots/{id}/heartbeat", h.UpdateHeartbeat).Methods("POST")
+	r.HandleFunc("/bots/register", h.RegisterBot).Methods("POST")
+}
+
+// ListBots lists all bots with enhanced information
+// @Summary List bots
+// @Description Get a list of all registered bots with optional filtering
+// @Tags bots
+// @Accept json
+// @Produce json
+// @Param page query int false "Page number" default(1)
+// @Param page_size query int false "Page size" default(20) maximum(100)
+// @Param status query string false "Filter by status"
+// @Param health_status query string false "Filter by health status"
+// @Param capabilities query []string false "Filter by capabilities"
+// @Success 200 {object} SuccessResponse{data=[]BotResponse}
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/bots [get]
+func (h *Handler) ListBots(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Parse pagination
+	pagination, err := parsePaginationParams(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PAGINATION", "Invalid pagination parameters", err)
+		return
+	}
+
+	// Parse status filter
+	var statusFilter *common.BotStatus
+	if status := r.URL.Query().Get("status"); status != "" {
+		s := common.BotStatus(status)
+		statusFilter = &s
+	}
+
+	// Get bots
+	bots, err := h.botService.ListBots(r.Context(), statusFilter)
+	if err != nil {
+		logger.WithError(err).Error("Failed to list bots")
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "Failed to list bots", err)
+		return
+	}
+
+	// Apply health status filter if provided
+	healthStatus := r.URL.Query().Get("health_status")
+	if healthStatus != "" {
+		filtered := make([]*common.Bot, 0)
+		for _, bot := range bots {
+			if h.getBotHealthStatus(bot) == healthStatus {
+				filtered = append(filtered, bot)
+			}
+		}
+		bots = filtered
+	}
+
+	// Apply pagination
+	start := (pagination.Page - 1) * pagination.PageSize
+	end := start + pagination.PageSize
+	if start > len(bots) {
+		start = len(bots)
+	}
+	if end > len(bots) {
+		end = len(bots)
+	}
+	pagedBots := bots[start:end]
+
+	// Build response list
+	responses := make([]*BotResponse, len(pagedBots))
+	for i, bot := range pagedBots {
+		metrics, _ := h.botService.GetMetrics(r.Context(), bot.ID)
+		responses[i] = &BotResponse{
+			Bot:          bot,
+			Metrics:      toBotMetrics(metrics),
+			HealthStatus: h.getBotHealthStatus(bot),
+			Uptime:       time.Since(bot.RegisteredAt),
+		}
+	}
+
+	// Calculate pagination metadata
+	paginationMeta := &PaginationMeta{
+		Page:       pagination.Page,
+		PageSize:   pagination.PageSize,
+		TotalPages: (len(bots) + pagination.PageSize - 1) / pagination.PageSize,
+		TotalItems: int64(len(bots)),
+		HasNext:    end < len(bots),
+		HasPrev:    pagination.Page > 1,
+	}
+
+	// Build metadata
+	meta := map[string]interface{}{
+		"total_bots":   len(bots),
+		"online_bots":  h.countOnlineBots(bots),
+		"offline_bots": h.countOfflineBots(bots),
+		"busy_bots":    h.countBusyBots(bots),
+	}
+
+	writeSuccess(w, http.StatusOK, responses, meta, paginationMeta)
+}
+
+// GetBot retrieves a specific bot
+// @Summary Get bot details
+// @Description Get detailed information about a specific bot
+// @Tags bots
+// @Accept json
+// @Produce json
+// @Param id path string true "Bot ID"
+// @Success 200 {object} SuccessResponse{data=BotResponse}
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/bots/{id} [get]
+func (h *Handler) GetBot(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate bot ID
+	botID, err := validateBotID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid bot ID", err)
+		return
+	}
+
+	// Get bot
+	bot, err := h.botService.GetBot(r.Context(), botID)
+	if err != nil {
+		if err == common.ErrBotNotFound {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Bot not found", err)
+		} else {
+			logger.WithError(err).Error("Failed to get bot")
+			writeError(w, http.StatusInternalServerError, "GET_FAILED", "Failed to get bot", err)
+		}
+		return
+	}
+
+	// Get metrics
+	metrics, _ := h.botService.GetMetrics(r.Context(), botID)
+
+	// Get current job if any
+	var currentJob *common.Job
+	if bot.CurrentJob != nil {
+		currentJob, _ = h.botService.GetCurrentJob(r.Context(), botID)
+	}
+
+	// Build response
+	response := &BotResponse{
+		Bot:          bot,
+		Metrics:      toBotMetrics(metrics),
+		HealthStatus: h.getBotHealthStatus(bot),
+		Uptime:       time.Since(bot.RegisteredAt),
+	}
+
+	// Add current job info to metadata
+	var meta interface{}
+	if currentJob != nil {
+		meta = map[string]interface{}{
+			"current_job": map[string]interface{}{
+				"id":     currentJob.ID,
+				"name":   currentJob.Name,
+				"status": currentJob.Status,
+			},
+		}
+	}
+
+	writeSuccess(w, http.StatusOK, response, meta, nil)
+}
+
+// DeleteBot removes a bot from the system
+// @Summary Delete bot
+// @Description Remove a bot from the system
+// @Tags bots
+// @Accept json
+// @Produce json
+// @Param id path string true "Bot ID"
+// @Success 204 "No Content"
+// @Failure 400 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 409 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/bots/{id} [delete]
+func (h *Handler) DeleteBot(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate bot ID
+	botID, err := validateBotID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid bot ID", err)
+		return
+	}
+
+	// Check if bot is busy
+	bot, err := h.botService.GetBot(r.Context(), botID)
+	if err != nil {
+		if err == common.ErrBotNotFound {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Bot not found", err)
+		} else {
+			logger.WithError(err).Error("Failed to get bot")
+			writeError(w, http.StatusInternalServerError, "GET_FAILED", "Failed to get bot", err)
+		}
+		return
+	}
+
+	if bot.Status == common.BotStatusBusy {
+		writeError(w, http.StatusConflict, "BOT_BUSY", "Cannot delete bot while it has an active job", nil)
+		return
+	}
+
+	// Delete bot
+	if err := h.botService.DeleteBot(r.Context(), botID); err != nil {
+		logger.WithError(err).Error("Failed to delete bot")
+		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "Failed to delete bot", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// RegisterBot registers a new bot
+// @Summary Register bot
+// @Description Register a new bot with the system
+// @Tags bots
+// @Accept json
+// @Produce json
+// @Param bot body RegisterBotRequest true "Bot registration details"
+// @Success 201 {object} SuccessResponse{data=BotResponse}
+// @Failure 400 {object} ErrorResponse
+// @Failure 409 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/bots/register [post]
+func (h *Handler) RegisterBot(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Parse request
+	var req struct {
+		Hostname     string   `json:"hostname" validate:"required"`
+		Name         string   `json:"name" validate:"required,min=3,max=100"`
+		Capabilities []string `json:"capabilities" validate:"required,min=1"`
+		APIEndpoint  string   `json:"api_endpoint" validate:"required,url"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
+		return
+	}
+
+	// Validate request
+	if err := h.validator.ValidateStruct(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "Request validation failed", err)
+		return
+	}
+
+	// Register bot
+	bot, err := h.botService.RegisterBot(r.Context(), req.Hostname, req.Name, req.Capabilities, req.APIEndpoint)
+	if err != nil {
+		if err == common.ErrBotAlreadyExists {
+			writeError(w, http.StatusConflict, "ALREADY_EXISTS", "Bot with this hostname already exists", err)
+		} else {
+			logger.WithError(err).Error("Failed to register bot")
+			writeError(w, http.StatusInternalServerError, "REGISTER_FAILED", "Failed to register bot", err)
+		}
+		return
+	}
+
+	// Build response
+	response := &BotResponse{
+		Bot:          bot,
+		Metrics:      nil, // No metrics for new bot
+		HealthStatus: h.getBotHealthStatus(bot),
+		Uptime:       0,
+	}
+
+	writeSuccess(w, http.StatusCreated, response, nil, nil)
+}
+
+// UpdateHeartbeat updates bot heartbeat
+// @Summary Update bot heartbeat
+// @Description Update bot heartbeat to indicate it's still alive
+// @Tags bots
+// @Accept json
+// @Produce json
+// @Param id path string true "Bot ID"
+// @Param heartbeat body HeartbeatRequest true "Heartbeat data"
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/bots/{id}/heartbeat [post]
+func (h *Handler) UpdateHeartbeat(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate bot ID
+	botID, err := validateBotID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid bot ID", err)
+		return
+	}
+
+	// Parse request
+	var req struct {
+		Status     common.BotStatus `json:"status" validate:"required"`
+		CurrentJob *string          `json:"current_job,omitempty"`
+		Metrics    *BotMetrics   `json:"metrics,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
+		return
+	}
+
+	// Update heartbeat
+	if err := h.botService.UpdateHeartbeat(r.Context(), botID, req.Status, req.CurrentJob); err != nil {
+		if err == common.ErrBotNotFound {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Bot not found", err)
+		} else {
+			logger.WithError(err).Error("Failed to update heartbeat")
+			writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "Failed to update heartbeat", err)
+		}
+		return
+	}
+
+	response := map[string]interface{}{
+		"updated":   true,
+		"timestamp": time.Now(),
+	}
+
+	writeSuccess(w, http.StatusOK, response, nil, nil)
+}
+
+// StreamBotMetrics streams real-time bot metrics
+// @Summary Stream bot metrics
+// @Description Stream real-time metrics for a bot using Server-Sent Events
+// @Tags bots
+// @Accept json
+// @Produce text/event-stream
+// @Param id path string true "Bot ID"
+// @Success 200 "SSE stream of bot metrics"
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/bots/{id}/metrics [get]
+func (h *Handler) StreamBotMetrics(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate bot ID
+	botID, err := validateBotID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid bot ID", err)
+		return
+	}
+
+	// Verify bot exists
+	_, err = h.botService.GetBot(r.Context(), botID)
+	if err != nil {
+		if err == common.ErrBotNotFound {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Bot not found", err)
+		} else {
+			logger.WithError(err).Error("Failed to get bot")
+			writeError(w, http.StatusInternalServerError, "GET_FAILED", "Failed to get bot", err)
+		}
+		return
+	}
+
+	// Set up Server-Sent Events
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "STREAMING_NOT_SUPPORTED", "Streaming not supported", nil)
+		return
+	}
+
+	// Send initial connection event
+	fmt.Fprintf(w, "event: connected\ndata: {\"bot_id\":\"%s\",\"timestamp\":\"%s\"}\n\n", botID, time.Now().Format(time.RFC3339))
+	flusher.Flush()
+
+	// Stream metrics every 5 seconds
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			// Get current bot status
+			bot, err := h.botService.GetBot(r.Context(), botID)
+			if err != nil {
+				logger.WithError(err).Warn("Failed to get bot for metrics stream")
+				continue
+			}
+
+			// Create metrics data
+			metrics := BotMetricsStream{
+				BotID:       botID,
+				Timestamp:   time.Now(),
+				CPUUsage:    h.simulateCPUUsage(bot),
+				MemoryUsage: h.simulateMemoryUsage(bot),
+			}
+
+			// Add job progress if bot has active job
+			if bot.CurrentJob != nil {
+				currentJob, _ := h.botService.GetCurrentJob(r.Context(), botID)
+				if currentJob != nil {
+					metrics.JobProgress = h.calculateJobProgress(currentJob)
+				}
+			}
+
+			// Send metrics event
+			if data, err := json.Marshal(metrics); err == nil {
+				fmt.Fprintf(w, "event: metrics\ndata: %s\n\n", data)
+				flusher.Flush()
+			}
+
+			// Send heartbeat
+			fmt.Fprintf(w, "event: ping\ndata: %d\n\n", time.Now().Unix())
+			flusher.Flush()
+		}
+	}
+}
+
+// GetBotMetricsHistory retrieves historical bot metrics
+// @Summary Get bot metrics history
+// @Description Get historical metrics for a bot
+// @Tags bots
+// @Accept json
+// @Produce json
+// @Param id path string true "Bot ID"
+// @Param duration query string false "Duration to look back" default(1h)
+// @Param interval query string false "Data point interval" default(5m)
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/bots/{id}/metrics/history [get]
+func (h *Handler) GetBotMetricsHistory(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate bot ID
+	botID, err := validateBotID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid bot ID", err)
+		return
+	}
+
+	// Parse duration
+	duration := 1 * time.Hour
+	if d := r.URL.Query().Get("duration"); d != "" {
+		parsed, err := time.ParseDuration(d)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_DURATION", "Invalid duration format", err)
+			return
+		}
+		duration = parsed
+	}
+
+	// Parse interval
+	interval := 5 * time.Minute
+	if i := r.URL.Query().Get("interval"); i != "" {
+		parsed, err := time.ParseDuration(i)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_INTERVAL", "Invalid interval format", err)
+			return
+		}
+		interval = parsed
+	}
+
+	// Verify bot exists
+	_, err = h.botService.GetBot(r.Context(), botID)
+	if err != nil {
+		if err == common.ErrBotNotFound {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Bot not found", err)
+		} else {
+			logger.WithError(err).Error("Failed to get bot")
+			writeError(w, http.StatusInternalServerError, "GET_FAILED", "Failed to get bot", err)
+		}
+		return
+	}
+
+	// Generate simulated historical data
+	// In production, this would query a metrics store
+	dataPoints := int(duration / interval)
+	metrics := make([]BotMetricsStream, dataPoints)
+
+	now := time.Now()
+	for i := 0; i < dataPoints; i++ {
+		timestamp := now.Add(-duration + time.Duration(i)*interval)
+		metrics[i] = BotMetricsStream{
+			BotID:       botID,
+			Timestamp:   timestamp,
+			CPUUsage:    40 + float64(i%20),
+			MemoryUsage: uint64(1<<30) + uint64(i%50)*10*1024*1024,
+		}
+	}
+
+	response := map[string]interface{}{
+		"bot_id":      botID,
+		"metrics":     metrics,
+		"data_points": len(metrics),
+		"duration":    duration.String(),
+		"interval":    interval.String(),
+		"start_time":  now.Add(-duration).Format(time.RFC3339),
+		"end_time":    now.Format(time.RFC3339),
+	}
+
+	writeSuccess(w, http.StatusOK, response, nil, nil)
+}
+
+// Helper functions
+
+func (h *Handler) getBotHealthStatus(bot *common.Bot) string {
+	if !bot.IsOnline {
+		return "offline"
+	}
+	if bot.FailureCount > 3 {
+		return "unhealthy"
+	}
+	if time.Since(bot.LastSeen) > 5*time.Minute {
+		return "degraded"
+	}
+	if bot.Status == common.BotStatusFailed {
+		return "failed"
+	}
+	return "healthy"
+}
+
+func (h *Handler) countOnlineBots(bots []*common.Bot) int {
+	count := 0
+	for _, bot := range bots {
+		if bot.IsOnline {
+			count++
+		}
+	}
+	return count
+}
+
+func (h *Handler) countOfflineBots(bots []*common.Bot) int {
+	count := 0
+	for _, bot := range bots {
+		if !bot.IsOnline {
+			count++
+		}
+	}
+	return count
+}
+
+func (h *Handler) countBusyBots(bots []*common.Bot) int {
+	count := 0
+	for _, bot := range bots {
+		if bot.Status == common.BotStatusBusy {
+			count++
+		}
+	}
+	return count
+}
+
+func toBotMetrics(metrics *service.BotMetrics) *BotMetrics {
+	if metrics == nil {
+		return nil
+	}
+
+	return &BotMetrics{
+		TotalJobsRun:     metrics.TotalJobsRun,
+		SuccessfulJobs:   metrics.SuccessfulJobs,
+		FailedJobs:       metrics.FailedJobs,
+		CrashesFound:     metrics.CrashesFound,
+		UniqueCrashes:    metrics.UniqueCrashes,
+		CorpusItemsAdded: metrics.CorpusItemsAdded,
+		CPUUsage:         0, // Would be filled from monitoring
+		MemoryUsage:      0, // Would be filled from monitoring
+		LastActive:       metrics.LastActive,
+	}
+}
+
+func (h *Handler) simulateCPUUsage(bot *common.Bot) float64 {
+	if bot.Status == common.BotStatusBusy {
+		return 65.0 + float64(time.Now().Unix()%20)
+	}
+	return 10.0 + float64(time.Now().Unix()%10)
+}
+
+func (h *Handler) simulateMemoryUsage(bot *common.Bot) uint64 {
+	base := uint64(512 << 20) // 512MB base
+	if bot.Status == common.BotStatusBusy {
+		return base + uint64(time.Now().Unix()%10)*100<<20
+	}
+	return base
+}
+
+func (h *Handler) calculateJobProgress(job *common.Job) float64 {
+	if job.StartedAt == nil {
+		return 0
+	}
+
+	// Simple progress calculation based on time
+	elapsed := time.Since(*job.StartedAt)
+	if job.Config.Duration > 0 {
+		progress := float64(elapsed) / float64(job.Config.Duration) * 100
+		if progress > 100 {
+			progress = 100
+		}
+		return progress
+	}
+
+	return 0
+}

@@ -55,6 +55,8 @@ type JobRequest struct {
 	CorpusID          string           `json:"corpus_id,omitempty"`           // Use standalone corpus
 	CollectionID      string           `json:"collection_id,omitempty"`       // Use corpus collection
 	UseCampaignCorpus bool             `json:"use_campaign_corpus,omitempty"` // Whether to inherit corpus from campaign
+	Priority          int              `json:"priority,omitempty"`            // Job priority (0-100, higher is more important)
+	QueueName         string           `json:"queue_name,omitempty"`          // Specific queue to use (critical/default/low)
 }
 
 // JobCompleteRequest represents a job completion request
@@ -638,6 +640,7 @@ func (s *Server) handleJobCreate(w http.ResponseWriter, r *http.Request) {
 		CorpusID:          req.CorpusID,
 		CollectionID:      req.CollectionID,
 		UseCampaignCorpus: req.UseCampaignCorpus,
+		Priority:          req.Priority,
 	}
 
 	job, err := s.services.Job.CreateJob(r.Context(), jobReq)

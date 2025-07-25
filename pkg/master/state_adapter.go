@@ -14,7 +14,7 @@ import (
 
 // StateStoreAdapter adapts PersistentState to implement service.StateStore interface
 type StateStoreAdapter struct {
-	ps *PersistentState
+	PS *PersistentState // Exported for access in main
 }
 
 // Compile-time interface compliance check
@@ -22,71 +22,71 @@ var _ service.StateStore = (*StateStoreAdapter)(nil)
 
 // NewStateStoreAdapter creates a new adapter for PersistentState
 func NewStateStoreAdapter(ps *PersistentState) service.StateStore {
-	return &StateStoreAdapter{ps: ps}
+	return &StateStoreAdapter{PS: ps}
 }
 
 // Bot operations
 func (a *StateStoreAdapter) SaveBotWithRetry(bot *common.Bot) error {
-	return a.ps.SaveBotWithRetry(context.Background(), bot)
+	return a.PS.SaveBotWithRetry(context.Background(), bot)
 }
 
 func (a *StateStoreAdapter) GetBot(botID string) (*common.Bot, error) {
-	return a.ps.GetBot(context.Background(), botID)
+	return a.PS.GetBot(context.Background(), botID)
 }
 
 func (a *StateStoreAdapter) DeleteBot(botID string) error {
-	return a.ps.DeleteBot(context.Background(), botID)
+	return a.PS.DeleteBot(context.Background(), botID)
 }
 
 func (a *StateStoreAdapter) ListBots() ([]*common.Bot, error) {
-	return a.ps.ListBots(context.Background())
+	return a.PS.ListBots(context.Background())
 }
 
 // Job operations
 func (a *StateStoreAdapter) SaveJobWithRetry(job *common.Job) error {
-	return a.ps.SaveJobWithRetry(context.Background(), job)
+	return a.PS.SaveJobWithRetry(context.Background(), job)
 }
 
 func (a *StateStoreAdapter) GetJob(jobID string) (*common.Job, error) {
-	return a.ps.GetJob(context.Background(), jobID)
+	return a.PS.GetJob(context.Background(), jobID)
 }
 
 func (a *StateStoreAdapter) ListJobs() ([]*common.Job, error) {
-	return a.ps.ListJobs(context.Background())
+	return a.PS.ListJobs(context.Background())
 }
 
 func (a *StateStoreAdapter) AtomicJobAssignmentWithRetry(botID string) (*common.Job, error) {
-	return a.ps.AtomicJobAssignmentWithRetry(context.Background(), botID)
+	return a.PS.AtomicJobAssignmentWithRetry(context.Background(), botID)
 }
 
 func (a *StateStoreAdapter) CompleteJobWithRetry(jobID, botID string, success bool) error {
-	return a.ps.CompleteJobWithRetry(context.Background(), jobID, botID, success)
+	return a.PS.CompleteJobWithRetry(context.Background(), jobID, botID, success)
 }
 
 // Result processing
 func (a *StateStoreAdapter) ProcessCrashResultWithRetry(crash *common.CrashResult) error {
-	return a.ps.ProcessCrashResultWithRetry(context.Background(), crash)
+	return a.PS.ProcessCrashResultWithRetry(context.Background(), crash)
 }
 
 func (a *StateStoreAdapter) ProcessCoverageResultWithRetry(coverage *common.CoverageResult) error {
-	return a.ps.ProcessCoverageResultWithRetry(context.Background(), coverage)
+	return a.PS.ProcessCoverageResultWithRetry(context.Background(), coverage)
 }
 
 func (a *StateStoreAdapter) ProcessCorpusUpdateWithRetry(corpus *common.CorpusUpdate) error {
-	return a.ps.ProcessCorpusUpdateWithRetry(context.Background(), corpus)
+	return a.PS.ProcessCorpusUpdateWithRetry(context.Background(), corpus)
 }
 
 // Stats and health
 func (a *StateStoreAdapter) GetStats() any {
-	return a.ps.GetStats(context.Background())
+	return a.PS.GetStats(context.Background())
 }
 
 func (a *StateStoreAdapter) GetDatabaseStats() any {
-	return a.ps.GetDatabaseStats(context.Background())
+	return a.PS.GetDatabaseStats(context.Background())
 }
 
 func (a *StateStoreAdapter) HealthCheck() error {
-	return a.ps.HealthCheck(context.Background())
+	return a.PS.HealthCheck(context.Background())
 }
 
 // Optimized bot operations
@@ -104,14 +104,14 @@ func (a *StateStoreAdapter) UpdateBotHeartbeat(ctx context.Context, botID string
 	}
 
 	// Check if the underlying implementation has this method
-	if updater, ok := a.ps.db.(interface {
+	if updater, ok := a.PS.db.(interface {
 		Execute(ctx context.Context, query string, args ...any) (int64, error)
 	}); ok {
 		now := time.Now()
 		// Get timeout from config if available
 		var timeoutDuration time.Duration = 30 * time.Second
-		if a.ps.config != nil && a.ps.config.Timeouts.BotHeartbeat > 0 {
-			timeoutDuration = a.ps.config.Timeouts.BotHeartbeat
+		if a.PS.config != nil && a.PS.config.Timeouts.BotHeartbeat > 0 {
+			timeoutDuration = a.PS.config.Timeouts.BotHeartbeat
 		}
 		timeout := now.Add(timeoutDuration)
 
@@ -126,7 +126,7 @@ func (a *StateStoreAdapter) UpdateBotHeartbeat(ctx context.Context, botID string
 		}
 
 		// Update in-memory cache if needed
-		a.ps.UpdateBotInCache(botID, status, currentJob, now, timeout)
+		a.PS.UpdateBotInCache(botID, status, currentJob, now, timeout)
 		return nil
 	}
 	return errors.New(errors.ErrorTypeMethodNotFound, "update_bot_heartbeat", "Method not implemented")
@@ -138,7 +138,7 @@ func (a *StateStoreAdapter) GetAvailableBotWithCapabilities(ctx context.Context,
 }
 
 func (a *StateStoreAdapter) BatchUpdateBotStatus(ctx context.Context, botIDs []string, status common.BotStatus) error {
-	if updater, ok := a.ps.db.(interface {
+	if updater, ok := a.PS.db.(interface {
 		Execute(ctx context.Context, query string, args ...any) (int64, error)
 	}); ok {
 		// Build placeholders for IN clause
@@ -165,7 +165,7 @@ func (a *StateStoreAdapter) ListJobsFiltered(ctx context.Context, status *common
 }
 
 func (a *StateStoreAdapter) AtomicJobAssignmentOptimized(ctx context.Context, botID string) (*common.Job, error) {
-	if db, ok := a.ps.db.(interface {
+	if db, ok := a.PS.db.(interface {
 		Transaction(ctx context.Context, fn func(tx common.Transaction) error) error
 		Execute(ctx context.Context, query string, args ...any) (int64, error)
 		SelectOne(ctx context.Context, query string, args ...any) (map[string]any, error)
@@ -231,8 +231,8 @@ func (a *StateStoreAdapter) AtomicJobAssignmentOptimized(ctx context.Context, bo
 				}
 
 				// Update caches
-				a.ps.UpdateJobInCache(assignedJob)
-				a.ps.UpdateBotInCacheForJob(botID, &jobID, common.BotStatusBusy)
+				a.PS.UpdateJobInCache(assignedJob)
+				a.PS.UpdateBotInCacheForJob(botID, &jobID, common.BotStatusBusy)
 
 				return nil
 			}
@@ -248,7 +248,7 @@ func (a *StateStoreAdapter) AtomicJobAssignmentOptimized(ctx context.Context, bo
 }
 
 func (a *StateStoreAdapter) CompleteJobOptimized(ctx context.Context, jobID, botID string, success bool) error {
-	if db, ok := a.ps.db.(interface {
+	if db, ok := a.PS.db.(interface {
 		Transaction(ctx context.Context, fn func(tx common.Transaction) error) error
 		Execute(ctx context.Context, query string, args ...any) (int64, error)
 	}); ok {
@@ -286,8 +286,8 @@ func (a *StateStoreAdapter) CompleteJobOptimized(ctx context.Context, jobID, bot
 				}
 
 				// Update caches
-				a.ps.UpdateJobStatusInCache(jobID, status, &now)
-				a.ps.UpdateBotInCacheForJob(botID, nil, common.BotStatusIdle)
+				a.PS.UpdateJobStatusInCache(jobID, status, &now)
+				a.PS.UpdateBotInCacheForJob(botID, nil, common.BotStatusIdle)
 
 				return nil
 			}
@@ -301,7 +301,7 @@ func (a *StateStoreAdapter) CompleteJobOptimized(ctx context.Context, jobID, bot
 // This is needed for services that require direct storage access
 func (a *StateStoreAdapter) GetStorage() common.Storage {
 	// Check if the database implements the Storage interface
-	if storage, ok := a.ps.db.(common.Storage); ok {
+	if storage, ok := a.PS.db.(common.Storage); ok {
 		return storage
 	}
 	// Return nil if not a Storage implementation

@@ -1,0 +1,359 @@
+package analytics
+
+import (
+	"encoding/csv"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ethpandaops/pandafuzz/pkg/service"
+	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
+)
+
+// Handler handles analytics-related HTTP requests
+type Handler struct {
+	analyticsService service.AnalyticsService
+	logger           logrus.FieldLogger
+}
+
+// NewHandler creates a new analytics handler
+func NewHandler(
+	analyticsService service.AnalyticsService,
+	logger logrus.FieldLogger,
+) *Handler {
+	return &Handler{
+		analyticsService: analyticsService,
+		logger:           logger,
+	}
+}
+
+// RegisterRoutes registers analytics routes
+func (h *Handler) RegisterRoutes(r *mux.Router) {
+	r.HandleFunc("/coverage-trend", h.GetCoverageTrend).Methods("GET")
+	r.HandleFunc("/crash-timeline", h.GetCrashTimeline).Methods("GET")
+	r.HandleFunc("/fuzzer-comparison", h.GetFuzzerComparison).Methods("GET")
+	r.HandleFunc("/campaigns/{id}/insights", h.GetCampaignInsights).Methods("GET")
+}
+
+// GetCoverageTrend handles coverage trend analytics
+// @Summary Get coverage trend
+// @Description Get coverage trend data over time
+// @Tags analytics
+// @Accept json
+// @Produce json
+// @Param campaign_id query string false "Campaign ID"
+// @Param job_id query string false "Job ID"
+// @Param start_time query string false "Start time (RFC3339)"
+// @Param end_time query string false "End time (RFC3339)"
+// @Param interval query string false "Time interval" Enums(minute,hour,day,week,month) default(hour)
+// @Param format query string false "Export format" Enums(json,csv) default(json)
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]interface{}
+// @Failure 500 {object} map[string]interface{}
+// @Router /api/v2/analytics/coverage-trend [get]
+func (h *Handler) GetCoverageTrend(w http.ResponseWriter, r *http.Request) {
+	// Parse time range
+	startTime, endTime, err := h.parseTimeRange(r)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "INVALID_TIME_RANGE", err.Error())
+		return
+	}
+
+	// Get campaign ID from query
+	campaignID := r.URL.Query().Get("campaign_id")
+
+	// Validate that campaign ID is provided
+	if campaignID == "" {
+		h.writeError(w, http.StatusBadRequest, "CAMPAIGN_ID_REQUIRED", "campaign_id is required")
+		return
+	}
+
+	// Calculate interval from time range
+	interval := endTime.Sub(startTime) / 24 // Default to 24 data points
+	if intervalStr := r.URL.Query().Get("interval"); intervalStr != "" {
+		switch intervalStr {
+		case "minute":
+			interval = time.Minute
+		case "hour":
+			interval = time.Hour
+		case "day":
+			interval = 24 * time.Hour
+		case "week":
+			interval = 7 * 24 * time.Hour
+		case "month":
+			interval = 30 * 24 * time.Hour
+		}
+	}
+
+	trend, err := h.analyticsService.GetCoverageTrend(r.Context(), campaignID, interval)
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to retrieve coverage trend")
+		h.writeError(w, http.StatusInternalServerError, "DATA_RETRIEVAL_FAILED", "Failed to retrieve coverage data")
+		return
+	}
+
+	// Handle export format
+	format := r.URL.Query().Get("format")
+	if format == "csv" {
+		h.exportCoverageTrendCSV(w, trend)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, trend)
+}
+
+// GetCrashTimeline handles crash timeline analytics
+// @Summary Get crash timeline
+// @Description Get crash occurrences over time
+// @Tags analytics
+// @Accept json
+// @Produce json
+// @Param campaign_id query string false "Campaign ID"
+// @Param job_id query string false "Job ID"
+// @Param start_time query string false "Start time (RFC3339)"
+// @Param end_time query string false "End time (RFC3339)"
+// @Param severity query string false "Minimum severity filter"
+// @Param format query string false "Export format" Enums(json,csv) default(json)
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]interface{}
+// @Failure 500 {object} map[string]interface{}
+// @Router /api/v2/analytics/crash-timeline [get]
+func (h *Handler) GetCrashTimeline(w http.ResponseWriter, r *http.Request) {
+	// Parse time range
+	startTime, endTime, err := h.parseTimeRange(r)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "INVALID_TIME_RANGE", err.Error())
+		return
+	}
+
+	// Get campaign ID from query
+	campaignID := r.URL.Query().Get("campaign_id")
+	if campaignID == "" {
+		h.writeError(w, http.StatusBadRequest, "CAMPAIGN_ID_REQUIRED", "campaign_id is required")
+		return
+	}
+
+	// Calculate window from time range
+	window := endTime.Sub(startTime)
+
+	// Get crash rate from analytics service
+	crashRate, err := h.analyticsService.GetCrashRate(r.Context(), campaignID, window)
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to retrieve crash timeline")
+		h.writeError(w, http.StatusInternalServerError, "DATA_RETRIEVAL_FAILED", "Failed to retrieve crash data")
+		return
+	}
+
+	// Handle export format
+	format := r.URL.Query().Get("format")
+	if format == "csv" {
+		h.exportCrashRateCSV(w, crashRate)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, crashRate)
+}
+
+// GetFuzzerComparison handles fuzzer comparison analytics
+// @Summary Compare fuzzer performance
+// @Description Compare performance metrics across different fuzzers/campaigns
+// @Tags analytics
+// @Accept json
+// @Produce json
+// @Param campaign_ids query []string true "Campaign IDs to compare"
+// @Param metrics query []string false "Metrics to compare" Enums(coverage,crashes,corpus_size,exec_per_sec)
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]interface{}
+// @Failure 500 {object} map[string]interface{}
+// @Router /api/v2/analytics/fuzzer-comparison [get]
+func (h *Handler) GetFuzzerComparison(w http.ResponseWriter, r *http.Request) {
+	// Parse campaign IDs
+	campaignIDsStr := r.URL.Query().Get("campaign_ids")
+	if campaignIDsStr == "" {
+		h.writeError(w, http.StatusBadRequest, "CAMPAIGN_IDS_REQUIRED", "campaign_ids parameter is required")
+		return
+	}
+
+	campaignIDs := strings.Split(campaignIDsStr, ",")
+	if len(campaignIDs) < 2 {
+		h.writeError(w, http.StatusBadRequest, "INSUFFICIENT_CAMPAIGNS", "At least 2 campaigns required for comparison")
+		return
+	}
+
+	// Parse metrics to compare (currently not used by CompareCampaigns)
+	// metricsStr := r.URL.Query().Get("metrics")
+	// var metrics []string
+	// if metricsStr != "" {
+	// 	metrics = strings.Split(metricsStr, ",")
+	// } else {
+	// 	// Default metrics
+	// 	metrics = []string{"coverage", "crashes", "corpus_size", "exec_per_sec"}
+	// }
+
+	// Get comparison data
+	comparison, err := h.analyticsService.CompareCampaigns(r.Context(), campaignIDs)
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to generate fuzzer comparison")
+		h.writeError(w, http.StatusInternalServerError, "COMPARISON_FAILED", "Failed to generate comparison data")
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, comparison)
+}
+
+// GetCampaignInsights handles campaign insights generation
+// @Summary Get campaign insights
+// @Description Get AI-generated insights and recommendations for a campaign
+// @Tags analytics
+// @Accept json
+// @Produce json
+// @Param id path string true "Campaign ID"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]interface{}
+// @Failure 404 {object} map[string]interface{}
+// @Failure 500 {object} map[string]interface{}
+// @Router /api/v2/analytics/campaigns/{id}/insights [get]
+func (h *Handler) GetCampaignInsights(w http.ResponseWriter, r *http.Request) {
+	// Get campaign ID from path
+	vars := mux.Vars(r)
+	campaignID := vars["id"]
+	if campaignID == "" {
+		h.writeError(w, http.StatusBadRequest, "INVALID_ID", "Campaign ID is required")
+		return
+	}
+
+	// Get campaign summary from analytics service
+	summary, err := h.analyticsService.GetCampaignSummary(r.Context(), campaignID)
+	if err != nil {
+		if err == ErrCampaignNotFound {
+			h.writeError(w, http.StatusNotFound, "NOT_FOUND", "Campaign not found")
+		} else {
+			h.logger.WithError(err).Error("Failed to get campaign summary")
+			h.writeError(w, http.StatusInternalServerError, "SUMMARY_FAILED", "Failed to get campaign summary")
+		}
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, summary)
+}
+
+// Helper functions
+
+func (h *Handler) parseTimeRange(r *http.Request) (time.Time, time.Time, error) {
+	var startTime, endTime time.Time
+
+	// Parse start time
+	startStr := r.URL.Query().Get("start_time")
+	if startStr != "" {
+		t, err := time.Parse(time.RFC3339, startStr)
+		if err != nil {
+			return startTime, endTime, fmt.Errorf("invalid start_time format")
+		}
+		startTime = t
+	} else {
+		// Default to 24 hours ago
+		startTime = time.Now().Add(-24 * time.Hour)
+	}
+
+	// Parse end time
+	endStr := r.URL.Query().Get("end_time")
+	if endStr != "" {
+		t, err := time.Parse(time.RFC3339, endStr)
+		if err != nil {
+			return startTime, endTime, fmt.Errorf("invalid end_time format")
+		}
+		endTime = t
+	} else {
+		// Default to now
+		endTime = time.Now()
+	}
+
+	// Validate range
+	if endTime.Before(startTime) {
+		return startTime, endTime, fmt.Errorf("end_time must be after start_time")
+	}
+
+	return startTime, endTime, nil
+}
+
+func (h *Handler) writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		h.logger.WithError(err).Error("Failed to encode JSON response")
+	}
+}
+
+func (h *Handler) writeError(w http.ResponseWriter, statusCode int, code, message string) {
+	response := map[string]interface{}{
+		"error": map[string]interface{}{
+			"code":    code,
+			"message": message,
+		},
+	}
+	h.writeJSON(w, statusCode, response)
+}
+
+func (h *Handler) exportCoverageTrendCSV(w http.ResponseWriter, trend *service.CoverageTrend) {
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", "attachment; filename=coverage-trend.csv")
+
+	writer := csv.NewWriter(w)
+	defer writer.Flush()
+
+	// Write headers
+	headers := []string{"timestamp", "total_edges", "new_edges", "exec_count", "exec_per_sec", "corpus_size"}
+	if err := writer.Write(headers); err != nil {
+		h.logger.WithError(err).Error("Failed to write CSV headers")
+		return
+	}
+
+	// Write data points
+	for _, point := range trend.DataPoints {
+		record := []string{
+			point.Timestamp.Format(time.RFC3339),
+			fmt.Sprintf("%d", point.TotalEdges),
+			fmt.Sprintf("%d", point.NewEdges),
+			fmt.Sprintf("%d", point.ExecCount),
+			fmt.Sprintf("%.2f", point.ExecPerSec),
+			fmt.Sprintf("%d", point.CorpusSize),
+		}
+		if err := writer.Write(record); err != nil {
+			h.logger.WithError(err).Error("Failed to write CSV record")
+			return
+		}
+	}
+}
+
+func (h *Handler) exportCrashRateCSV(w http.ResponseWriter, crashRate *service.CrashRateMetrics) {
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", "attachment; filename=crash-rate.csv")
+
+	writer := csv.NewWriter(w)
+	defer writer.Flush()
+
+	// Write headers
+	headers := []string{"campaign_id", "total_crashes", "unique_crashes", "crash_rate", "window"}
+	if err := writer.Write(headers); err != nil {
+		h.logger.WithError(err).Error("Failed to write CSV headers")
+		return
+	}
+
+	// Write data
+	record := []string{
+		crashRate.CampaignID,
+		strconv.Itoa(crashRate.TotalCrashes),
+		strconv.Itoa(crashRate.UniqueCrashes),
+		fmt.Sprintf("%.2f", crashRate.CrashRate),
+		crashRate.Window.String(),
+	}
+	if err := writer.Write(record); err != nil {
+		h.logger.WithError(err).Error("Failed to write CSV record")
+		return
+	}
+}

@@ -196,6 +196,13 @@ func (s *Server) setupAPIRoutes(router *mux.Router) {
 	router.HandleFunc("/corpus/{id}/files/{hash}/download-url", s.handleGetCorpusDownloadURL).Methods("GET")
 	router.HandleFunc("/corpus/{id}/upload-url", s.handleGetCorpusUploadURL).Methods("POST")
 
+	// Queue management routes (for asynq mode)
+	router.HandleFunc("/queue/stats", s.handleQueueStats).Methods("GET")
+	router.HandleFunc("/queue/stats/{queue}", s.handleQueueStatsDetail).Methods("GET")
+	router.HandleFunc("/queue/pause", s.handleQueuePause).Methods("POST")
+	router.HandleFunc("/queue/resume", s.handleQueueResume).Methods("POST")
+	router.HandleFunc("/queue/purge/{queue}", s.handleQueuePurge).Methods("DELETE")
+
 	// Analytics routes
 	router.HandleFunc("/analytics/coverage-trend", s.handleGetCoverageTrend).Methods("GET")
 	router.HandleFunc("/analytics/crash-timeline", s.handleGetCrashTimeline).Methods("GET")
@@ -248,13 +255,24 @@ type spaFileHandler struct {
 }
 
 func (h *spaFileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Check if it's an API, metrics, CSS, or JS request
+	// Check if it's an API, metrics, CSS, JS, or other API endpoint
 	if strings.HasPrefix(r.URL.Path, "/api/") ||
 		strings.HasPrefix(r.URL.Path, "/metrics") ||
 		strings.HasPrefix(r.URL.Path, "/health") ||
 		strings.HasPrefix(r.URL.Path, "/status") ||
 		strings.HasPrefix(r.URL.Path, "/css/") ||
-		strings.HasPrefix(r.URL.Path, "/js/") {
+		strings.HasPrefix(r.URL.Path, "/js/") ||
+		strings.HasPrefix(r.URL.Path, "/jobs") ||
+		strings.HasPrefix(r.URL.Path, "/bots") ||
+		strings.HasPrefix(r.URL.Path, "/results") ||
+		strings.HasPrefix(r.URL.Path, "/campaigns") ||
+		strings.HasPrefix(r.URL.Path, "/corpus") ||
+		strings.HasPrefix(r.URL.Path, "/crashes") ||
+		strings.HasPrefix(r.URL.Path, "/system") ||
+		strings.HasPrefix(r.URL.Path, "/timeouts") ||
+		strings.HasPrefix(r.URL.Path, "/analytics") ||
+		strings.HasPrefix(r.URL.Path, "/quarantine") ||
+		strings.HasPrefix(r.URL.Path, "/reproduction") {
 		// These are handled by other routes
 		http.NotFound(w, r)
 		return

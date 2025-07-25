@@ -72,6 +72,7 @@ type Job struct {
 	CollectionID      *string                `json:"collection_id" db:"collection_id"` // Corpus collection ID
 	UseCampaignCorpus bool                   `json:"use_campaign_corpus" db:"use_campaign_corpus"`
 	Metadata          map[string]interface{} `json:"metadata" db:"metadata"` // For job-specific data (e.g., crashID for minimization)
+	Priority          int                    `json:"priority" db:"priority"` // Job priority (0-100, higher is more important)
 }
 
 type JobType string
