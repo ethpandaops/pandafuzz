@@ -129,11 +129,14 @@ EOF
 
         # Compile the test program
         echo -e "${YELLOW}Compiling AFL++ test binary...${NC}"
-        if command -v afl-gcc >/dev/null 2>&1; then
+        if command -v afl-clang-fast >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ Found afl-clang-fast, building instrumented binary with LLVM mode${NC}"
+            afl-clang-fast -g -O0 -o afl_test afl_test.c 2>/dev/null || gcc -g -O0 -o afl_test afl_test.c
+        elif command -v afl-gcc >/dev/null 2>&1; then
             echo -e "${GREEN}✓ Found afl-gcc, building instrumented binary${NC}"
             afl-gcc -g -O0 -o afl_test afl_test.c 2>/dev/null || gcc -g -O0 -o afl_test afl_test.c
         else
-            echo -e "${YELLOW}⚠️  afl-gcc not found, using regular gcc${NC}"
+            echo -e "${YELLOW}⚠️  AFL++ compilers not found, using regular gcc${NC}"
             gcc -g -O0 -o afl_test afl_test.c
         fi
         
