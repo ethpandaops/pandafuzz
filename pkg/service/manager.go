@@ -51,8 +51,8 @@ func NewManager(
 	}
 
 	// Create monitoring service first
-	monitoring := NewMonitoringService(state, logger)
-	collector := monitoring.GetCollector()
+	monitoringService := NewMonitoringService(state, logger)
+	collector := monitoringService.GetCollector()
 
 	// Create campaign-related services
 	// Note: These need proper initialization with required dependencies
@@ -124,6 +124,15 @@ func NewManager(
 	resultService := NewResultService(state, config, logger)
 	systemService := NewSystemService(state, timeoutManager, recoveryManager, config, logger)
 
+	// If using asynq queue backend, create and set the queue
+	if config.Queue.Backend == "asynq" {
+		// For now, skip asynq initialization in manager
+		// The asynq queue requires a full JobRepository implementation
+		// which the Storage interface doesn't provide
+		logger.Info("Asynq queue backend configured, but initialization skipped in manager")
+		logger.Info("Bot workers will connect directly to Redis for job processing")
+	}
+
 	// Wrap with monitoring if enabled
 	if config.Monitoring.Enabled {
 		botService = NewMonitoringAwareBotService(botService, collector)
@@ -136,7 +145,7 @@ func NewManager(
 		Job:             jobService,
 		Result:          resultService,
 		System:          systemService,
-		Monitoring:      monitoring,
+		Monitoring:      monitoringService,
 		Campaign:        campaignService,
 		Corpus:          corpusService,
 		Reproducibility: reproducibilityService,

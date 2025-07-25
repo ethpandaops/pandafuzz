@@ -196,6 +196,13 @@ func (s *Server) setupAPIRoutes(router *mux.Router) {
 	router.HandleFunc("/corpus/{id}/files/{hash}/download-url", s.handleGetCorpusDownloadURL).Methods("GET")
 	router.HandleFunc("/corpus/{id}/upload-url", s.handleGetCorpusUploadURL).Methods("POST")
 
+	// Queue management routes (for asynq mode)
+	router.HandleFunc("/queue/stats", s.handleQueueStats).Methods("GET")
+	router.HandleFunc("/queue/stats/{queue}", s.handleQueueStatsDetail).Methods("GET")
+	router.HandleFunc("/queue/pause", s.handleQueuePause).Methods("POST")
+	router.HandleFunc("/queue/resume", s.handleQueueResume).Methods("POST")
+	router.HandleFunc("/queue/purge/{queue}", s.handleQueuePurge).Methods("DELETE")
+
 	// Analytics routes
 	router.HandleFunc("/analytics/coverage-trend", s.handleGetCoverageTrend).Methods("GET")
 	router.HandleFunc("/analytics/crash-timeline", s.handleGetCrashTimeline).Methods("GET")

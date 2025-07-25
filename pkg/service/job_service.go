@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/domain/job/scheduler"
+	"github.com/ethpandaops/pandafuzz/pkg/domain/job/types"
 	"github.com/ethpandaops/pandafuzz/pkg/errors"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
@@ -18,6 +20,8 @@ type jobService struct {
 	config         *common.MasterConfig
 	logger         *logrus.Logger
 	corpusService  common.CorpusService
+	queue          scheduler.Queue // Optional queue for asynq mode
+	useAsynq       bool
 
 	// Lifecycle management
 	ctx    context.Context
@@ -41,6 +45,7 @@ func NewJobService(
 		config:         config,
 		logger:         logger,
 		corpusService:  corpusService,
+		useAsynq:       config.Queue.Backend == "asynq",
 	}
 }
 
@@ -109,11 +114,56 @@ func (s *jobService) CreateJob(ctx context.Context, req CreateJobRequest) (*comm
 		CampaignID:        campaignID,
 		CollectionID:      collectionID,
 		UseCampaignCorpus: useCampaignCorpus,
+		Priority:          req.Priority,
 	}
 
 	// Save job with context
 	if err := s.state.SaveJobWithRetry(job); err != nil {
 		return nil, errors.Wrap(errors.ErrorTypeDatabase, "create_job", "Failed to save job", err)
+	}
+
+	// If using asynq, enqueue the job
+	if s.useAsynq && s.queue != nil {
+		// Convert to domain job type for queue
+		domainJob := &types.Job{
+			ID:           job.ID,
+			Name:         job.Name,
+			FuzzerType:   job.Fuzzer,
+			TargetBinary: job.Target,
+			TargetArgs:   []string{}, // Would need to parse from config
+			CorpusPath:   fmt.Sprintf("%s/corpus", job.WorkDir),
+			OutputPath:   fmt.Sprintf("%s/outputs", job.WorkDir),
+			FuzzerConfig: make(map[string]any),
+			Priority:     convertPriorityToDomain(job.Priority),
+			Status:       types.StatusQueued,
+			MaxRetries:   3,
+			RetryDelay:   30 * time.Second,
+			MaxDuration:  duration,
+			QueuedAt:     &now,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			Metadata: map[string]string{
+				"fuzzer":   job.Fuzzer,
+				"target":   job.Target,
+				"work_dir": job.WorkDir,
+			},
+		}
+
+		if campaignID != nil {
+			domainJob.Metadata["campaign_id"] = *campaignID
+		}
+		if collectionID != nil {
+			domainJob.Metadata["collection_id"] = *collectionID
+		}
+		domainJob.Metadata["use_campaign_corpus"] = fmt.Sprintf("%v", useCampaignCorpus)
+
+		// Enqueue to asynq
+		if err := s.queue.Enqueue(ctx, domainJob); err != nil {
+			// Log error but don't fail - job is already saved in DB
+			s.logger.WithError(err).WithField("job_id", jobID).Error("Failed to enqueue job to asynq")
+		} else {
+			s.logger.WithField("job_id", jobID).Info("Job enqueued to asynq")
+		}
 	}
 
 	// Link job to campaign/corpus if provided
@@ -231,6 +281,11 @@ func (s *jobService) ListJobs(ctx context.Context, filter JobFilter) ([]*common.
 func (s *jobService) AssignJob(ctx context.Context, botID string) (*common.Job, error) {
 	if botID == "" {
 		return nil, errors.NewValidationError("assign_job", "Bot ID is required")
+	}
+
+	// If using asynq, jobs are pulled by workers, not assigned
+	if s.useAsynq {
+		return nil, errors.New(errors.ErrorTypeNotFound, "assign_job", "Job assignment not available in queue mode - bots should run as workers")
 	}
 
 	// Use optimized assignment method if available
@@ -412,8 +467,13 @@ func (s *jobService) GetJobLogs(ctx context.Context, jobID string) ([]string, er
 func (s *jobService) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	// Start any background goroutines here
-	// Currently job service doesn't have background tasks
+	// If using asynq and queue is set, start it
+	if s.useAsynq && s.queue != nil {
+		if err := s.queue.Start(ctx); err != nil {
+			return errors.Wrap(errors.ErrorTypeSystem, "start_job_service", "Failed to start queue", err)
+		}
+		s.logger.Info("Asynq queue started")
+	}
 
 	s.logger.Info("Job service started")
 	return nil
@@ -459,8 +519,12 @@ func (s *jobService) Stop() error {
 		s.cancel()
 	}
 
-	// Clean up any resources
-	// Currently job service doesn't have resources to clean up
+	// Stop the queue if using asynq
+	if s.useAsynq && s.queue != nil {
+		if err := s.queue.Stop(); err != nil {
+			s.logger.WithError(err).Error("Failed to stop queue cleanly")
+		}
+	}
 
 	s.logger.Info("Job service stopped")
 	return nil
@@ -555,4 +619,53 @@ func (s *jobService) GetJobCrashes(ctx context.Context, jobID string) ([]*common
 	// This requires access to the storage interface which is not exposed through StateStore
 	// For now, return empty list
 	return []*common.CrashResult{}, nil
+}
+
+// GetQueueStats returns queue statistics (for asynq mode)
+func (s *jobService) GetQueueStats(ctx context.Context) (*QueueStats, error) {
+	if !s.useAsynq || s.queue == nil {
+		return nil, errors.New(errors.ErrorTypeNotFound, "get_queue_stats", "Queue statistics not available in polling mode")
+	}
+
+	stats := s.queue.GetStats()
+
+	// Convert scheduler.QueueStats to service.QueueStats
+	return &QueueStats{
+		TotalJobs:       int(stats.TotalJobs),
+		PendingJobs:     int(stats.QueueDepth),
+		RunningJobs:     stats.WorkersActive,
+		CompletedJobs:   int(stats.ProcessedCount),
+		FailedJobs:      int(stats.FailedCount),
+		EnqueuedCount:   int(stats.EnqueuedCount),
+		ProcessedCount:  int(stats.ProcessedCount),
+		FailedCount:     int(stats.FailedCount),
+		RetryCount:      int(stats.RetryCount),
+		AverageWaitTime: stats.AverageWaitTime,
+		AverageExecTime: stats.AverageExecTime,
+		WorkersActive:   stats.WorkersActive,
+		WorkersTotal:    stats.WorkersTotal,
+		LastProcessedAt: stats.LastProcessedAt,
+	}, nil
+}
+
+// SetQueue sets the queue instance (called during initialization)
+func (s *jobService) SetQueue(queue scheduler.Queue) {
+	s.queue = queue
+}
+
+// Helper functions
+
+func convertPriorityToDomain(priority int) types.JobPriority {
+	switch {
+	case priority >= 90:
+		return types.PriorityCritical
+	case priority >= 50:
+		return types.PriorityHigh
+	case priority >= 20:
+		return types.PriorityNormal
+	case priority >= 10:
+		return types.PriorityLow
+	default:
+		return types.PriorityLow
+	}
 }

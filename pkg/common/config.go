@@ -31,20 +31,24 @@ type MasterConfig struct {
 	Monitoring MonitoringConfig     `yaml:"monitoring" json:"monitoring"`
 	Security   SecurityConfig       `yaml:"security" json:"security"`
 	Logging    LoggingConfig        `yaml:"logging" json:"logging"`
+	Queue      QueueConfig          `yaml:"queue" json:"queue"`
+	Redis      config.RedisConfig   `yaml:"redis" json:"redis"`
 }
 
 // BotConfig holds all bot agent configuration
 type BotConfig struct {
-	ID           string            `yaml:"id" json:"id" validate:"required"`
-	Name         string            `yaml:"name" json:"name"`
-	MasterURL    string            `yaml:"master_url" json:"master_url" validate:"required,url"`
-	APIPort      int               `yaml:"api_port" json:"api_port"`
-	Capabilities []string          `yaml:"capabilities" json:"capabilities" validate:"required"`
-	Fuzzing      FuzzingConfig     `yaml:"fuzzing" json:"fuzzing" validate:"required"`
-	Timeouts     BotTimeoutConfig  `yaml:"timeouts" json:"timeouts" validate:"required"`
-	Retry        BotRetryConfig    `yaml:"retry" json:"retry"`
-	Resources    BotResourceConfig `yaml:"resources" json:"resources"`
-	Logging      LoggingConfig     `yaml:"logging" json:"logging"`
+	ID           string              `yaml:"id" json:"id" validate:"required"`
+	Name         string              `yaml:"name" json:"name"`
+	MasterURL    string              `yaml:"master_url" json:"master_url" validate:"required,url"`
+	APIPort      int                 `yaml:"api_port" json:"api_port"`
+	Capabilities []string            `yaml:"capabilities" json:"capabilities" validate:"required"`
+	Fuzzing      FuzzingConfig       `yaml:"fuzzing" json:"fuzzing" validate:"required"`
+	Timeouts     BotTimeoutConfig    `yaml:"timeouts" json:"timeouts" validate:"required"`
+	Retry        BotRetryConfig      `yaml:"retry" json:"retry"`
+	Resources    BotResourceConfig   `yaml:"resources" json:"resources"`
+	Logging      LoggingConfig       `yaml:"logging" json:"logging"`
+	WorkerMode   bool                `yaml:"worker_mode" json:"worker_mode"`
+	Redis        *config.RedisConfig `yaml:"redis" json:"redis"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -165,6 +169,11 @@ type BotResourceConfig struct {
 	MaxDiskSpaceMB int `yaml:"max_disk_space_mb" json:"max_disk_space_mb"`
 	MaxOpenFiles   int `yaml:"max_open_files" json:"max_open_files"`
 	MaxProcesses   int `yaml:"max_processes" json:"max_processes"`
+}
+
+// QueueConfig holds queue system configuration
+type QueueConfig struct {
+	Backend string `yaml:"backend" json:"backend"` // "memory" or "asynq"
 }
 
 // ConfigManager handles configuration loading and validation

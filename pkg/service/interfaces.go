@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/domain/job/scheduler"
 )
 
 // Common errors
@@ -94,6 +95,12 @@ type JobService interface {
 
 	// GetJobCrashes retrieves crashes for a job
 	GetJobCrashes(ctx context.Context, jobID string) ([]*common.CrashResult, error)
+
+	// GetQueueStats retrieves queue statistics (asynq mode only)
+	GetQueueStats(ctx context.Context) (*QueueStats, error)
+
+	// SetQueue sets the queue instance (for asynq mode)
+	SetQueue(queue scheduler.Queue)
 }
 
 // ResultService handles result processing
@@ -150,6 +157,7 @@ type CreateJobRequest struct {
 	CorpusID          string           `json:"corpus_id,omitempty"`           // Use standalone corpus
 	CollectionID      string           `json:"collection_id,omitempty"`       // Use corpus collection
 	UseCampaignCorpus bool             `json:"use_campaign_corpus,omitempty"` // Whether to inherit corpus from campaign
+	Priority          int              `json:"priority,omitempty"`            // Job priority (0-100, higher is more important)
 }
 
 // JobFilter represents job list filters
@@ -215,4 +223,22 @@ type JobStats struct {
 	Duration         time.Duration `json:"duration"`
 	StartTime        time.Time     `json:"start_time"`
 	EndTime          *time.Time    `json:"end_time,omitempty"`
+}
+
+// QueueStats represents queue statistics for asynq mode
+type QueueStats struct {
+	TotalJobs       int           `json:"total_jobs"`
+	PendingJobs     int           `json:"pending_jobs"`
+	RunningJobs     int           `json:"running_jobs"`
+	CompletedJobs   int           `json:"completed_jobs"`
+	FailedJobs      int           `json:"failed_jobs"`
+	EnqueuedCount   int           `json:"enqueued_count"`
+	ProcessedCount  int           `json:"processed_count"`
+	FailedCount     int           `json:"failed_count"`
+	RetryCount      int           `json:"retry_count"`
+	AverageWaitTime time.Duration `json:"average_wait_time"`
+	AverageExecTime time.Duration `json:"average_exec_time"`
+	WorkersActive   int           `json:"workers_active"`
+	WorkersTotal    int           `json:"workers_total"`
+	LastProcessedAt time.Time     `json:"last_processed_at"`
 }
