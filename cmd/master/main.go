@@ -43,6 +43,9 @@ func main() {
 		port          = flag.Int("port", 0, "Override HTTP server port")
 		metricsPort   = flag.Int("metrics-port", 0, "Override metrics server port")
 		enableMetrics = flag.Bool("metrics", true, "Enable Prometheus metrics")
+		queueBackend  = flag.String("queue-backend", "", "Queue backend (memory|asynq), overrides config")
+		redisHost     = flag.String("redis-host", "localhost", "Redis host for asynq backend")
+		redisPort     = flag.Int("redis-port", 6379, "Redis port for asynq backend")
 	)
 
 	flag.Parse()
@@ -75,12 +78,31 @@ func main() {
 	config.Monitoring.MetricsEnabled = *enableMetrics
 	config.Monitoring.Enabled = *enableMetrics
 
+	// Override queue backend if specified
+	if *queueBackend != "" {
+		config.Queue.Backend = *queueBackend
+		if *queueBackend == "asynq" {
+			// Configure Redis if using asynq
+			config.Redis.Host = *redisHost
+			config.Redis.Port = *redisPort
+		}
+	}
+
 	// Setup logging
 	logLevelStr := *logLevel
 	if config.Logging.Level != "" {
 		logLevelStr = config.Logging.Level
 	}
 	logger := setupLogging(logLevelStr)
+
+	// Log queue backend configuration if specified
+	if *queueBackend == "asynq" {
+		logger.WithFields(logrus.Fields{
+			"backend":    "asynq",
+			"redis_host": *redisHost,
+			"redis_port": *redisPort,
+		}).Info("Queue backend configured")
+	}
 
 	// Validate configuration
 	if err := validateConfig(config); err != nil {
@@ -431,6 +453,13 @@ func initializeDependencies(config *common.MasterConfig, logger *logrus.Logger) 
 		config,
 		logger,
 	)
+
+	// Asynq queue initialization is skipped in master
+	// Bot workers will connect directly to Redis for job processing
+	if config.Queue.Backend == "asynq" {
+		logger.Info("Asynq queue backend configured for bot workers")
+		logger.Info("Master will enqueue jobs to Redis, workers will process them")
+	}
 
 	return &Dependencies{
 		Database:        db,

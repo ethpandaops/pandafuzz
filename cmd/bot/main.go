@@ -14,6 +14,7 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/bot"
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	pkgconfig "github.com/ethpandaops/pandafuzz/pkg/config"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
@@ -37,6 +38,9 @@ func main() {
 		workDir      = flag.String("work-dir", "./work", "Working directory for fuzzing")
 		capabilities = flag.String("capabilities", "", "Comma-separated list of fuzzer capabilities")
 		healthCheck  = flag.Bool("health-check", false, "Perform health check and exit")
+		workerMode   = flag.Bool("worker-mode", false, "Run bot in worker mode (pulls from queue instead of polling)")
+		redisHost    = flag.String("redis-host", "localhost", "Redis host for worker mode")
+		redisPort    = flag.Int("redis-port", 6379, "Redis port for worker mode")
 	)
 
 	flag.Parse()
@@ -105,12 +109,32 @@ func main() {
 		logger.WithError(err).Fatal("Failed to setup working directory")
 	}
 
+	// Configure worker mode
+	if *workerMode {
+		config.WorkerMode = true
+		// Override Redis config if provided via flags
+		if config.Redis == nil {
+			config.Redis = &pkgconfig.RedisConfig{}
+		}
+		config.Redis.Host = *redisHost
+		config.Redis.Port = *redisPort
+
+		logger.WithFields(logrus.Fields{
+			"mode":       "worker",
+			"redis_host": *redisHost,
+			"redis_port": *redisPort,
+		}).Info("Configuring bot for worker mode")
+	} else {
+		logger.Info("Configuring bot for polling mode")
+	}
+
 	// Create bot agent
 	logger.WithFields(logrus.Fields{
 		"bot_id":       config.ID,
 		"master_url":   config.MasterURL,
 		"capabilities": config.Capabilities,
 		"work_dir":     config.Fuzzing.WorkDir,
+		"mode":         map[bool]string{true: "worker", false: "polling"}[*workerMode],
 	}).Info("Initializing PandaFuzz Bot")
 
 	agent, err := bot.NewAgent(config, logger)
@@ -131,9 +155,9 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// Start agent
-	logger.Info("Starting bot agent")
-	if err := agent.Start(); err != nil {
+	// Start agent with mode
+	logger.WithField("mode", map[bool]string{true: "worker", false: "polling"}[*workerMode]).Info("Starting bot agent")
+	if err := agent.StartWithMode(*workerMode); err != nil {
 		logger.WithError(err).Fatal("Failed to start bot agent")
 	}
 

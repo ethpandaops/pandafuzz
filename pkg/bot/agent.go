@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/config"
 	"github.com/sirupsen/logrus"
 )
 
@@ -57,6 +58,10 @@ type Agent struct {
 
 	// Minimizer client for crash minimization
 	minimizerClient *MinimizerClient
+
+	// Worker mode fields
+	workerMode bool
+	worker     *Worker
 }
 
 // AgentStats tracks bot agent statistics
@@ -124,14 +129,20 @@ func NewAgent(config *common.BotConfig, logger *logrus.Logger) (*Agent, error) {
 			StartTime:     time.Now(),
 			CurrentStatus: "initialized",
 		},
-		ID:        config.ID,
-		startTime: time.Now(),
-		version:   "1.0.0", // TODO: Get from build info
+		ID:         config.ID,
+		startTime:  time.Now(),
+		version:    "1.0.0", // TODO: Get from build info
+		workerMode: false,   // Default to polling mode
 	}, nil
 }
 
 // Start starts the bot agent
 func (a *Agent) Start() error {
+	return a.StartWithMode(false) // Default to polling mode
+}
+
+// StartWithMode starts the bot agent in specified mode
+func (a *Agent) StartWithMode(workerMode bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -139,9 +150,12 @@ func (a *Agent) Start() error {
 		return common.NewSystemError("start_agent", fmt.Errorf("agent already running"))
 	}
 
+	a.workerMode = workerMode
+
 	a.logger.WithFields(logrus.Fields{
-		"bot_id":     a.config.ID,
-		"master_url": a.config.MasterURL,
+		"bot_id":      a.config.ID,
+		"master_url":  a.config.MasterURL,
+		"worker_mode": workerMode,
 	}).Info("Starting bot agent")
 
 	// Use configured API port or default to 9049
@@ -198,9 +212,47 @@ func (a *Agent) Start() error {
 	a.wg.Add(1)
 	go a.connectResultCollectorToExecutor()
 
-	// Start main loop
-	a.wg.Add(1)
-	go a.run()
+	// Start appropriate mode
+	if a.workerMode {
+		// Worker mode: Start asynq worker
+		a.logger.Info("Starting in worker mode")
+
+		// Create worker if not already created
+		if a.worker == nil {
+			worker, err := NewWorker(a.config, a.logger)
+			if err != nil {
+				return common.NewSystemError("create_worker", err)
+			}
+			a.worker = worker
+		}
+
+		// Configure worker
+		workerCfg := WorkerConfig{
+			Queues: map[string]int{
+				"critical": 6,
+				"default":  3,
+				"low":      1,
+			},
+			Concurrency:    1, // One job at a time per bot
+			StrictPriority: true,
+			RetryConfig: config.RetryConfig{
+				MaxRetries:         3,
+				RetryDelay:         30 * time.Second,
+				ExponentialBackoff: true,
+			},
+			ShutdownWait: 30 * time.Second,
+		}
+
+		// Start worker
+		if err := a.worker.Start(a.ctx, workerCfg); err != nil {
+			return common.NewSystemError("start_worker", err)
+		}
+	} else {
+		// Polling mode: Start traditional polling loop
+		a.logger.Info("Starting in polling mode")
+		a.wg.Add(1)
+		go a.run()
+	}
 
 	// Setup signal handling
 	a.setupSignalHandling()
@@ -269,6 +321,13 @@ func (a *Agent) Stop() error {
 		a.cleanupManager.Stop()
 	}
 
+	// Stop worker if in worker mode
+	if a.workerMode && a.worker != nil {
+		if err := a.worker.Stop(); err != nil {
+			a.logger.WithError(err).Warn("Failed to stop worker cleanly")
+		}
+	}
+
 	// Deregister from master
 	if err := a.deregisterFromMaster(); err != nil {
 		a.logger.WithError(err).Warn("Failed to deregister from master")
@@ -284,9 +343,35 @@ func (a *Agent) Stop() error {
 	return nil
 }
 
-// run is the main agent loop
+// IsWorkerMode returns true if the agent is running in worker mode
+func (a *Agent) IsWorkerMode() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.workerMode
+}
+
+// SetWorkerMode sets the worker mode (must be called before Start)
+func (a *Agent) SetWorkerMode(enabled bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.running {
+		return fmt.Errorf("cannot change mode while agent is running")
+	}
+
+	a.workerMode = enabled
+	return nil
+}
+
+// run is the main agent loop (polling mode only)
 func (a *Agent) run() {
 	defer a.wg.Done()
+
+	// Skip if in worker mode
+	if a.workerMode {
+		a.logger.Debug("Skipping polling loop in worker mode")
+		return
+	}
 
 	ticker := time.NewTicker(10 * time.Second) // Check for jobs every 10 seconds
 	defer ticker.Stop()
