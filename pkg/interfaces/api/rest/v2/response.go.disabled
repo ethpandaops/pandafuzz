@@ -1,0 +1,70 @@
+package v2
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"time"
+
+	"github.com/sirupsen/logrus"
+)
+
+// contextKey is a custom type for context keys
+type contextKey string
+
+const (
+	// LoggerKey is the context key for the logger
+	LoggerKey contextKey = "logger"
+)
+
+// GetLogger retrieves the logger from the request context
+func GetLogger(ctx context.Context) logrus.FieldLogger {
+	if logger, ok := ctx.Value(LoggerKey).(logrus.FieldLogger); ok {
+		return logger
+	}
+	// Return a default logger if none is found
+	return logrus.StandardLogger()
+}
+
+// WriteSuccess writes a successful response
+func WriteSuccess(w http.ResponseWriter, statusCode int, data interface{}, meta interface{}, pagination *PaginationMeta) {
+	response := SuccessResponse{
+		Data:       data,
+		Meta:       meta,
+		Pagination: pagination,
+		Timestamp:  time.Now(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(response)
+}
+
+// WriteError writes an error response
+func WriteError(w http.ResponseWriter, statusCode int, code string, message string, err error) {
+	details := make(map[string]interface{})
+	if err != nil {
+		details["error"] = err.Error()
+	}
+
+	response := ErrorResponse{
+		Error:      code,
+		Code:       code,
+		Message:    message,
+		Details:    details,
+		RequestID:  w.Header().Get("X-Request-ID"),
+		Timestamp:  time.Now(),
+		StatusCode: statusCode,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(response)
+}
+
+// WriteJSON writes a JSON response
+func WriteJSON(w http.ResponseWriter, statusCode int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(data)
+}

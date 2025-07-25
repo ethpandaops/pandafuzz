@@ -251,6 +251,21 @@ func (s *Server) SetRecoveryManager(rm *RecoveryManager) {
 	// Don't initialize services here anymore - wait for storage to be initialized
 }
 
+// SetServiceManager sets the service manager (to avoid duplicate creation)
+func (s *Server) SetServiceManager(sm *service.Manager) {
+	s.services = sm
+}
+
+// GetRouter returns the configured router
+func (s *Server) GetRouter() *mux.Router {
+	return s.router
+}
+
+// InitializeRouter sets up the router without starting the server
+func (s *Server) InitializeRouter() error {
+	return s.setupRouter()
+}
+
 // InitializeStorage creates and initializes the storage backend based on configuration
 func (s *Server) InitializeStorage() error {
 	s.logger.Info("Initializing storage backend")
@@ -280,6 +295,14 @@ func (s *Server) InitializeStorage() error {
 
 // initializeServices initializes the service manager with storage backend
 func (s *Server) initializeServices() {
+	// Skip if services are already set (from dependency injection)
+	if s.services != nil {
+		s.logger.Info("Service manager already initialized, skipping creation")
+		// Just initialize bot poller
+		s.botPoller = NewBotPoller(s.state, s.services, s.logger, 5*time.Second)
+		return
+	}
+
 	// Initialize services after storage backend is ready
 	stateAdapter := NewStateStoreAdapter(s.state)
 

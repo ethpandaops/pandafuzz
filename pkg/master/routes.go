@@ -248,13 +248,24 @@ type spaFileHandler struct {
 }
 
 func (h *spaFileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Check if it's an API, metrics, CSS, or JS request
+	// Check if it's an API, metrics, CSS, JS, or other API endpoint
 	if strings.HasPrefix(r.URL.Path, "/api/") ||
 		strings.HasPrefix(r.URL.Path, "/metrics") ||
 		strings.HasPrefix(r.URL.Path, "/health") ||
 		strings.HasPrefix(r.URL.Path, "/status") ||
 		strings.HasPrefix(r.URL.Path, "/css/") ||
-		strings.HasPrefix(r.URL.Path, "/js/") {
+		strings.HasPrefix(r.URL.Path, "/js/") ||
+		strings.HasPrefix(r.URL.Path, "/jobs") ||
+		strings.HasPrefix(r.URL.Path, "/bots") ||
+		strings.HasPrefix(r.URL.Path, "/results") ||
+		strings.HasPrefix(r.URL.Path, "/campaigns") ||
+		strings.HasPrefix(r.URL.Path, "/corpus") ||
+		strings.HasPrefix(r.URL.Path, "/crashes") ||
+		strings.HasPrefix(r.URL.Path, "/system") ||
+		strings.HasPrefix(r.URL.Path, "/timeouts") ||
+		strings.HasPrefix(r.URL.Path, "/analytics") ||
+		strings.HasPrefix(r.URL.Path, "/quarantine") ||
+		strings.HasPrefix(r.URL.Path, "/reproduction") {
 		// These are handled by other routes
 		http.NotFound(w, r)
 		return

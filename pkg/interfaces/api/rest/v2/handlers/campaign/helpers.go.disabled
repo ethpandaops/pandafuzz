@@ -1,0 +1,282 @@
+package campaign
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/go-playground/validator/v10"
+	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
+)
+
+// Validator provides request validation
+type Validator struct {
+	validate *validator.Validate
+}
+
+// NewValidator creates a new validator instance
+func NewValidator() *Validator {
+	v := validator.New()
+
+	// Register custom validators
+	v.RegisterValidation("campaign_status", validateCampaignStatus)
+
+	return &Validator{
+		validate: v,
+	}
+}
+
+// ValidateStruct validates a struct
+func (v *Validator) ValidateStruct(s interface{}) error {
+	return v.validate.Struct(s)
+}
+
+func validateCampaignStatus(fl validator.FieldLevel) bool {
+	status := fl.Field().String()
+	validStatuses := []string{"pending", "running", "completed", "failed", "paused", "cancelled", "corpus_only"}
+	for _, valid := range validStatuses {
+		if status == valid {
+			return true
+		}
+	}
+	return false
+}
+
+// Request/Response types
+
+type ErrorResponse struct {
+	Error      string                 `json:"error"`
+	Code       string                 `json:"code"`
+	Message    string                 `json:"message"`
+	Details    map[string]interface{} `json:"details,omitempty"`
+	RequestID  string                 `json:"request_id"`
+	Timestamp  time.Time              `json:"timestamp"`
+	StatusCode int                    `json:"status_code"`
+}
+
+type SuccessResponse struct {
+	Data       interface{}     `json:"data"`
+	Meta       interface{}     `json:"meta,omitempty"`
+	Pagination *PaginationMeta `json:"pagination,omitempty"`
+	Timestamp  time.Time       `json:"timestamp"`
+}
+
+type CreateCampaignRequest struct {
+	Name         string            `json:"name" validate:"required,min=3,max=100"`
+	Description  string            `json:"description"`
+	TargetBinary string            `json:"target_binary" validate:"required"`
+	AutoRestart  bool              `json:"auto_restart"`
+	SharedCorpus bool              `json:"shared_corpus"`
+	Tags         []string          `json:"tags"`
+	MaxDuration  time.Duration     `json:"max_duration"`
+	MaxJobs      int               `json:"max_jobs" validate:"min=1"`
+	FuzzerConfig map[string]string `json:"fuzzer_config"`
+}
+
+type UpdateCampaignRequest struct {
+	Name         *string        `json:"name,omitempty" validate:"omitempty,min=3,max=100"`
+	Description  *string        `json:"description,omitempty"`
+	Status       *string        `json:"status,omitempty" validate:"omitempty,campaign_status"`
+	AutoRestart  *bool          `json:"auto_restart,omitempty"`
+	MaxDuration  *time.Duration `json:"max_duration,omitempty"`
+	MaxJobs      *int           `json:"max_jobs,omitempty" validate:"omitempty,min=1"`
+	SharedCorpus *bool          `json:"shared_corpus,omitempty"`
+	Tags         []string       `json:"tags,omitempty"`
+}
+
+type CampaignResponse struct {
+	*common.Campaign
+	Statistics  *CampaignStatistics `json:"statistics,omitempty"`
+	ActiveJobs  int                 `json:"active_jobs"`
+	TotalJobs   int                 `json:"total_jobs"`
+	HealthScore float64             `json:"health_score"`
+}
+
+type CampaignStatistics struct {
+	TotalCrashes     int64     `json:"total_crashes"`
+	UniqueCrashes    int64     `json:"unique_crashes"`
+	TotalCoverage    float64   `json:"total_coverage"`
+	CorpusSize       int64     `json:"corpus_size"`
+	ExecutionsPerSec int64     `json:"executions_per_sec"`
+	LastUpdated      time.Time `json:"last_updated"`
+}
+
+type CampaignTimelineEntry struct {
+	Timestamp   time.Time              `json:"timestamp"`
+	EventType   string                 `json:"event_type"`
+	Description string                 `json:"description"`
+	Data        map[string]interface{} `json:"data,omitempty"`
+}
+
+type PaginationParams struct {
+	Page     int    `json:"page"`
+	PageSize int    `json:"page_size"`
+	Sort     string `json:"sort"`
+	Order    string `json:"order"`
+}
+
+type PaginationMeta struct {
+	Page       int   `json:"page"`
+	PageSize   int   `json:"page_size"`
+	TotalPages int   `json:"total_pages"`
+	TotalItems int64 `json:"total_items"`
+	HasNext    bool  `json:"has_next"`
+	HasPrev    bool  `json:"has_prev"`
+}
+
+// Helper functions
+
+func getLogger(ctx context.Context) logrus.FieldLogger {
+	if logger, ok := ctx.Value("logger").(logrus.FieldLogger); ok {
+		return logger
+	}
+	return logrus.StandardLogger()
+}
+
+func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(data)
+}
+
+func writeError(w http.ResponseWriter, statusCode int, code, message string, err error) {
+	response := map[string]interface{}{
+		"error": map[string]interface{}{
+			"code":       code,
+			"message":    message,
+			"request_id": w.Header().Get("X-Request-ID"),
+		},
+	}
+
+	if err != nil && statusCode >= 500 {
+		response["error"].(map[string]interface{})["details"] = err.Error()
+	}
+
+	writeJSON(w, statusCode, response)
+}
+
+func writeSuccess(w http.ResponseWriter, statusCode int, data interface{}, meta interface{}, pagination *PaginationMeta) {
+	response := map[string]interface{}{
+		"data":       data,
+		"request_id": w.Header().Get("X-Request-ID"),
+		"timestamp":  time.Now(),
+	}
+
+	if meta != nil {
+		response["meta"] = meta
+	}
+
+	if pagination != nil {
+		response["pagination"] = pagination
+	}
+
+	writeJSON(w, statusCode, response)
+}
+
+// Validation helpers
+
+func validateCampaignID(r *http.Request) (string, error) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+	if id == "" {
+		return "", errors.New("campaign ID is required")
+	}
+	if len(id) < 3 {
+		return "", errors.New("campaign ID is too short")
+	}
+	return id, nil
+}
+
+func parsePaginationParams(r *http.Request) (*PaginationParams, error) {
+	params := &PaginationParams{
+		Page:     1,
+		PageSize: 20,
+		Order:    "asc",
+	}
+
+	// Parse page
+	if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+		page, err := strconv.Atoi(pageStr)
+		if err != nil || page < 1 {
+			return nil, fmt.Errorf("invalid page parameter: %s", pageStr)
+		}
+		params.Page = page
+	}
+
+	// Parse page size
+	if pageSizeStr := r.URL.Query().Get("page_size"); pageSizeStr != "" {
+		pageSize, err := strconv.Atoi(pageSizeStr)
+		if err != nil || pageSize < 1 || pageSize > 100 {
+			return nil, fmt.Errorf("invalid page_size parameter: %s (must be 1-100)", pageSizeStr)
+		}
+		params.PageSize = pageSize
+	}
+
+	// Parse sort field
+	if sort := r.URL.Query().Get("sort"); sort != "" {
+		params.Sort = sort
+	}
+
+	// Parse order
+	if order := r.URL.Query().Get("order"); order != "" {
+		order = strings.ToLower(order)
+		if order != "asc" && order != "desc" {
+			return nil, fmt.Errorf("invalid order parameter: %s (must be asc or desc)", order)
+		}
+		params.Order = order
+	}
+
+	return params, nil
+}
+
+func validateQueryTags(r *http.Request) ([]string, error) {
+	tagsStr := r.URL.Query().Get("tags")
+	if tagsStr == "" {
+		return nil, nil
+	}
+
+	// Parse comma-separated tags
+	tags := strings.Split(tagsStr, ",")
+
+	// Clean and validate tags
+	validTags := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag != "" {
+			if len(tag) > 50 {
+				return nil, fmt.Errorf("tag too long: %s (max 50 chars)", tag)
+			}
+			validTags = append(validTags, tag)
+		}
+	}
+
+	return validTags, nil
+}
+
+func validateLimit(limitStr string, defaultLimit, maxLimit int) (int, error) {
+	if limitStr == "" {
+		return defaultLimit, nil
+	}
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid limit: %s", limitStr)
+	}
+
+	if limit < 1 {
+		return 0, fmt.Errorf("limit must be at least 1")
+	}
+
+	if limit > maxLimit {
+		return 0, fmt.Errorf("limit cannot exceed %d", maxLimit)
+	}
+
+	return limit, nil
+}

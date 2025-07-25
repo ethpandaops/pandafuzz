@@ -1,0 +1,805 @@
+package job
+
+import (
+	"encoding/json"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/service"
+	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
+)
+
+// Handler handles job-related HTTP requests
+type Handler struct {
+	jobService      service.JobService
+	campaignService service.CampaignService
+	logger          logrus.FieldLogger
+	validator       *Validator
+}
+
+// NewHandler creates a new job handler
+func NewHandler(jobService service.JobService, campaignService service.CampaignService, logger logrus.FieldLogger) *Handler {
+	return &Handler{
+		jobService:      jobService,
+		campaignService: campaignService,
+		logger:          logger,
+		validator:       NewValidator(),
+	}
+}
+
+// RegisterRoutes registers job routes
+func (h *Handler) RegisterRoutes(r *mux.Router) {
+	r.HandleFunc("/jobs", h.CreateJob).Methods("POST")
+	r.HandleFunc("/jobs", h.ListJobs).Methods("GET")
+	r.HandleFunc("/jobs/{id}", h.GetJob).Methods("GET")
+	r.HandleFunc("/jobs/{id}", h.UpdateJob).Methods("PATCH")
+	r.HandleFunc("/jobs/{id}/cancel", h.CancelJob).Methods("POST")
+	r.HandleFunc("/jobs/{id}/progress", h.GetJobProgress).Methods("GET")
+	r.HandleFunc("/jobs/{id}/logs", h.GetJobLogs).Methods("GET")
+	r.HandleFunc("/jobs/{id}/logs/stream", h.StreamJobLogs).Methods("GET")
+	r.HandleFunc("/jobs/{id}/crashes", h.GetJobCrashes).Methods("GET")
+	r.HandleFunc("/jobs/{id}/corpus", h.GetJobCorpus).Methods("GET")
+}
+
+// CreateJob creates a new fuzzing job
+// @Summary Create a new job
+// @Description Create a new fuzzing job with the specified configuration
+// @Tags jobs
+// @Accept json
+// @Produce json
+// @Param job body CreateJobRequest true "Job configuration"
+// @Success 201 {object} SuccessResponse{data=JobResponse}
+// @Failure 400 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/jobs [post]
+func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Parse request
+	var req CreateJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
+		return
+	}
+
+	// Validate request
+	if err := h.validator.ValidateStruct(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "Request validation failed", err)
+		return
+	}
+
+	// Verify campaign exists if provided
+	if req.CampaignID != "" {
+		_, err := h.campaignService.Get(r.Context(), req.CampaignID)
+		if err != nil {
+			if err == common.ErrCampaignNotFound {
+				writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+			} else {
+				logger.WithError(err).Error("Failed to verify campaign")
+				writeError(w, http.StatusInternalServerError, "VERIFY_FAILED", "Failed to verify campaign", err)
+			}
+			return
+		}
+	}
+
+	// Create job
+	job, err := h.jobService.CreateJob(r.Context(), service.CreateJobRequest{
+		Name:              req.Name,
+		Target:            req.Target,
+		Fuzzer:            req.Fuzzer,
+		Duration:          req.Duration,
+		Config:            req.Config,
+		CampaignID:        req.CampaignID,
+		CorpusID:          req.CorpusID,
+		CollectionID:      req.CollectionID,
+		UseCampaignCorpus: req.UseCampaignCorpus,
+	})
+
+	if err != nil {
+		logger.WithError(err).Error("Failed to create job")
+		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "Failed to create job", err)
+		return
+	}
+
+	// Build response
+	response := &JobResponse{
+		Job:        job,
+		Progress:   0,
+		Statistics: nil, // No stats for new job
+	}
+
+	writeSuccess(w, http.StatusCreated, response, nil, nil)
+}
+
+// ListJobs lists jobs with pagination and filtering
+// @Summary List jobs
+// @Description Get a list of jobs with optional filtering and pagination
+// @Tags jobs
+// @Accept json
+// @Produce json
+// @Param page query int false "Page number" default(1)
+// @Param page_size query int false "Page size" default(20) maximum(100)
+// @Param status query string false "Filter by status"
+// @Param fuzzer query string false "Filter by fuzzer"
+// @Param campaign_id query string false "Filter by campaign ID"
+// @Param bot_id query string false "Filter by bot ID"
+// @Param search query string false "Search in job name"
+// @Success 200 {object} SuccessResponse{data=[]JobResponse}
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/jobs [get]
+func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Parse pagination
+	pagination, err := parsePaginationParams(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PAGINATION", "Invalid pagination parameters", err)
+		return
+	}
+
+	// Build filters
+	filter := service.JobFilter{
+		Page:  pagination.Page,
+		Limit: pagination.PageSize,
+	}
+
+	// Parse status filter
+	if status := r.URL.Query().Get("status"); status != "" {
+		s := common.JobStatus(status)
+		filter.Status = &s
+	}
+
+	// Parse fuzzer filter
+	if fuzzer := r.URL.Query().Get("fuzzer"); fuzzer != "" {
+		filter.Fuzzer = &fuzzer
+	}
+
+	// Get jobs
+	jobs, err := h.jobService.ListJobs(r.Context(), filter)
+	if err != nil {
+		logger.WithError(err).Error("Failed to list jobs")
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", "Failed to list jobs", err)
+		return
+	}
+
+	// Apply additional filters
+	campaignID := r.URL.Query().Get("campaign_id")
+	botID := r.URL.Query().Get("bot_id")
+	search := r.URL.Query().Get("search")
+
+	filtered := make([]*common.Job, 0)
+	for _, job := range jobs {
+		// Campaign filter
+		if campaignID != "" && job.CampaignID != campaignID {
+			continue
+		}
+		// Bot filter
+		if botID != "" && (job.AssignedBot == nil || *job.AssignedBot != botID) {
+			continue
+		}
+		// Search filter
+		if search != "" && !containsIgnoreCase(job.Name, search) {
+			continue
+		}
+		filtered = append(filtered, job)
+	}
+	jobs = filtered
+
+	// Build response list
+	responses := make([]*JobResponse, len(jobs))
+	for i, job := range jobs {
+		stats, _ := h.jobService.GetJobStats(r.Context(), job.ID)
+		responses[i] = &JobResponse{
+			Job:        job,
+			Progress:   h.calculateProgress(job),
+			Statistics: toJobStats(stats),
+		}
+
+		// Add bot info if assigned
+		if job.AssignedBot != nil {
+			responses[i].BotInfo = &BotInfo{
+				ID: *job.AssignedBot,
+				// Name and hostname would be fetched from bot service
+			}
+		}
+
+		// Add time remaining
+		if job.Status == common.JobStatusRunning && job.StartedAt != nil {
+			remaining := h.calculateTimeRemaining(job)
+			responses[i].TimeRemaining = &remaining
+		}
+	}
+
+	// Calculate pagination metadata
+	totalCount := len(jobs) // In production, get total count from DB
+	paginationMeta := &PaginationMeta{
+		Page:       pagination.Page,
+		PageSize:   pagination.PageSize,
+		TotalPages: (totalCount + pagination.PageSize - 1) / pagination.PageSize,
+		TotalItems: int64(totalCount),
+		HasNext:    pagination.Page*pagination.PageSize < totalCount,
+		HasPrev:    pagination.Page > 1,
+	}
+
+	writeSuccess(w, http.StatusOK, responses, nil, paginationMeta)
+}
+
+// GetJob retrieves a specific job
+// @Summary Get job details
+// @Description Get detailed information about a specific job
+// @Tags jobs
+// @Accept json
+// @Produce json
+// @Param id path string true "Job ID"
+// @Success 200 {object} SuccessResponse{data=JobResponse}
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/jobs/{id} [get]
+func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate job ID
+	jobID, err := validateJobID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid job ID", err)
+		return
+	}
+
+	// Get job
+	job, err := h.jobService.GetJob(r.Context(), jobID)
+	if err != nil {
+		if err == service.ErrNoJobsAvailable {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Job not found", err)
+		} else {
+			logger.WithError(err).Error("Failed to get job")
+			writeError(w, http.StatusInternalServerError, "GET_FAILED", "Failed to get job", err)
+		}
+		return
+	}
+
+	// Get statistics
+	stats, _ := h.jobService.GetJobStats(r.Context(), jobID)
+
+	// Build response
+	response := &JobResponse{
+		Job:        job,
+		Progress:   h.calculateProgress(job),
+		Statistics: toJobStats(stats),
+	}
+
+	// Add bot info if assigned
+	if job.AssignedBot != nil {
+		response.BotInfo = &BotInfo{
+			ID: *job.AssignedBot,
+			// Name and hostname would be fetched from bot service
+		}
+	}
+
+	// Add time remaining
+	if job.Status == common.JobStatusRunning && job.StartedAt != nil {
+		remaining := h.calculateTimeRemaining(job)
+		response.TimeRemaining = &remaining
+	}
+
+	writeSuccess(w, http.StatusOK, response, nil, nil)
+}
+
+// UpdateJob updates a job (limited fields)
+// @Summary Update job
+// @Description Update job properties (limited to certain fields)
+// @Tags jobs
+// @Accept json
+// @Produce json
+// @Param id path string true "Job ID"
+// @Param updates body UpdateJobRequest true "Job updates"
+// @Success 200 {object} SuccessResponse{data=JobResponse}
+// @Failure 400 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/jobs/{id} [patch]
+func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate job ID
+	jobID, err := validateJobID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid job ID", err)
+		return
+	}
+
+	// Parse request
+	var req struct {
+		Priority *int     `json:"priority,omitempty" validate:"omitempty,min=0,max=10"`
+		Tags     []string `json:"tags,omitempty" validate:"omitempty,dive,min=1,max=50"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
+		return
+	}
+
+	// Validate request
+	if err := h.validator.ValidateStruct(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_FAILED", "Request validation failed", err)
+		return
+	}
+
+	// Get job to verify it exists and check status
+	job, err := h.jobService.GetJob(r.Context(), jobID)
+	if err != nil {
+		if err == service.ErrNoJobsAvailable {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Job not found", err)
+		} else {
+			logger.WithError(err).Error("Failed to get job")
+			writeError(w, http.StatusInternalServerError, "GET_FAILED", "Failed to get job", err)
+		}
+		return
+	}
+
+	// Only allow updates to pending jobs
+	if job.Status != common.JobStatusPending {
+		writeError(w, http.StatusConflict, "INVALID_STATUS", "Can only update pending jobs", nil)
+		return
+	}
+
+	// Apply updates (in production, this would update the job in storage)
+	if req.Priority != nil {
+		job.Priority = *req.Priority
+	}
+	if req.Tags != nil {
+		job.Tags = req.Tags
+	}
+
+	// Get updated statistics
+	stats, _ := h.jobService.GetJobStats(r.Context(), jobID)
+
+	// Build response
+	response := &JobResponse{
+		Job:        job,
+		Progress:   h.calculateProgress(job),
+		Statistics: toJobStats(stats),
+	}
+
+	writeSuccess(w, http.StatusOK, response, nil, nil)
+}
+
+// CancelJob cancels a job
+// @Summary Cancel job
+// @Description Cancel a pending or running job
+// @Tags jobs
+// @Accept json
+// @Produce json
+// @Param id path string true "Job ID"
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 409 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/jobs/{id}/cancel [post]
+func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate job ID
+	jobID, err := validateJobID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid job ID", err)
+		return
+	}
+
+	// Cancel job
+	if err := h.jobService.CancelJob(r.Context(), jobID); err != nil {
+		if err == service.ErrNoJobsAvailable {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Job not found", err)
+		} else if err == common.ErrInvalidStatus {
+			writeError(w, http.StatusConflict, "INVALID_STATUS", "Job cannot be cancelled in current status", err)
+		} else {
+			logger.WithError(err).Error("Failed to cancel job")
+			writeError(w, http.StatusInternalServerError, "CANCEL_FAILED", "Failed to cancel job", err)
+		}
+		return
+	}
+
+	response := map[string]interface{}{
+		"cancelled": true,
+		"job_id":    jobID,
+		"timestamp": time.Now(),
+	}
+
+	writeSuccess(w, http.StatusOK, response, nil, nil)
+}
+
+// GetJobProgress retrieves job progress
+// @Summary Get job progress
+// @Description Get current progress of a job
+// @Tags jobs
+// @Accept json
+// @Produce json
+// @Param id path string true "Job ID"
+// @Success 200 {object} SuccessResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/jobs/{id}/progress [get]
+func (h *Handler) GetJobProgress(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate job ID
+	jobID, err := validateJobID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid job ID", err)
+		return
+	}
+
+	// Get job
+	job, err := h.jobService.GetJob(r.Context(), jobID)
+	if err != nil {
+		if err == service.ErrNoJobsAvailable {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Job not found", err)
+		} else {
+			logger.WithError(err).Error("Failed to get job")
+			writeError(w, http.StatusInternalServerError, "GET_FAILED", "Failed to get job", err)
+		}
+		return
+	}
+
+	// Get statistics
+	stats, _ := h.jobService.GetJobStats(r.Context(), jobID)
+
+	response := map[string]interface{}{
+		"job_id":   jobID,
+		"status":   job.Status,
+		"progress": h.calculateProgress(job),
+		"stats":    toJobStats(stats),
+	}
+
+	if job.Status == common.JobStatusRunning && job.StartedAt != nil {
+		response["time_remaining"] = h.calculateTimeRemaining(job)
+		response["elapsed_time"] = time.Since(*job.StartedAt).String()
+	}
+
+	writeSuccess(w, http.StatusOK, response, nil, nil)
+}
+
+// GetJobLogs retrieves job logs
+// @Summary Get job logs
+// @Description Get logs for a specific job
+// @Tags jobs
+// @Accept json
+// @Produce json
+// @Param id path string true "Job ID"
+// @Param lines query int false "Number of lines to return" default(100)
+// @Param offset query int false "Line offset" default(0)
+// @Success 200 {object} SuccessResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/jobs/{id}/logs [get]
+func (h *Handler) GetJobLogs(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate job ID
+	jobID, err := validateJobID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid job ID", err)
+		return
+	}
+
+	// Parse parameters
+	lines := 100
+	if l := r.URL.Query().Get("lines"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 1000 {
+			lines = parsed
+		}
+	}
+
+	offset := 0
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	// Get logs
+	logs, err := h.jobService.GetJobLogs(r.Context(), jobID)
+	if err != nil {
+		if err == service.ErrNoJobsAvailable {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Job not found", err)
+		} else {
+			logger.WithError(err).Error("Failed to get job logs")
+			writeError(w, http.StatusInternalServerError, "GET_LOGS_FAILED", "Failed to get job logs", err)
+		}
+		return
+	}
+
+	// Apply offset and limit
+	if offset > len(logs) {
+		offset = len(logs)
+	}
+	logs = logs[offset:]
+
+	if len(logs) > lines {
+		logs = logs[:lines]
+	}
+
+	response := map[string]interface{}{
+		"job_id":      jobID,
+		"logs":        logs,
+		"line_count":  len(logs),
+		"total_lines": len(logs) + offset,
+		"offset":      offset,
+	}
+
+	writeSuccess(w, http.StatusOK, response, nil, nil)
+}
+
+// StreamJobLogs streams job logs in real-time
+// @Summary Stream job logs
+// @Description Stream job logs in real-time using Server-Sent Events
+// @Tags jobs
+// @Accept json
+// @Produce text/event-stream
+// @Param id path string true "Job ID"
+// @Success 200 "SSE stream of log lines"
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/jobs/{id}/logs/stream [get]
+func (h *Handler) StreamJobLogs(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate job ID
+	jobID, err := validateJobID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid job ID", err)
+		return
+	}
+
+	// Verify job exists
+	_, err = h.jobService.GetJob(r.Context(), jobID)
+	if err != nil {
+		if err == service.ErrNoJobsAvailable {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Job not found", err)
+		} else {
+			logger.WithError(err).Error("Failed to get job")
+			writeError(w, http.StatusInternalServerError, "GET_FAILED", "Failed to get job", err)
+		}
+		return
+	}
+
+	// Set up Server-Sent Events
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "STREAMING_NOT_SUPPORTED", "Streaming not supported", nil)
+		return
+	}
+
+	// Get log stream
+	logStream, err := h.jobService.StreamLogs(r.Context(), jobID)
+	if err != nil {
+		logger.WithError(err).Error("Failed to stream logs")
+		writeError(w, http.StatusInternalServerError, "STREAM_FAILED", "Failed to stream logs", err)
+		return
+	}
+
+	// Send connected event
+	fmt.Fprintf(w, "event: connected\ndata: {\"job_id\":\"%s\"}\n\n", jobID)
+	flusher.Flush()
+
+	// Stream logs
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case log, ok := <-logStream:
+			if !ok {
+				// Stream closed
+				fmt.Fprintf(w, "event: complete\ndata: {\"job_id\":\"%s\"}\n\n", jobID)
+				flusher.Flush()
+				return
+			}
+
+			// Send log line
+			data := map[string]interface{}{
+				"line":      log,
+				"timestamp": time.Now().Format(time.RFC3339),
+			}
+
+			if jsonData, err := json.Marshal(data); err == nil {
+				fmt.Fprintf(w, "event: log\ndata: %s\n\n", jsonData)
+				flusher.Flush()
+			}
+		}
+	}
+}
+
+// GetJobCrashes retrieves crashes found by the job
+// @Summary Get job crashes
+// @Description Get crashes found by a specific job
+// @Tags jobs
+// @Accept json
+// @Produce json
+// @Param id path string true "Job ID"
+// @Param unique_only query bool false "Return only unique crashes" default(false)
+// @Success 200 {object} SuccessResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/jobs/{id}/crashes [get]
+func (h *Handler) GetJobCrashes(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate job ID
+	jobID, err := validateJobID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid job ID", err)
+		return
+	}
+
+	// Parse unique_only parameter
+	uniqueOnly := false
+	if u := r.URL.Query().Get("unique_only"); u == "true" {
+		uniqueOnly = true
+	}
+
+	// Get crashes
+	crashes, err := h.jobService.GetJobCrashes(r.Context(), jobID)
+	if err != nil {
+		if err == service.ErrNoJobsAvailable {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Job not found", err)
+		} else {
+			logger.WithError(err).Error("Failed to get job crashes")
+			writeError(w, http.StatusInternalServerError, "GET_CRASHES_FAILED", "Failed to get job crashes", err)
+		}
+		return
+	}
+
+	// Filter unique crashes if requested
+	if uniqueOnly {
+		uniqueMap := make(map[string]*common.CrashResult)
+		for _, crash := range crashes {
+			if existing, exists := uniqueMap[crash.Hash]; !exists || crash.Timestamp.Before(existing.Timestamp) {
+				uniqueMap[crash.Hash] = crash
+			}
+		}
+
+		crashes = make([]*common.CrashResult, 0, len(uniqueMap))
+		for _, crash := range uniqueMap {
+			crashes = append(crashes, crash)
+		}
+	}
+
+	response := map[string]interface{}{
+		"job_id":        jobID,
+		"crashes":       crashes,
+		"total_crashes": len(crashes),
+		"unique_only":   uniqueOnly,
+	}
+
+	writeSuccess(w, http.StatusOK, response, nil, nil)
+}
+
+// GetJobCorpus retrieves corpus files for the job
+// @Summary Get job corpus
+// @Description Get corpus files generated by a specific job
+// @Tags jobs
+// @Accept json
+// @Produce json
+// @Param id path string true "Job ID"
+// @Success 200 {object} SuccessResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/v2/jobs/{id}/corpus [get]
+func (h *Handler) GetJobCorpus(w http.ResponseWriter, r *http.Request) {
+	logger := getLogger(r.Context())
+
+	// Validate job ID
+	jobID, err := validateJobID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ID", "Invalid job ID", err)
+		return
+	}
+
+	// Get corpus files
+	corpusFiles, err := h.jobService.GetJobCorpus(r.Context(), jobID)
+	if err != nil {
+		if err == service.ErrNoJobsAvailable {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Job not found", err)
+		} else {
+			logger.WithError(err).Error("Failed to get job corpus")
+			writeError(w, http.StatusInternalServerError, "GET_CORPUS_FAILED", "Failed to get job corpus", err)
+		}
+		return
+	}
+
+	// Calculate total size
+	var totalSize int64
+	for _, file := range corpusFiles {
+		totalSize += file.Size
+	}
+
+	response := map[string]interface{}{
+		"job_id":           jobID,
+		"corpus":           corpusFiles,
+		"file_count":       len(corpusFiles),
+		"total_size":       totalSize,
+		"total_size_human": humanizeBytes(totalSize),
+	}
+
+	writeSuccess(w, http.StatusOK, response, nil, nil)
+}
+
+// Helper functions
+
+func (h *Handler) calculateProgress(job *common.Job) float64 {
+	if job.StartedAt == nil {
+		return 0
+	}
+
+	if job.Status == common.JobStatusCompleted {
+		return 100
+	}
+
+	if job.Config.Duration > 0 && job.Status == common.JobStatusRunning {
+		elapsed := time.Since(*job.StartedAt)
+		progress := float64(elapsed) / float64(job.Config.Duration) * 100
+		if progress > 100 {
+			progress = 100
+		}
+		return progress
+	}
+
+	return 0
+}
+
+func (h *Handler) calculateTimeRemaining(job *common.Job) time.Duration {
+	if job.StartedAt == nil || job.Config.Duration == 0 {
+		return 0
+	}
+
+	elapsed := time.Since(*job.StartedAt)
+	remaining := job.Config.Duration - elapsed
+	if remaining < 0 {
+		return 0
+	}
+
+	return remaining
+}
+
+func toJobStats(stats *service.JobStats) *JobStats {
+	if stats == nil {
+		return nil
+	}
+
+	return &JobStats{
+		CrashesFound:     stats.CrashesFound,
+		UniqueCrashes:    stats.UniqueCrashes,
+		CorpusSize:       stats.CorpusSize,
+		CoveragePercent:  stats.CoveragePercent,
+		ExecutionsTotal:  stats.ExecutionsTotal,
+		ExecutionsPerSec: stats.ExecutionsPerSec,
+		Duration:         stats.Duration,
+	}
+}
+
+func containsIgnoreCase(s, substr string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+func humanizeBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}

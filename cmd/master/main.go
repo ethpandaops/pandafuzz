@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,8 +14,13 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	_ "github.com/ethpandaops/pandafuzz/pkg/config"
+	"github.com/ethpandaops/pandafuzz/pkg/interfaces/api/rest/v1"
+	"github.com/ethpandaops/pandafuzz/pkg/interfaces/api/rest/v2"
 	"github.com/ethpandaops/pandafuzz/pkg/master"
+	"github.com/ethpandaops/pandafuzz/pkg/service"
 	"github.com/ethpandaops/pandafuzz/pkg/storage"
+	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
 
@@ -50,19 +56,11 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Load configuration first
+	// Load configuration
 	config, err := loadConfig(*configFile)
 	if err != nil {
-		// Use basic logger for error
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
-
-	// Setup logging with config
-	logLevelStr := *logLevel
-	if config.Logging.Level != "" {
-		logLevelStr = config.Logging.Level
-	}
-	logger := setupLogging(logLevelStr)
 
 	// Override configuration with command line flags
 	if *port > 0 {
@@ -77,6 +75,13 @@ func main() {
 	config.Monitoring.MetricsEnabled = *enableMetrics
 	config.Monitoring.Enabled = *enableMetrics
 
+	// Setup logging
+	logLevelStr := *logLevel
+	if config.Logging.Level != "" {
+		logLevelStr = config.Logging.Level
+	}
+	logger := setupLogging(logLevelStr)
+
 	// Validate configuration
 	if err := validateConfig(config); err != nil {
 		logger.WithError(err).Fatal("Invalid configuration")
@@ -87,16 +92,16 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Initialize database
-	db, err := initializeDatabase(config, logger)
+	// Initialize dependencies
+	deps, err := initializeDependencies(config, logger)
 	if err != nil {
-		logger.WithError(err).Fatal("Failed to initialize database")
+		logger.WithError(err).Fatal("Failed to initialize dependencies")
 	}
-	defer db.Close(context.Background())
+	defer deps.Close()
 
 	// Handle database operations
 	if *resetDB {
-		if err := resetDatabase(db, logger); err != nil {
+		if err := deps.ResetDatabase(); err != nil {
 			logger.WithError(err).Fatal("Failed to reset database")
 		}
 		logger.Info("Database reset successfully")
@@ -108,42 +113,14 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Create master components
-	logger.Info("Initializing PandaFuzz Master components")
-
-	// Create persistent state manager
-	state := master.NewPersistentState(db, config, logger)
-
-	// Create timeout manager
-	timeoutMgr := master.NewTimeoutManager(state, config, logger)
-
-	// Create recovery manager
-	recoveryMgr := master.NewRecoveryManager(state, timeoutMgr, config, logger)
-
-	// Perform recovery on startup
+	// Perform startup recovery
 	logger.Info("Performing system recovery")
-	if err := recoveryMgr.RecoverOnStartup(context.Background()); err != nil {
+	if err := deps.RecoveryManager.RecoverOnStartup(context.Background()); err != nil {
 		logger.WithError(err).Error("Recovery failed, continuing anyway")
 	}
 
-	// Create version info
-	versionInfo := &common.VersionInfo{
-		Version:   version,
-		BuildTime: buildTime,
-		GitCommit: gitCommit,
-	}
-
-	// Create HTTP server
-	server := master.NewServer(config, state, timeoutMgr, versionInfo, logger)
-
-	// Set recovery manager on server to avoid circular dependency
-	server.SetRecoveryManager(recoveryMgr)
-
-	// Initialize storage backend
-	logger.Info("Initializing storage backend")
-	if err := server.InitializeStorage(); err != nil {
-		logger.WithError(err).Fatal("Failed to initialize storage backend")
-	}
+	// Create and configure HTTP server
+	server := createHTTPServer(config, deps, logger)
 
 	// Setup graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -152,63 +129,41 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// Start timeout monitoring
-	logger.Info("Starting timeout monitor")
-	if err := timeoutMgr.Start(); err != nil {
-		logger.WithError(err).Fatal("Failed to start timeout manager")
+	// Start background services
+	if err := deps.StartBackgroundServices(ctx); err != nil {
+		logger.WithError(err).Fatal("Failed to start background services")
 	}
-
-	// Start periodic maintenance
-	logger.Info("Starting maintenance scheduler")
-	go startMaintenance(ctx, recoveryMgr, logger)
 
 	// Start HTTP server
 	logger.WithFields(logrus.Fields{
 		"port":         config.Server.Port,
 		"metrics_port": config.Monitoring.MetricsPort,
 		"metrics":      config.Monitoring.MetricsEnabled,
-	}).Info("Starting HTTP server")
+		"version":      version,
+	}).Info("Starting PandaFuzz Master")
 
-	// Start the server
-	if err := server.Start(); err != nil {
-		logger.WithError(err).Fatal("Failed to start server")
-	}
-
-	// Log startup complete
-	logger.WithFields(logrus.Fields{
-		"version":     version,
-		"build_time":  buildTime,
-		"git_commit":  gitCommit,
-		"config_file": *configFile,
-		"data_dir":    *dataDir,
-		"services":    getEnabledServices(server),
-	}).Info("PandaFuzz Master started successfully")
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.WithError(err).Fatal("Server failed to start")
+		}
+	}()
 
 	// Wait for shutdown signal
 	sig := <-sigChan
 	logger.WithField("signal", sig).Info("Received shutdown signal")
 
 	// Graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
 	logger.Info("Starting graceful shutdown")
-
-	// Cancel context to stop background tasks
-	cancel()
-
-	// Stop server
-	if err := server.Stop(); err != nil {
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.WithError(err).Error("Failed to shutdown server gracefully")
 	}
 
-	// Stop timeout manager
-	if err := timeoutMgr.Stop(); err != nil {
-		logger.WithError(err).Error("Failed to stop timeout manager")
-	}
-
-	// Final cleanup
-	logger.Info("Performing final cleanup")
-	if err := state.Close(context.Background()); err != nil {
-		logger.WithError(err).Error("Cleanup error")
-	}
+	// Stop background services
+	cancel()
+	deps.StopBackgroundServices()
 
 	logger.Info("PandaFuzz Master shutdown complete")
 }
@@ -321,51 +276,31 @@ func validateConfig(config *common.MasterConfig) error {
 	return nil
 }
 
-func initializeDatabase(config *common.MasterConfig, logger *logrus.Logger) (common.Database, error) {
-	// Ensure data directory exists
-	dataDir := filepath.Dir(config.Database.Path)
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create data directory: %w", err)
-	}
-
-	// Create database connection
-	var db common.Database
-	var err error
-
-	switch config.Database.Type {
-	case "sqlite":
-		db, err = storage.NewSQLiteStorage(config.Database, logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create SQLite database: %w", err)
-		}
-
-		logger.WithField("path", config.Database.Path).Info("Connected to SQLite database")
-
-	case "postgres":
-		// PostgreSQL support would be implemented here
-		return nil, fmt.Errorf("PostgreSQL support not yet implemented")
-
-	default:
-		return nil, fmt.Errorf("unsupported database type: %s", config.Database.Type)
-	}
-
-	// Initialize schema (if supported)
-	if advDb, ok := db.(common.AdvancedDatabase); ok {
-		if err := advDb.CreateTables(context.Background()); err != nil {
-			return nil, fmt.Errorf("failed to initialize database schema: %w", err)
-		}
-	}
-
-	// Run health check
-	if err := db.Ping(context.Background()); err != nil {
-		return nil, fmt.Errorf("database health check failed: %w", err)
-	}
-
-	return db, nil
+// Dependencies holds all the initialized dependencies for the server
+type Dependencies struct {
+	Database        common.Database
+	State           *master.PersistentState
+	StateAdapter    *master.StateStoreAdapter
+	TimeoutManager  *master.TimeoutManager
+	RecoveryManager *master.RecoveryManager
+	StorageBackend  backend.StorageBackend
+	Services        *service.Manager
+	Logger          *logrus.Logger
 }
 
-func resetDatabase(db common.Database, logger *logrus.Logger) error {
-	logger.Warn("Resetting database - all data will be lost!")
+// Close cleans up all dependencies
+func (d *Dependencies) Close() {
+	if d.State != nil {
+		d.State.Close(context.Background())
+	}
+	if d.Database != nil {
+		d.Database.Close(context.Background())
+	}
+}
+
+// ResetDatabase resets the database
+func (d *Dependencies) ResetDatabase() error {
+	d.Logger.Warn("Resetting database - all data will be lost!")
 
 	// Simple confirmation prompt
 	fmt.Print("Are you sure you want to reset the database? Type 'yes' to confirm: ")
@@ -378,12 +313,36 @@ func resetDatabase(db common.Database, logger *logrus.Logger) error {
 
 	// For SQLite, we can simply delete and recreate tables
 	// This would be implemented in the database layer
-	logger.Info("Database reset is not fully implemented yet")
+	d.Logger.Info("Database reset is not fully implemented yet")
 
 	return nil
 }
 
-func startMaintenance(ctx context.Context, recovery *master.RecoveryManager, logger *logrus.Logger) {
+// StartBackgroundServices starts all background services
+func (d *Dependencies) StartBackgroundServices(ctx context.Context) error {
+	// Start timeout monitoring
+	d.Logger.Info("Starting timeout monitor")
+	if err := d.TimeoutManager.Start(); err != nil {
+		return fmt.Errorf("failed to start timeout manager: %w", err)
+	}
+
+	// Start periodic maintenance
+	d.Logger.Info("Starting maintenance scheduler")
+	go d.runMaintenance(ctx)
+
+	return nil
+}
+
+// StopBackgroundServices stops all background services
+func (d *Dependencies) StopBackgroundServices() {
+	if d.TimeoutManager != nil {
+		if err := d.TimeoutManager.Stop(); err != nil {
+			d.Logger.WithError(err).Error("Failed to stop timeout manager")
+		}
+	}
+}
+
+func (d *Dependencies) runMaintenance(ctx context.Context) {
 	// Run maintenance every hour
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
@@ -391,33 +350,323 @@ func startMaintenance(ctx context.Context, recovery *master.RecoveryManager, log
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Info("Stopping maintenance scheduler")
+			d.Logger.Info("Stopping maintenance scheduler")
 			return
 
 		case <-ticker.C:
-			logger.Debug("Running periodic maintenance")
+			d.Logger.Debug("Running periodic maintenance")
 
-			if err := recovery.PerformMaintenanceRecovery(ctx); err != nil {
-				logger.WithError(err).Error("Maintenance recovery failed")
+			if err := d.RecoveryManager.PerformMaintenanceRecovery(ctx); err != nil {
+				d.Logger.WithError(err).Error("Maintenance recovery failed")
 			}
 		}
 	}
 }
 
-// getEnabledServices returns a list of enabled services for logging
-func getEnabledServices(server *master.Server) []string {
-	services := []string{
-		"bot",
-		"job",
-		"result",
-		"system",
-		"monitoring",
+// initializeDependencies creates and wires up all dependencies
+func initializeDependencies(config *common.MasterConfig, logger *logrus.Logger) (*Dependencies, error) {
+	// Ensure data directory exists
+	dataDir := filepath.Dir(config.Database.Path)
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
-	// Check if reproducibility service is available
-	// We can't directly access server.services from here, but we know it's initialized
-	// if the storage layer supports it
-	services = append(services, "reproducibility")
+	// Create database connection
+	var db common.Database
+	var err error
 
-	return services
+	switch config.Database.Type {
+	case "sqlite":
+		// Use existing storage implementation
+		db, err = storage.NewSQLiteStorage(config.Database, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SQLite storage: %w", err)
+		}
+
+		logger.WithField("path", config.Database.Path).Info("Connected to SQLite database")
+
+	case "postgres":
+		return nil, fmt.Errorf("PostgreSQL support not yet implemented")
+
+	default:
+		return nil, fmt.Errorf("unsupported database type: %s", config.Database.Type)
+	}
+
+	// Initialize schema
+	if advDb, ok := db.(common.AdvancedDatabase); ok {
+		if err := advDb.CreateTables(context.Background()); err != nil {
+			return nil, fmt.Errorf("failed to initialize database schema: %w", err)
+		}
+	}
+
+	// Run health check
+	if err := db.Ping(context.Background()); err != nil {
+		return nil, fmt.Errorf("database health check failed: %w", err)
+	}
+
+	// Create master components
+	state := master.NewPersistentState(db, config, logger)
+	timeoutMgr := master.NewTimeoutManager(state, config, logger)
+	recoveryMgr := master.NewRecoveryManager(state, timeoutMgr, config, logger)
+
+	// Create storage backend
+	storageBackend, err := backend.NewStorageBackend(config.Storage, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create storage backend: %w", err)
+	}
+
+	// Create state adapter as concrete type for dependencies
+	stateAdapterConcrete := &master.StateStoreAdapter{
+		PS: state,
+	}
+
+	// Use the interface for service manager
+	var stateAdapter service.StateStore = stateAdapterConcrete
+
+	// Create service manager
+	services := service.NewManager(
+		stateAdapter,
+		timeoutMgr,
+		recoveryMgr,
+		config,
+		logger,
+	)
+
+	return &Dependencies{
+		Database:        db,
+		State:           state,
+		StateAdapter:    stateAdapterConcrete,
+		TimeoutManager:  timeoutMgr,
+		RecoveryManager: recoveryMgr,
+		StorageBackend:  storageBackend,
+		Services:        services,
+		Logger:          logger,
+	}, nil
+}
+
+// createHTTPServer creates and configures the HTTP server with all routes
+func createHTTPServer(config *common.MasterConfig, deps *Dependencies, logger *logrus.Logger) *http.Server {
+	// Create version info
+	versionInfo := &common.VersionInfo{
+		Version:   version,
+		BuildTime: buildTime,
+		GitCommit: gitCommit,
+	}
+
+	// Create master server for legacy handlers
+	// This will be gradually phased out as we migrate handlers
+	masterServer := master.NewServer(config, deps.State, deps.TimeoutManager, versionInfo, logger)
+	masterServer.SetRecoveryManager(deps.RecoveryManager)
+	masterServer.SetServiceManager(deps.Services)
+
+	// Initialize storage backend
+	logger.Info("Initializing storage backend")
+	if err := masterServer.InitializeStorage(); err != nil {
+		logger.WithError(err).Fatal("Failed to initialize storage backend")
+	}
+
+	// Initialize the router without starting the server
+	if err := masterServer.InitializeRouter(); err != nil {
+		logger.WithError(err).Fatal("Failed to initialize master server router")
+	}
+
+	// Get the router from master server which has all the routes
+	router := masterServer.GetRouter()
+
+	// Add additional middleware if needed
+	if config.Server.EnableCORS && router != nil {
+		// CORS is already added by master server if needed
+	}
+
+	// Setup API v1 routes on top of existing routes
+	setupAPIRoutes(router, config, deps, masterServer, logger)
+
+	// Additional health and metrics endpoints (if not already added by master)
+	router.HandleFunc("/health", handleHealth(deps)).Methods("GET")
+	router.HandleFunc("/status", handleStatus(deps, versionInfo)).Methods("GET")
+	router.HandleFunc("/metrics", handleMetrics()).Methods("GET")
+
+	return &http.Server{
+		Addr:         fmt.Sprintf(":%d", config.Server.Port),
+		Handler:      router,
+		ReadTimeout:  config.Server.ReadTimeout,
+		WriteTimeout: config.Server.WriteTimeout,
+		IdleTimeout:  config.Server.IdleTimeout,
+	}
+}
+
+// setupAPIRoutes configures all API routes
+func setupAPIRoutes(router *mux.Router, config *common.MasterConfig, deps *Dependencies, masterServer *master.Server, logger *logrus.Logger) {
+	// Get services from the service manager
+	botService := deps.Services.Bot
+	jobService := deps.Services.Job
+	resultService := deps.Services.Result
+	campaignService := deps.Services.Campaign
+	corpusService := deps.Services.Corpus
+
+	// Get storage from state adapter
+	storage := deps.StateAdapter.GetStorage()
+	if storage == nil {
+		// Fallback: try to get storage directly from the database
+		if storageDB, ok := deps.Database.(common.Storage); ok {
+			storage = storageDB
+		}
+	}
+
+	// API v1 routes using new package structure
+	apiV1 := router.PathPrefix("/api/v1").Subrouter()
+	v1Router := v1.NewRouter(&v1.RouterConfig{
+		BotService:      botService,
+		JobService:      jobService,
+		ResultService:   resultService,
+		CampaignService: campaignService,
+		CorpusService:   corpusService,
+		Storage:         storage,
+		Logger:          logger,
+		EnableCORS:      config.Server.EnableCORS,
+		EnableMetrics:   config.Monitoring.MetricsEnabled,
+		EnableRateLimit: config.Server.RateLimitRPS > 0,
+		RateLimitRPS:    config.Server.RateLimitRPS,
+	})
+	v1Router.SetupRoutes(apiV1)
+
+	// API v2 routes (temporarily stubbed)
+	apiV2 := router.PathPrefix("/api/v2").Subrouter()
+	v2Router := v2.NewRouter(&v2.RouterConfig{
+		Logger: logger,
+	})
+	v2Router.SetupRoutes(apiV2)
+
+	// Legacy routes that haven't been migrated yet
+	// The master server still handles some routes directly
+	// These will be gradually migrated to the new structure
+}
+
+// Middleware functions
+
+func loggingMiddleware(logger *logrus.Logger) mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+
+			// Wrap ResponseWriter to capture status code
+			wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+
+			next.ServeHTTP(wrapped, r)
+
+			logger.WithFields(logrus.Fields{
+				"method":     r.Method,
+				"path":       r.URL.Path,
+				"status":     wrapped.statusCode,
+				"duration":   time.Since(start),
+				"remote":     r.RemoteAddr,
+				"user_agent": r.UserAgent(),
+			}).Info("HTTP request")
+		})
+	}
+}
+
+func recoveryMiddleware(logger *logrus.Logger) mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if err := recover(); err != nil {
+					logger.WithFields(logrus.Fields{
+						"error":  err,
+						"method": r.Method,
+						"path":   r.URL.Path,
+					}).Error("Panic recovered")
+
+					http.Error(w, "Internal server error", http.StatusInternalServerError)
+				}
+			}()
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func metricsMiddleware() mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Basic metrics tracking
+			// In a full implementation, this would integrate with Prometheus
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func corsMiddleware() mux.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// responseWriter wraps http.ResponseWriter to capture status code
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Handler functions
+
+func handleHealth(deps *Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		// Check database health
+		if err := deps.Database.Ping(ctx); err != nil {
+			http.Error(w, "Database unhealthy", http.StatusServiceUnavailable)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"healthy"}`))
+	}
+}
+
+func handleStatus(deps *Dependencies, versionInfo *common.VersionInfo) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status := map[string]interface{}{
+			"status":     "running",
+			"version":    versionInfo.Version,
+			"build_time": versionInfo.BuildTime,
+			"git_commit": versionInfo.GitCommit,
+			"uptime":     time.Since(time.Now()).String(), // This would need to track actual start time
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		// Simple JSON encoding
+		fmt.Fprintf(w, `{"status":"%s","version":"%s","build_time":"%s","git_commit":"%s"}`,
+			status["status"], status["version"], status["build_time"], status["git_commit"])
+	}
+}
+
+func handleMetrics() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Basic metrics endpoint
+		// In a full implementation, this would return Prometheus metrics
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("# Basic metrics\n"))
+	}
 }

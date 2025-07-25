@@ -1,0 +1,318 @@
+package v2
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
+)
+
+// contextKey is used for storing values in context
+type contextKey string
+
+const (
+	// ContextKeyRequestID is the key for request ID in context
+	ContextKeyRequestID contextKey = "request_id"
+	// ContextKeyStartTime is the key for request start time in context
+	ContextKeyStartTime contextKey = "start_time"
+	// ContextKeyLogger is the key for request-scoped logger in context
+	ContextKeyLogger contextKey = "logger"
+)
+
+// Middleware provides HTTP middleware functions
+type Middleware struct {
+	logger         logrus.FieldLogger
+	validator      *Validator
+	circuitBreaker CircuitBreaker
+}
+
+// CircuitBreaker interface for circuit breaker pattern
+type CircuitBreaker interface {
+	Execute(func() error) error
+	State() string
+}
+
+// NewMiddleware creates a new middleware instance
+func NewMiddleware(logger logrus.FieldLogger, circuitBreaker CircuitBreaker) *Middleware {
+	return &Middleware{
+		logger:         logger,
+		validator:      NewValidator(),
+		circuitBreaker: circuitBreaker,
+	}
+}
+
+// RequestIDMiddleware adds a unique request ID to each request
+func (m *Middleware) RequestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check if request ID exists in header
+		requestID := r.Header.Get("X-Request-ID")
+		if requestID == "" {
+			requestID = uuid.New().String()
+		}
+
+		// Add to response header
+		w.Header().Set("X-Request-ID", requestID)
+
+		// Add to context
+		ctx := context.WithValue(r.Context(), ContextKeyRequestID, requestID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// LoggingMiddleware logs HTTP requests
+func (m *Middleware) LoggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Get request ID from context
+		requestID, _ := r.Context().Value(ContextKeyRequestID).(string)
+
+		// Create request-scoped logger
+		logger := m.logger.WithFields(logrus.Fields{
+			"request_id": requestID,
+			"method":     r.Method,
+			"path":       r.URL.Path,
+			"remote":     r.RemoteAddr,
+		})
+
+		// Add logger to context
+		ctx := context.WithValue(r.Context(), ContextKeyLogger, logger)
+		ctx = context.WithValue(ctx, ContextKeyStartTime, start)
+
+		// Create response writer wrapper to capture status code
+		wrapped := &responseWriter{
+			ResponseWriter: w,
+			statusCode:     http.StatusOK,
+		}
+
+		// Log request start
+		logger.Info("Request started")
+
+		// Process request
+		next.ServeHTTP(wrapped, r.WithContext(ctx))
+
+		// Log request completion
+		duration := time.Since(start)
+		logger.WithFields(logrus.Fields{
+			"status":      wrapped.statusCode,
+			"duration_ms": duration.Milliseconds(),
+			"bytes":       wrapped.bytesWritten,
+		}).Info("Request completed")
+	})
+}
+
+// MetricsMiddleware collects request metrics
+func (m *Middleware) MetricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Create response writer wrapper
+		wrapped := &responseWriter{
+			ResponseWriter: w,
+			statusCode:     http.StatusOK,
+		}
+
+		// Process request
+		next.ServeHTTP(wrapped, r)
+
+		// Record metrics
+		duration := time.Since(start)
+		route := mux.CurrentRoute(r)
+
+		var routeName string
+		if route != nil {
+			routeName, _ = route.GetPathTemplate()
+		}
+
+		// In production, record to metrics system
+		m.logger.WithFields(logrus.Fields{
+			"route":       routeName,
+			"method":      r.Method,
+			"status":      wrapped.statusCode,
+			"duration_ms": duration.Milliseconds(),
+		}).Debug("Request metrics recorded")
+	})
+}
+
+// CircuitBreakerMiddleware implements circuit breaker pattern
+func (m *Middleware) CircuitBreakerMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip circuit breaker for health checks
+		if r.URL.Path == "/api/v2/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Execute with circuit breaker
+		err := m.circuitBreaker.Execute(func() error {
+			next.ServeHTTP(w, r)
+			return nil
+		})
+
+		if err != nil {
+			WriteError(w, http.StatusServiceUnavailable, "CIRCUIT_BREAKER_OPEN", "Service temporarily unavailable", err)
+			return
+		}
+	})
+}
+
+// RateLimitMiddleware implements rate limiting
+func (m *Middleware) RateLimitMiddleware(limiter RateLimiter) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Get client identifier (IP or API key)
+			clientID := r.RemoteAddr
+			if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
+				clientID = apiKey
+			}
+
+			// Check rate limit
+			allowed, retryAfter := limiter.Allow(clientID)
+			if !allowed {
+				w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+				WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", "Too many requests", nil)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// CORSMiddleware handles CORS headers
+func (m *Middleware) CORSMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set CORS headers
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, X-API-Key")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// TimeoutMiddleware adds request timeout
+func (m *Middleware) TimeoutMiddleware(timeout time.Duration) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), timeout)
+			defer cancel()
+
+			// Create channel for completion
+			done := make(chan struct{})
+
+			// Run handler in goroutine
+			go func() {
+				next.ServeHTTP(w, r.WithContext(ctx))
+				close(done)
+			}()
+
+			// Wait for completion or timeout
+			select {
+			case <-done:
+				// Request completed
+			case <-ctx.Done():
+				// Timeout occurred
+				WriteError(w, http.StatusGatewayTimeout, "REQUEST_TIMEOUT", "Request timed out", nil)
+			}
+		})
+	}
+}
+
+// RecoveryMiddleware recovers from panics
+func (m *Middleware) RecoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				// Get logger from context
+				logger, _ := r.Context().Value(ContextKeyLogger).(logrus.FieldLogger)
+				if logger == nil {
+					logger = m.logger
+				}
+
+				// Log panic
+				logger.WithField("panic", err).Error("Panic recovered in HTTP handler")
+
+				// Return error response
+				WriteError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "An internal error occurred", nil)
+			}
+		}()
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ContentTypeMiddleware validates content type for requests with body
+func (m *Middleware) ContentTypeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check methods that typically have request body
+		if r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" {
+			contentType := r.Header.Get("Content-Type")
+			if contentType != "application/json" && !isMultipartFormData(contentType) {
+				WriteError(w, http.StatusUnsupportedMediaType, "INVALID_CONTENT_TYPE", "Content-Type must be application/json", nil)
+				return
+			}
+		}
+
+		// Set response content type
+		w.Header().Set("Content-Type", "application/json")
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// responseWriter wraps http.ResponseWriter to capture status code
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode   int
+	bytesWritten int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	n, err := rw.ResponseWriter.Write(b)
+	rw.bytesWritten += n
+	return n, err
+}
+
+// RateLimiter interface for rate limiting
+type RateLimiter interface {
+	Allow(clientID string) (allowed bool, retryAfter int)
+}
+
+// Helper functions
+
+func isMultipartFormData(contentType string) bool {
+	return len(contentType) > 19 && contentType[:19] == "multipart/form-data"
+}
+
+// GetRequestID retrieves request ID from context
+func GetRequestID(ctx context.Context) string {
+	if id, ok := ctx.Value(ContextKeyRequestID).(string); ok {
+		return id
+	}
+	return ""
+}
+
+// GetLogger retrieves logger from context
+func GetLogger(ctx context.Context) logrus.FieldLogger {
+	if logger, ok := ctx.Value(ContextKeyLogger).(logrus.FieldLogger); ok {
+		return logger
+	}
+	return logrus.StandardLogger()
+}
