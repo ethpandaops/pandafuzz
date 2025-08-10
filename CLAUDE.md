@@ -1,246 +1,107 @@
-# Claude Code Configuration
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Build Commands
-- `npm run build`: Build the project
-- `npm run test`: Run the full test suite
-- `npm run lint`: Run ESLint and format checks
-- `npm run typecheck`: Run TypeScript type checking
-- `./claude-flow --help`: Show all available commands
 
-## Claude-Flow Complete Command Reference
+### Go Backend
+- `make build`: Build both master and bot binaries
+- `make build-master`: Build only the master binary  
+- `make build-bot`: Build only the bot binary
+- `make test`: Run all tests using run_tests.sh script
+- `make test-unit`: Run unit tests only
+- `make test-integration`: Run integration tests only
+- `make test-coverage`: Run tests with coverage report
+- `make lint`: Run golangci-lint
+- `make fmt`: Format Go code
+- `make vet`: Run go vet
 
-### Core System Commands
-- `./claude-flow start [--ui] [--port 3000] [--host localhost]`: Start orchestration system with optional web UI
-- `./claude-flow status`: Show comprehensive system status
-- `./claude-flow monitor`: Real-time system monitoring dashboard
-- `./claude-flow config <subcommand>`: Configuration management (show, get, set, init, validate)
+### Web UI
+- `make build-web`: Build the React web UI
+- `make web-dev`: Run web UI in development mode (port 3000, proxies to 8080)
+- `cd web && npm run lint`: Run ESLint on web code
+- `cd web && npm run type-check`: Run TypeScript type checking
 
-### Agent Management
-- `./claude-flow agent spawn <type> [--name <name>]`: Create AI agents (researcher, coder, analyst, etc.)
-- `./claude-flow agent list`: List all active agents
-- `./claude-flow spawn <type>`: Quick agent spawning (alias for agent spawn)
+### Docker
+- `make docker`: Build Docker images for master and bot
+- `make docker-compose`: Start services with docker-compose
+- `docker-compose up -d`: Start all services
+- `docker-compose logs -f`: View logs
 
-### Task Orchestration
-- `./claude-flow task create <type> [description]`: Create and manage tasks
-- `./claude-flow task list`: View active task queue
-- `./claude-flow workflow <file>`: Execute workflow automation files
+### E2E Testing
+- `npm test`: Run Playwright E2E tests
+- `npm run test:ui`: Run Playwright tests with UI
+- `npm run e2e`: Run E2E tests with Docker
 
-### Memory Management
-- `./claude-flow memory store <key> <data>`: Store persistent data across sessions
-- `./claude-flow memory get <key>`: Retrieve stored information
-- `./claude-flow memory list`: List all memory keys
-- `./claude-flow memory export <file>`: Export memory to file
-- `./claude-flow memory import <file>`: Import memory from file
-- `./claude-flow memory stats`: Memory usage statistics
-- `./claude-flow memory cleanup`: Clean unused memory entries
+### Development Tools
+- `make run-master`: Run master locally with master.yaml config
+- `make run-bot`: Run bot locally with bot.yaml config
+- `./scripts/run-test-with-corpus.sh [afl++|libfuzzer|both]`: Test fuzzer integration
+- `./scripts/run-test-with-coverage.sh [afl++|libfuzzer|both]`: Test coverage collection
 
-### SPARC Development Modes
-- `./claude-flow sparc "<task>"`: Run orchestrator mode (default)
-- `./claude-flow sparc run <mode> "<task>"`: Run specific SPARC mode
-- `./claude-flow sparc tdd "<feature>"`: Test-driven development mode
-- `./claude-flow sparc modes`: List all 17 available SPARC modes
+## Architecture Overview
 
-Available SPARC modes: orchestrator, coder, researcher, tdd, architect, reviewer, debugger, tester, analyzer, optimizer, documenter, designer, innovator, swarm-coordinator, memory-manager, batch-executor, workflow-manager
+PandaFuzz is a distributed fuzzing orchestration system designed for reliability and fault tolerance:
 
-### Swarm Coordination
-- `./claude-flow swarm "<objective>" [options]`: Multi-agent swarm coordination
-- `--strategy`: research, development, analysis, testing, optimization, maintenance
-- `--mode`: centralized, distributed, hierarchical, mesh, hybrid
-- `--max-agents <n>`: Maximum number of agents (default: 5)
-- `--parallel`: Enable parallel execution
-- `--monitor`: Real-time monitoring
-- `--output <format>`: json, sqlite, csv, html
+### Core Components
 
-### MCP Server Integration
-- `./claude-flow mcp start [--port 3000] [--host localhost]`: Start MCP server
-- `./claude-flow mcp status`: Show MCP server status
-- `./claude-flow mcp tools`: List available MCP tools
+1. **Master Node** (`cmd/master/`, `pkg/master/`)
+   - Single coordination point with exclusive write access to storage
+   - SQLite database for state management and persistence
+   - RESTful API v3 with OpenAPI spec at `pkg/master/api_v3/openapi.yaml`
+   - Job assignment, bot registration, and result collection
+   - Automatic recovery from crashes with full state restoration
 
-### Claude Integration
-- `./claude-flow claude auth`: Authenticate with Claude API
-- `./claude-flow claude models`: List available Claude models
-- `./claude-flow claude chat`: Interactive chat mode
+2. **Bot Agent** (`cmd/bot/`, `pkg/bot/`)
+   - Executes fuzzing jobs with AFL++, LibFuzzer, or Honggfuzz
+   - Heartbeat mechanism with configurable timeouts (default 30s)
+   - Reports results via API to master
+   - Automatic cleanup and resource monitoring
 
-### Session Management
-- `./claude-flow session`: Manage terminal sessions
-- `./claude-flow repl`: Start interactive REPL mode
+3. **Storage Backend** (`pkg/infrastructure/storage/`)
+   - Abstracted interface supporting filesystem and S3
+   - Master-exclusive write pattern prevents conflicts
+   - Structured layout: `/corpus/{job_id}/`, `/crashes/{job_id}/`
+   - SHA256-based deduplication for corpus and crashes
 
-### Enterprise Features
-- `./claude-flow project <subcommand>`: Project management (Enterprise)
-- `./claude-flow deploy <subcommand>`: Deployment operations (Enterprise)
-- `./claude-flow cloud <subcommand>`: Cloud infrastructure management (Enterprise)
-- `./claude-flow security <subcommand>`: Security and compliance tools (Enterprise)
-- `./claude-flow analytics <subcommand>`: Analytics and insights (Enterprise)
+4. **Domain Layer** (`pkg/domain/`)
+   - Clean architecture with separated business logic
+   - Key packages:
+     - `campaign/`: Campaign orchestration and lifecycle
+     - `job/`: Job execution with async queue support
+     - `bot/`: Bot registry and scheduler
+     - `corpus/`: Corpus selection, sync, and quarantine
+     - `crash/`: Crash deduplication and minimization
+     - `fuzzer/`: Fuzzer factory and engine interfaces
 
-### Project Initialization
-- `./claude-flow init`: Initialize Claude-Flow project
-- `./claude-flow init --sparc`: Initialize with full SPARC development environment
+### Key Design Patterns
 
-## Quick Start Workflows
+- **Master-Only Writes**: Prevents filesystem conflicts
+- **Atomic Operations**: Race-condition-free job assignment  
+- **Timeout Everything**: All operations have configurable timeouts
+- **Persistent State**: Complete recovery from any failure
+- **Repository Pattern**: Clean data access abstraction
 
-### Research Workflow
-```bash
-# Start a research swarm with distributed coordination
-./claude-flow swarm "Research modern web frameworks" --strategy research --mode distributed --parallel --monitor
+### API Endpoints
 
-# Or use SPARC researcher mode for focused research
-./claude-flow sparc run researcher "Analyze React vs Vue vs Angular performance characteristics"
+The system provides RESTful APIs (v1 for core, v3 for extended features):
+- `/api/v3/bots`: Bot management and monitoring
+- `/api/v3/campaigns`: Campaign orchestration
+- `/api/v3/jobs`: Job submission and monitoring
+- `/api/v3/jobs/{id}/coverage`: Coverage report access
+- `/api/v3/corpus`: Corpus management and sync
+- `/api/v3/crashes`: Crash analysis and deduplication
 
-# Store findings in memory for later use
-./claude-flow memory store "research_findings" "Key insights from framework analysis"
-```
+### Fuzzer Engines
 
-### Development Workflow
-```bash
-# Start orchestration system with web UI
-./claude-flow start --ui --port 3000
+All fuzzers implement `types.Fuzzer` interface (`pkg/domain/fuzzer/types/interface.go`):
+- **LibFuzzer** (`pkg/domain/fuzzer/engines/libfuzzer/`): In-process, coverage-guided
+- **AFL++** (`pkg/domain/fuzzer/engines/aflplusplus/`): Fork-based, instrumentation
+- **Honggfuzz** (`pkg/domain/fuzzer/engines/honggfuzz/`): Multi-threaded, hardware-based
 
-# Run TDD workflow for new feature
-./claude-flow sparc tdd "User authentication system with JWT tokens"
+### Testing
 
-# Development swarm for complex projects
-./claude-flow swarm "Build e-commerce API with payment integration" --strategy development --mode hierarchical --max-agents 8 --monitor
-
-# Check system status
-./claude-flow status
-```
-
-### Analysis Workflow
-```bash
-# Analyze codebase performance
-./claude-flow sparc run analyzer "Identify performance bottlenecks in current codebase"
-
-# Data analysis swarm
-./claude-flow swarm "Analyze user behavior patterns from logs" --strategy analysis --mode mesh --parallel --output sqlite
-
-# Store analysis results
-./claude-flow memory store "performance_analysis" "Bottlenecks identified in database queries"
-```
-
-### Maintenance Workflow
-```bash
-# System maintenance with safety controls
-./claude-flow swarm "Update dependencies and security patches" --strategy maintenance --mode centralized --monitor
-
-# Security review
-./claude-flow sparc run reviewer "Security audit of authentication system"
-
-# Export maintenance logs
-./claude-flow memory export maintenance_log.json
-```
-
-## Integration Patterns
-
-### Memory-Driven Coordination
-Use Memory to coordinate information across multiple SPARC modes and swarm operations:
-
-```bash
-# Store architecture decisions
-./claude-flow memory store "system_architecture" "Microservices with API Gateway pattern"
-
-# All subsequent operations can reference this decision
-./claude-flow sparc run coder "Implement user service based on system_architecture in memory"
-./claude-flow sparc run tester "Create integration tests for microservices architecture"
-```
-
-### Multi-Stage Development
-Coordinate complex development through staged execution:
-
-```bash
-# Stage 1: Research and planning
-./claude-flow sparc run researcher "Research authentication best practices"
-./claude-flow sparc run architect "Design authentication system architecture"
-
-# Stage 2: Implementation
-./claude-flow sparc tdd "User registration and login functionality"
-./claude-flow sparc run coder "Implement JWT token management"
-
-# Stage 3: Testing and deployment
-./claude-flow sparc run tester "Comprehensive security testing"
-./claude-flow swarm "Deploy authentication system" --strategy maintenance --mode centralized
-```
-
-### Enterprise Integration
-For enterprise environments with additional tooling:
-
-```bash
-# Project management integration
-./claude-flow project create "authentication-system"
-./claude-flow project switch "authentication-system"
-
-# Security compliance
-./claude-flow security scan
-./claude-flow security audit
-
-# Analytics and monitoring
-./claude-flow analytics dashboard
-./claude-flow deploy production --monitor
-```
-
-## Advanced Batch Tool Patterns
-
-### TodoWrite Coordination
-Always use TodoWrite for complex task coordination:
-
-```javascript
-TodoWrite([
-  {
-    id: "architecture_design",
-    content: "Design system architecture and component interfaces",
-    status: "pending",
-    priority: "high",
-    dependencies: [],
-    estimatedTime: "60min",
-    assignedAgent: "architect"
-  },
-  {
-    id: "frontend_development", 
-    content: "Develop React components and user interface",
-    status: "pending",
-    priority: "medium",
-    dependencies: ["architecture_design"],
-    estimatedTime: "120min",
-    assignedAgent: "frontend_team"
-  }
-]);
-```
-
-### Task and Memory Integration
-Launch coordinated agents with shared memory:
-
-```javascript
-// Store architecture in memory
-Task("System Architect", "Design architecture and store specs in Memory");
-
-// Other agents use memory for coordination
-Task("Frontend Team", "Develop UI using Memory architecture specs");
-Task("Backend Team", "Implement APIs according to Memory specifications");
-```
-
-## Code Style Preferences
-- Use ES modules (import/export) syntax
-- Destructure imports when possible
-- Use TypeScript for all new code
-- Follow existing naming conventions
-- Add JSDoc comments for public APIs
-- Use async/await instead of Promise chains
-- Prefer const/let over var
-
-## Workflow Guidelines
-- Always run typecheck after making code changes
-- Run tests before committing changes
-- Use meaningful commit messages
-- Create feature branches for new functionality
-- Ensure all tests pass before merging
-
-## Important Notes
-- **Use TodoWrite extensively** for all complex task coordination
-- **Leverage Task tool** for parallel agent execution on independent work
-- **Store all important information in Memory** for cross-agent coordination
-- **Use batch file operations** whenever reading/writing multiple files
-- **Check .claude/commands/** for detailed command documentation
-- **All swarm operations include automatic batch tool coordination**
-- **Monitor progress** with TodoRead during long-running operations
-- **Enable parallel execution** with --parallel flags for maximum efficiency
-
-This configuration ensures optimal use of Claude Code's batch tools for swarm orchestration and parallel task execution with full Claude-Flow capabilities.
+- Unit tests: Alongside code (`*_test.go`)
+- Integration tests: `tests/integration/`
+- E2E tests: Playwright in `tests/e2e/`
+- Test corpus: `test-resources/`

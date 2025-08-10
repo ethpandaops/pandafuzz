@@ -24,6 +24,7 @@ type RetryClient struct {
 	masterURL      string
 	logger         *logrus.Logger
 	config         *common.BotConfig
+	botID          string // Track bot ID for coverage reporting
 }
 
 // BotRegisterResponse represents registration response from master
@@ -133,6 +134,11 @@ func (rc *RetryClient) RegisterBot(botID string, capabilities []string, apiEndpo
 
 	if err != nil {
 		return nil, common.NewNetworkError("register_bot", err)
+	}
+
+	// Store the bot ID for later use
+	if response.BotID != "" {
+		rc.botID = response.BotID
 	}
 
 	rc.logger.WithFields(logrus.Fields{
@@ -332,6 +338,26 @@ func (rc *RetryClient) ReportCoverage(coverage *common.CoverageResult) error {
 		"edges":       coverage.Edges,
 		"new_edges":   coverage.NewEdges,
 	}).Debug("Coverage reported to master")
+
+	return nil
+}
+
+// ReportCoverageData reports detailed coverage data to the master
+func (rc *RetryClient) ReportCoverageData(coverageData map[string]interface{}) error {
+	err := rc.retryManager.Execute(func() error {
+		return rc.circuitBreaker.Execute(func() error {
+			return rc.doRequest("POST", "/api/v1/results/coverage-report", coverageData, nil)
+		})
+	})
+
+	if err != nil {
+		return common.NewNetworkError("report_coverage_data", err)
+	}
+
+	rc.logger.WithFields(logrus.Fields{
+		"job_id":    coverageData["job_id"],
+		"report_id": coverageData["report_id"],
+	}).Debug("Coverage data reported to master")
 
 	return nil
 }

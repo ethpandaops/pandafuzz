@@ -2,6 +2,37 @@
 
 This directory contains utility scripts for PandaFuzz operations.
 
+## Coverage Testing
+
+### 📊 `run-coverage-test.sh`
+Complete end-to-end test of coverage collection functionality.
+```bash
+# Test AFL++ with coverage
+./scripts/run-coverage-test.sh afl++
+
+# Test LibFuzzer with coverage  
+./scripts/run-coverage-test.sh libfuzzer
+```
+- Compiles test binaries with proper instrumentation
+- Creates corpus and uploads to PandaFuzz
+- Runs fuzzing jobs with coverage enabled
+- Checks for real coverage data (edges, gcda/profraw files)
+- Falls back to synthetic data if instrumentation missing
+- Validates coverage download functionality
+
+### 🔧 `compile-for-coverage.sh`
+Local compilation helper for creating instrumented binaries.
+```bash
+# Compile for AFL++ with GCC coverage
+./scripts/compile-for-coverage.sh source.c output_binary afl++
+
+# Compile for LibFuzzer with LLVM coverage
+./scripts/compile-for-coverage.sh source.cc output_binary libfuzzer
+```
+- Uses `afl-gcc-fast` for AFL++ (provides real GCC coverage)
+- Uses `clang` with coverage flags for LibFuzzer
+- Verifies instrumentation in compiled binaries
+
 ## Fuzzing Test Scripts
 
 ### 🧪 `test-fuzzers.sh`
@@ -130,3 +161,21 @@ docker-compose up -d
 2. Use `quick-fuzzer-test.sh` for rapid testing
 3. Use `test-fuzzers.sh` for thorough verification
 4. Check logs at `$MASTER_URL/api/v1/jobs/{job_id}/logs` for debugging
+
+## Coverage Instrumentation Notes
+
+For **real coverage data**, binaries must be compiled with instrumentation:
+
+**AFL++**: 
+- Use `afl-gcc-fast` with `-fprofile-arcs -ftest-coverage` flags
+- Generates GCC coverage data (.gcda files)
+- Tracks edge coverage via AFL bitmap
+- The "outdated instrumentation" warning can be ignored - GCC plugin mode works fine
+
+**LibFuzzer**: 
+- Use `clang` with `-fsanitize=fuzzer -fprofile-instr-generate -fcoverage-mapping`
+- Generates LLVM profraw files
+- Process with llvm-profdata and llvm-cov
+- Provides detailed line/function/branch coverage
+
+Use `compile-for-coverage.sh` to easily compile binaries with proper instrumentation.

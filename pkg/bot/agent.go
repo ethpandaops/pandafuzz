@@ -89,6 +89,8 @@ func NewAgent(config *common.BotConfig, logger *logrus.Logger) (*Agent, error) {
 
 	// Create job executor with fuzzer implementation
 	executor := NewFuzzerJobExecutor(config, logger)
+	// Set the client as the result handler for coverage reporting
+	executor.SetResultHandler(client)
 
 	// Create resource monitor
 	resourceMonitor := NewResourceMonitor(config, logger)

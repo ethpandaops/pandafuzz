@@ -158,6 +158,8 @@ type CreateJobRequest struct {
 	CollectionID      string           `json:"collection_id,omitempty"`       // Use corpus collection
 	UseCampaignCorpus bool             `json:"use_campaign_corpus,omitempty"` // Whether to inherit corpus from campaign
 	Priority          int              `json:"priority,omitempty"`            // Job priority (0-100, higher is more important)
+	EnableCoverage    bool             `json:"enable_coverage,omitempty"`     // Whether to enable coverage collection
+	CoverageFormat    string           `json:"coverage_format,omitempty"`     // Coverage format (lcov, html, json)
 }
 
 // JobFilter represents job list filters

@@ -40,6 +40,8 @@ tags:
     description: System administration operations
   - name: reproducibility
     description: Crash reproduction operations
+  - name: coverage
+    description: Code coverage analysis operations
 
 paths:
   # Bot Management
@@ -384,6 +386,107 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CrashListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{jobId}/coverage:
+    parameters:
+      - $ref: '#/components/parameters/jobIdParam'
+    
+    get:
+      tags: [jobs, coverage]
+      summary: List coverage reports for a job
+      operationId: getJobCoverage
+      parameters:
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/limitParam'
+        - $ref: '#/components/parameters/sortByParam'
+        - $ref: '#/components/parameters/sortOrderParam'
+        - name: format
+          in: query
+          description: Filter by coverage report format
+          schema:
+            type: string
+            enum: [json, html, lcov, cobertura]
+        - name: from
+          in: query
+          description: Filter reports created after this timestamp
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: Filter reports created before this timestamp
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: List of coverage reports
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageReportListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{jobId}/coverage/{reportId}:
+    parameters:
+      - $ref: '#/components/parameters/jobIdParam'
+      - $ref: '#/components/parameters/reportIdParam'
+    
+    get:
+      tags: [jobs, coverage]
+      summary: Download coverage report
+      operationId: downloadCoverageReport
+      responses:
+        '200':
+          description: Coverage report content
+          content:
+            application/json:
+              schema:
+                type: object
+                description: JSON coverage report
+            text/html:
+              schema:
+                type: string
+                description: HTML coverage report
+            text/plain:
+              schema:
+                type: string
+                description: LCOV or Cobertura coverage report
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: Binary coverage report
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{jobId}/coverage/{reportId}/metadata:
+    parameters:
+      - $ref: '#/components/parameters/jobIdParam'
+      - $ref: '#/components/parameters/reportIdParam'
+    
+    get:
+      tags: [jobs, coverage]
+      summary: Get coverage report metadata
+      operationId: getCoverageReportMetadata
+      responses:
+        '200':
+          description: Coverage report metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageMetadata'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -1122,6 +1225,15 @@ components:
         type: string
         format: uuid
     
+    reportIdParam:
+      name: reportId
+      in: path
+      required: true
+      description: Coverage report identifier
+      schema:
+        type: string
+        format: uuid
+    
     statusFilter:
       name: status
       in: query
@@ -1532,6 +1644,15 @@ components:
           format: uuid
         use_campaign_corpus:
           type: boolean
+        enable_coverage:
+          type: boolean
+          default: false
+          description: Enable code coverage collection during fuzzing
+        coverage_format:
+          type: string
+          enum: [json, html, lcov, cobertura]
+          default: json
+          description: Format for coverage reports
 
     JobCompleteRequest:
       type: object
@@ -2113,6 +2234,160 @@ components:
         timestamp:
           type: string
           format: date-time
+
+    # Coverage Report schemas
+    CoverageReport:
+      type: object
+      required:
+        - id
+        - job_id
+        - format
+        - size
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the coverage report
+        job_id:
+          type: string
+          format: uuid
+          description: Job that generated this coverage report
+        format:
+          type: string
+          enum: [json, html, lcov, cobertura]
+          description: Format of the coverage report
+        size:
+          type: integer
+          format: int64
+          description: Size of the coverage report in bytes
+        created_at:
+          type: string
+          format: date-time
+          description: When the coverage report was created
+        file_path:
+          type: string
+          description: Path to the coverage report file
+        checksum:
+          type: string
+          description: SHA256 checksum of the coverage report
+
+    CoverageMetadata:
+      type: object
+      required:
+        - line_coverage
+        - function_coverage
+        - branch_coverage
+        - total_lines
+        - covered_lines
+        - total_functions
+        - covered_functions
+        - collected_at
+      properties:
+        line_coverage:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+          description: Percentage of lines covered by tests
+        function_coverage:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+          description: Percentage of functions covered by tests
+        branch_coverage:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+          description: Percentage of branches covered by tests
+        total_lines:
+          type: integer
+          minimum: 0
+          description: Total number of executable lines
+        covered_lines:
+          type: integer
+          minimum: 0
+          description: Number of lines covered by tests
+        total_functions:
+          type: integer
+          minimum: 0
+          description: Total number of functions
+        covered_functions:
+          type: integer
+          minimum: 0
+          description: Number of functions covered by tests
+        total_branches:
+          type: integer
+          minimum: 0
+          description: Total number of branches
+        covered_branches:
+          type: integer
+          minimum: 0
+          description: Number of branches covered by tests
+        collected_at:
+          type: string
+          format: date-time
+          description: When the coverage data was collected
+        report_id:
+          type: string
+          format: uuid
+          description: Associated coverage report ID
+        job_id:
+          type: string
+          format: uuid
+          description: Job that generated this coverage data
+        source_files:
+          type: array
+          items:
+            type: object
+            properties:
+              file_path:
+                type: string
+              line_coverage:
+                type: number
+                format: float
+                minimum: 0
+                maximum: 100
+              covered_lines:
+                type: integer
+              total_lines:
+                type: integer
+          description: Per-file coverage statistics
+
+    CoverageReportListResponse:
+      type: object
+      required:
+        - reports
+        - count
+        - page
+        - limit
+        - total
+      properties:
+        reports:
+          type: array
+          items:
+            $ref: '#/components/schemas/CoverageReport'
+        count:
+          type: integer
+          description: Number of reports in this page
+        page:
+          type: integer
+          description: Current page number
+        limit:
+          type: integer
+          description: Number of items per page
+        total:
+          type: integer
+          description: Total number of coverage reports for this job
+        sort_by:
+          type: string
+          description: Field used for sorting
+        sort_order:
+          type: string
+          enum: [asc, desc]
+          description: Sort order applied
 
     # Reproducibility schemas
     ReproductionRequest:

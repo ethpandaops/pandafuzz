@@ -20,6 +20,17 @@ export enum BotStatus {
   Failed = 'failed',
 }
 
+// Job configuration interfaces
+export interface JobCoverageConfig {
+  enabled: boolean;
+  format: 'json' | 'html' | 'lcov' | 'cobertura';
+}
+
+export interface JobConfig {
+  coverage?: JobCoverageConfig;
+  [key: string]: any;
+}
+
 export interface Job {
   id: string;
   name: string;
@@ -38,7 +49,9 @@ export interface Job {
   completed_at?: string;
   timeout_at: string;
   message?: string;
-  config?: Record<string, any>;
+  config?: JobConfig;
+  enable_coverage?: boolean;
+  coverage_format?: string;
 }
 
 export enum JobStatus {
@@ -143,3 +156,6 @@ export interface CrashTrend {
   crashes: number;
   unique_crashes: number;
 }
+
+// Re-export coverage types
+export * from './coverage';

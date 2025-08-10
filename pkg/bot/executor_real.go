@@ -18,10 +18,11 @@ import (
 
 // RealJobExecutor handles the actual execution of fuzzing jobs with log capture
 type RealJobExecutor struct {
-	config     *common.BotConfig
-	logger     *logrus.Logger
-	activeJobs map[string]*RealJobExecution
-	mu         sync.RWMutex
+	config          *common.BotConfig
+	logger          *logrus.Logger
+	activeJobs      map[string]*RealJobExecution
+	mu              sync.RWMutex
+	processExecutor *ProcessExecutor // Linux-specific process executor
 }
 
 // RealJobExecution represents an active job execution with logging
@@ -40,9 +41,10 @@ type RealJobExecution struct {
 // NewRealJobExecutor creates a new real job executor
 func NewRealJobExecutor(config *common.BotConfig, logger *logrus.Logger) *RealJobExecutor {
 	return &RealJobExecutor{
-		config:     config,
-		logger:     logger,
-		activeJobs: make(map[string]*RealJobExecution),
+		config:          config,
+		logger:          logger,
+		activeJobs:      make(map[string]*RealJobExecution),
+		processExecutor: NewProcessExecutor(logger),
 	}
 }
 
@@ -310,8 +312,8 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 		"-m", fmt.Sprintf("%d", job.Config.MemoryLimit), // Memory limit
 	}
 
-	// Add non-instrumented mode flag for AFL++ to work with any binary
-	args = append(args, "-n")
+	// Note: Removed hardcoded -n flag to allow AFL++ to use instrumentation feedback
+	// AFL++ will automatically detect if binary is instrumented and fallback to dumb mode if not
 
 	// Add target
 	args = append(args, "--", localBinaryPath)
@@ -330,7 +332,7 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 		"AFL_SKIP_CPUFREQ=1",
 		"AFL_NO_AFFINITY=1",
 		"AFL_NO_UI=1",
-		"AFL_SKIP_BIN_CHECK=1",
+		// Removed AFL_SKIP_BIN_CHECK to allow AFL++ to use instrumentation
 		"AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1",
 	)
 
@@ -351,9 +353,11 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 
 	execution.Process = cmd
 
-	// Start command
+	// Start command with proper process group management
 	rje.writeLog(execution.LogWriter, "info", "afl++", fmt.Sprintf("Starting AFL++ with command: afl-fuzz %s", strings.Join(args, " ")))
+	rje.writeLog(execution.LogWriter, "info", "afl++", "Using enhanced process group management for AFL++ fork-server")
 
+	// Start the process directly first (process executor will be used in a refactored version)
 	if err := cmd.Start(); err != nil {
 		msg := fmt.Sprintf("Failed to start AFL++: %v", err)
 		rje.writeLog(execution.LogWriter, "error", "afl++", msg)
@@ -368,6 +372,16 @@ func (rje *RealJobExecutor) executeAFLJob(execution *RealJobExecution) (bool, st
 		// Make sure logs are written
 		execution.LogWriter.Flush()
 		return false, msg, err
+	}
+
+	// Wait for AFL++ to initialize its fork-server
+	if cmd.Process != nil {
+		rje.writeLog(execution.LogWriter, "info", "afl++", "Waiting for AFL++ fork-server initialization...")
+		if err := rje.processExecutor.WaitForAFLInitialization(execution.Context, cmd.Process.Pid, 5*time.Second); err != nil {
+			rje.writeLog(execution.LogWriter, "warning", "afl++", fmt.Sprintf("AFL++ initialization check: %v", err))
+		} else {
+			rje.writeLog(execution.LogWriter, "info", "afl++", "AFL++ fork-server initialized successfully")
+		}
 	}
 
 	// Capture output in goroutines

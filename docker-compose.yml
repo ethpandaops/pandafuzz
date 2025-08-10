@@ -19,7 +19,7 @@ services:
       - master-data:/app/data
       - ./master-docker.yaml:/app/master.yaml:ro
     environment:
-      - PANDAFUZZ_LOG_LEVEL=info
+      - PANDAFUZZ_LOG_LEVEL=debug
     networks:
       - pandafuzz
     healthcheck:

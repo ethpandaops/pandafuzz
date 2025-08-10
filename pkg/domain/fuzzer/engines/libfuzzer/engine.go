@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -76,6 +77,10 @@ type Engine struct {
 	rssRegex       *regexp.Regexp
 	crashRegex     *regexp.Regexp
 
+	// Coverage tracking
+	coverageData  map[string]interface{}
+	coverageMutex sync.RWMutex
+
 	// Synchronization
 	wg sync.WaitGroup
 
@@ -98,7 +103,8 @@ func NewEngine(target string, args []string, log logrus.FieldLogger) *Engine {
 		stats: &types.FuzzerStats{
 			StartTime: time.Now(),
 		},
-		log: log.WithField("engine", "libfuzzer"),
+		coverageData: make(map[string]interface{}),
+		log:          log.WithField("engine", "libfuzzer"),
 	}
 
 	// Compile regex patterns
@@ -141,13 +147,21 @@ func (e *Engine) Start(ctx context.Context) error {
 	e.cmd = exec.CommandContext(e.ctx, e.target, cmdArgs...)
 
 	// Set environment
+	env := os.Environ()
 	if e.config != nil && e.config.Environment != nil {
-		env := os.Environ()
 		for k, v := range e.config.Environment {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
 		}
-		e.cmd.Env = env
 	}
+
+	// Configure coverage environment if enabled
+	if e.config != nil && e.config.EnableCoverage {
+		if err := e.configureCoverageEnvironment(&env); err != nil {
+			e.log.WithError(err).Warn("Failed to configure coverage environment")
+		}
+	}
+
+	e.cmd.Env = env
 
 	// Setup pipes
 	var err error
@@ -182,6 +196,12 @@ func (e *Engine) Start(ctx context.Context) error {
 	// Start monitoring goroutine
 	e.wg.Add(1)
 	go e.monitorProcess()
+
+	// Start coverage collection if enabled
+	if e.config != nil && e.config.EnableCoverage {
+		e.wg.Add(1)
+		go e.monitorCoverage()
+	}
 
 	e.log.Info("LibFuzzer started successfully")
 	return nil
@@ -307,6 +327,15 @@ func (e *Engine) buildCommandArgs() []string {
 
 	// Add configuration options
 	if e.config != nil {
+		// Coverage options
+		if e.config.EnableCoverage {
+			args = append(args, "-use_counters=1")
+			args = append(args, "-print_pcs=1")
+			if e.config.LibFuzzerOptions != nil && e.config.LibFuzzerOptions.PrintCoveragePCs > 0 {
+				args = append(args, "-print_coverage_pcs=1")
+			}
+		}
+
 		// Common options
 		if e.config.MaxLen > 0 {
 			args = append(args, fmt.Sprintf("-max_len=%d", e.config.MaxLen))
@@ -592,4 +621,201 @@ func (e *Engine) detectVersion() string {
 	}
 
 	return "unknown"
+}
+
+// configureCoverageEnvironment configures environment variables for coverage collection
+func (e *Engine) configureCoverageEnvironment(env *[]string) error {
+	if e.config == nil || !e.config.EnableCoverage {
+		return nil
+	}
+
+	// Set LLVM_PROFILE_FILE for LLVM coverage
+	profileFile := filepath.Join(e.config.CoverageDir, "libfuzzer.profraw")
+	*env = append(*env, fmt.Sprintf("LLVM_PROFILE_FILE=%s", profileFile))
+
+	e.log.WithField("profile_file", profileFile).Debug("Configured LLVM coverage environment")
+	return nil
+}
+
+// CollectCoverageData collects coverage data using llvm-profdata and llvm-cov
+func (e *Engine) CollectCoverageData() (map[string]interface{}, error) {
+	if e.config == nil || !e.config.EnableCoverage {
+		return nil, errors.New("coverage collection not enabled")
+	}
+
+	coverageData := make(map[string]interface{})
+	profileFile := filepath.Join(e.config.CoverageDir, "libfuzzer.profraw")
+
+	// Check if profile file exists
+	if _, err := os.Stat(profileFile); os.IsNotExist(err) {
+		e.log.Warn("Coverage profile file not found")
+		return coverageData, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// First, merge profile data using llvm-profdata
+	profdataFile := filepath.Join(e.config.CoverageDir, "merged.profdata")
+	profdataCmd := exec.CommandContext(ctx, "llvm-profdata", "merge", "-sparse", profileFile, "-o", profdataFile)
+	if output, err := profdataCmd.CombinedOutput(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("llvm-profdata merge timed out after 30 seconds")
+		}
+		return nil, fmt.Errorf("llvm-profdata merge failed: %w, output: %s", err, string(output))
+	}
+
+	coverageData["profdata_file"] = profdataFile
+	coverageData["profile_file"] = profileFile
+
+	// Generate coverage report based on format
+	switch e.config.CoverageFormat {
+	case "json":
+		if err := e.generateJSONCoverage(ctx, profdataFile, coverageData); err != nil {
+			return nil, fmt.Errorf("failed to generate JSON coverage: %w", err)
+		}
+	case "lcov":
+		if err := e.generateLCOVCoverage(ctx, profdataFile, coverageData); err != nil {
+			return nil, fmt.Errorf("failed to generate LCOV coverage: %w", err)
+		}
+	case "html":
+		if err := e.generateHTMLCoverage(ctx, profdataFile, coverageData); err != nil {
+			return nil, fmt.Errorf("failed to generate HTML coverage: %w", err)
+		}
+	case "profdata":
+		// Already have profdata file
+		coverageData["format"] = "profdata"
+	default:
+		e.log.WithField("format", e.config.CoverageFormat).Warn("Unsupported coverage format")
+		coverageData["format"] = "profdata" // Fallback to profdata
+	}
+
+	coverageData["timestamp"] = time.Now().Unix()
+	coverageData["collected_at"] = time.Now().Format(time.RFC3339)
+
+	e.log.WithField("format", e.config.CoverageFormat).Debug("Coverage data collected successfully")
+	return coverageData, nil
+}
+
+// generateJSONCoverage generates JSON coverage report
+func (e *Engine) generateJSONCoverage(ctx context.Context, profdataFile string, coverageData map[string]interface{}) error {
+	jsonFile := filepath.Join(e.config.CoverageDir, "coverage.json")
+	cmd := exec.CommandContext(ctx, "llvm-cov", "export", e.target, "-instr-profile", profdataFile, "-format=text")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("llvm-cov export timed out after 30 seconds")
+		}
+		return fmt.Errorf("llvm-cov export failed: %w, output: %s", err, string(output))
+	}
+
+	if err := os.WriteFile(jsonFile, output, 0644); err != nil {
+		return fmt.Errorf("failed to write JSON coverage file: %w", err)
+	}
+
+	// Parse the JSON to extract summary information
+	var coverageReport map[string]interface{}
+	if err := json.Unmarshal(output, &coverageReport); err == nil {
+		if data, ok := coverageReport["data"]; ok {
+			if dataArray, ok := data.([]interface{}); ok && len(dataArray) > 0 {
+				if firstFile, ok := dataArray[0].(map[string]interface{}); ok {
+					if totals, ok := firstFile["totals"]; ok {
+						coverageData["totals"] = totals
+					}
+				}
+			}
+		}
+	}
+
+	coverageData["json_file"] = jsonFile
+	coverageData["format"] = "json"
+	return nil
+}
+
+// generateLCOVCoverage generates LCOV coverage report
+func (e *Engine) generateLCOVCoverage(ctx context.Context, profdataFile string, coverageData map[string]interface{}) error {
+	lcovFile := filepath.Join(e.config.CoverageDir, "coverage.info")
+	cmd := exec.CommandContext(ctx, "llvm-cov", "export", e.target, "-instr-profile", profdataFile, "-format=lcov")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("llvm-cov export timed out after 30 seconds")
+		}
+		return fmt.Errorf("llvm-cov export failed: %w, output: %s", err, string(output))
+	}
+
+	if err := os.WriteFile(lcovFile, output, 0644); err != nil {
+		return fmt.Errorf("failed to write LCOV coverage file: %w", err)
+	}
+
+	coverageData["lcov_file"] = lcovFile
+	coverageData["format"] = "lcov"
+	return nil
+}
+
+// generateHTMLCoverage generates HTML coverage report
+func (e *Engine) generateHTMLCoverage(ctx context.Context, profdataFile string, coverageData map[string]interface{}) error {
+	htmlDir := filepath.Join(e.config.CoverageDir, "html")
+	if err := os.MkdirAll(htmlDir, 0755); err != nil {
+		return fmt.Errorf("failed to create HTML directory: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, "llvm-cov", "show", e.target, "-instr-profile", profdataFile, "-format=html", "-output-dir", htmlDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("llvm-cov show timed out after 30 seconds")
+		}
+		return fmt.Errorf("llvm-cov show failed: %w, output: %s", err, string(output))
+	}
+
+	coverageData["html_dir"] = htmlDir
+	coverageData["html_index"] = filepath.Join(htmlDir, "index.html")
+	coverageData["format"] = "html"
+	return nil
+}
+
+// monitorCoverage monitors and periodically collects coverage data
+func (e *Engine) monitorCoverage() {
+	defer e.wg.Done()
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-e.ctx.Done():
+			// Final coverage collection before exit
+			if data, err := e.CollectCoverageData(); err == nil {
+				e.coverageMutex.Lock()
+				e.coverageData = data
+				e.coverageMutex.Unlock()
+			}
+			return
+		case <-ticker.C:
+			if !e.isRunning.Load() {
+				return
+			}
+			if data, err := e.CollectCoverageData(); err == nil {
+				e.coverageMutex.Lock()
+				e.coverageData = data
+				e.coverageMutex.Unlock()
+			} else {
+				e.log.WithError(err).Debug("Failed to collect coverage data")
+			}
+		}
+	}
+}
+
+// GetCoverageData returns the current coverage data
+func (e *Engine) GetCoverageData() map[string]interface{} {
+	e.coverageMutex.RLock()
+	defer e.coverageMutex.RUnlock()
+
+	// Return a copy of the coverage data
+	data := make(map[string]interface{})
+	for k, v := range e.coverageData {
+		data[k] = v
+	}
+	return data
 }

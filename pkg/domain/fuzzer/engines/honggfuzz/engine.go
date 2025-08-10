@@ -77,6 +77,10 @@ type Engine struct {
 	crashesMutex sync.RWMutex
 	seenCrashes  map[string]bool
 
+	// Coverage tracking
+	coverageData  map[string]interface{}
+	coverageMutex sync.RWMutex
+
 	// Synchronization
 	wg            sync.WaitGroup
 	lastStatsTime time.Time
@@ -101,7 +105,8 @@ func NewEngine(target string, args []string, log logrus.FieldLogger) *Engine {
 		stats: &types.FuzzerStats{
 			StartTime: time.Now(),
 		},
-		log: log.WithField("engine", "honggfuzz"),
+		coverageData: make(map[string]interface{}),
+		log:          log.WithField("engine", "honggfuzz"),
 	}
 
 	// Compile regex patterns for parsing output
@@ -168,6 +173,13 @@ func (e *Engine) Start(ctx context.Context) error {
 		}
 	}
 
+	// Configure coverage environment if enabled
+	if e.config != nil && e.config.EnableCoverage {
+		if err := e.configureCoverageEnvironment(&env); err != nil {
+			e.log.WithError(err).Warn("Failed to configure coverage environment")
+		}
+	}
+
 	// Add Honggfuzz specific environment variables
 	if e.config.HonggfuzzOptions.EnvVars != nil {
 		env = append(env, e.config.HonggfuzzOptions.EnvVars...)
@@ -211,6 +223,12 @@ func (e *Engine) Start(ctx context.Context) error {
 	// Start process monitor
 	e.wg.Add(1)
 	go e.monitorProcess()
+
+	// Start coverage collection if enabled
+	if e.config != nil && e.config.EnableCoverage {
+		e.wg.Add(1)
+		go e.monitorCoverage()
+	}
 
 	e.log.Info("Honggfuzz started successfully")
 	return nil
@@ -745,4 +763,332 @@ func (e *Engine) detectVersion() string {
 	}
 
 	return "unknown"
+}
+
+// configureCoverageEnvironment configures environment variables for coverage collection
+func (e *Engine) configureCoverageEnvironment(env *[]string) error {
+	if e.config == nil || !e.config.EnableCoverage || e.config.HonggfuzzOptions == nil {
+		return nil
+	}
+
+	opts := e.config.HonggfuzzOptions
+
+	// Configure sanitizer coverage (sancov) if enabled
+	if opts.Sancov {
+		sancovDir := e.config.CoverageDir
+		if opts.SancovDir != "" {
+			sancovDir = opts.SancovDir
+		}
+
+		// Set sancov environment variables
+		*env = append(*env, fmt.Sprintf("ASAN_OPTIONS=coverage=1:coverage_dir=%s", sancovDir))
+		*env = append(*env, fmt.Sprintf("MSAN_OPTIONS=coverage=1:coverage_dir=%s", sancovDir))
+		*env = append(*env, fmt.Sprintf("TSAN_OPTIONS=coverage=1:coverage_dir=%s", sancovDir))
+		*env = append(*env, fmt.Sprintf("UBSAN_OPTIONS=coverage=1:coverage_dir=%s", sancovDir))
+
+		e.log.WithField("sancov_dir", sancovDir).Debug("Configured sanitizer coverage environment")
+	}
+
+	return nil
+}
+
+// CollectCoverageData collects coverage data from Honggfuzz
+func (e *Engine) CollectCoverageData() (map[string]interface{}, error) {
+	if e.config == nil || !e.config.EnableCoverage {
+		return nil, errors.New("coverage collection not enabled")
+	}
+
+	coverageData := make(map[string]interface{})
+
+	// Collect sanitizer coverage data if enabled
+	if e.config.HonggfuzzOptions.Sancov {
+		if data, err := e.collectSancovData(); err == nil {
+			for k, v := range data {
+				coverageData[k] = v
+			}
+		} else {
+			e.log.WithError(err).Warn("Failed to collect sancov data")
+		}
+	}
+
+	// Collect basic Honggfuzz coverage statistics
+	if data, err := e.collectBasicCoverageStats(); err == nil {
+		for k, v := range data {
+			coverageData[k] = v
+		}
+	}
+
+	// Generate coverage report if requested
+	if e.config.HonggfuzzOptions.CoverageReport {
+		if err := e.generateCoverageReport(coverageData); err != nil {
+			e.log.WithError(err).Warn("Failed to generate coverage report")
+		}
+	}
+
+	coverageData["timestamp"] = time.Now().Unix()
+	coverageData["collected_at"] = time.Now().Format(time.RFC3339)
+	coverageData["sancov_enabled"] = e.config.HonggfuzzOptions.Sancov
+	coverageData["coverage_report_enabled"] = e.config.HonggfuzzOptions.CoverageReport
+
+	e.log.Debug("Coverage data collected successfully")
+	return coverageData, nil
+}
+
+// collectSancovData collects sanitizer coverage data
+func (e *Engine) collectSancovData() (map[string]interface{}, error) {
+	coverageData := make(map[string]interface{})
+
+	sancovDir := e.config.CoverageDir
+	if e.config.HonggfuzzOptions.SancovDir != "" {
+		sancovDir = e.config.HonggfuzzOptions.SancovDir
+	}
+
+	// Look for .sancov files
+	pattern := filepath.Join(sancovDir, "*.sancov")
+	sancovFiles, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find sancov files: %w", err)
+	}
+
+	coverageData["sancov_dir"] = sancovDir
+	coverageData["sancov_files"] = sancovFiles
+	coverageData["sancov_count"] = len(sancovFiles)
+
+	if len(sancovFiles) > 0 {
+		// Process sancov files to generate human-readable coverage
+		if err := e.processSancovFiles(sancovFiles, coverageData); err != nil {
+			e.log.WithError(err).Warn("Failed to process sancov files")
+		}
+	}
+
+	return coverageData, nil
+}
+
+// processSancovFiles processes .sancov files to extract coverage information
+func (e *Engine) processSancovFiles(sancovFiles []string, coverageData map[string]interface{}) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Try to use sancov tool to process the files
+	outputFile := filepath.Join(e.config.CoverageDir, "coverage.txt")
+
+	// Merge all sancov files
+	args := []string{"print"}
+	args = append(args, sancovFiles...)
+
+	cmd := exec.CommandContext(ctx, "sancov", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("sancov processing timed out after 30 seconds")
+		}
+		// If sancov tool is not available, just report file sizes
+		e.log.Debug("sancov tool not available, collecting basic file information")
+		return e.collectSancovFileInfo(sancovFiles, coverageData)
+	}
+
+	if err := os.WriteFile(outputFile, output, 0644); err != nil {
+		return fmt.Errorf("failed to write sancov output: %w", err)
+	}
+
+	coverageData["sancov_output_file"] = outputFile
+	coverageData["sancov_output"] = string(output)
+
+	// Count covered PCs
+	lines := strings.Split(string(output), "\n")
+	coveredPCs := 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" && strings.HasPrefix(line, "0x") {
+			coveredPCs++
+		}
+	}
+	coverageData["covered_pcs"] = coveredPCs
+
+	// Generate additional formats if requested
+	switch e.config.CoverageFormat {
+	case "html":
+		if err := e.generateSancovHTML(ctx, sancovFiles, coverageData); err != nil {
+			e.log.WithError(err).Warn("Failed to generate HTML coverage")
+		}
+	case "json":
+		// Already have coverage data in JSON-compatible format
+		coverageData["format"] = "json"
+	default:
+		coverageData["format"] = "txt"
+	}
+
+	return nil
+}
+
+// collectSancovFileInfo collects basic information about sancov files
+func (e *Engine) collectSancovFileInfo(sancovFiles []string, coverageData map[string]interface{}) error {
+	totalSize := int64(0)
+	fileInfo := make([]map[string]interface{}, 0, len(sancovFiles))
+
+	for _, file := range sancovFiles {
+		stat, err := os.Stat(file)
+		if err != nil {
+			continue
+		}
+
+		totalSize += stat.Size()
+		fileInfo = append(fileInfo, map[string]interface{}{
+			"file":     file,
+			"size":     stat.Size(),
+			"mod_time": stat.ModTime().Unix(),
+		})
+	}
+
+	coverageData["total_sancov_size"] = totalSize
+	coverageData["sancov_file_info"] = fileInfo
+
+	return nil
+}
+
+// generateSancovHTML generates HTML coverage report from sancov files
+func (e *Engine) generateSancovHTML(ctx context.Context, sancovFiles []string, coverageData map[string]interface{}) error {
+	htmlDir := filepath.Join(e.config.CoverageDir, "html")
+	if err := os.MkdirAll(htmlDir, 0755); err != nil {
+		return fmt.Errorf("failed to create HTML directory: %w", err)
+	}
+
+	// Try to use sancov to generate HTML report
+	args := []string{"html"}
+	args = append(args, sancovFiles...)
+
+	cmd := exec.CommandContext(ctx, "sancov", args...)
+	cmd.Dir = htmlDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("sancov HTML generation timed out after 30 seconds")
+		}
+		return fmt.Errorf("sancov HTML generation failed: %w, output: %s", err, string(output))
+	}
+
+	coverageData["html_dir"] = htmlDir
+	coverageData["html_index"] = filepath.Join(htmlDir, "index.html")
+	coverageData["format"] = "html"
+
+	return nil
+}
+
+// collectBasicCoverageStats collects basic Honggfuzz coverage statistics
+func (e *Engine) collectBasicCoverageStats() (map[string]interface{}, error) {
+	coverageData := make(map[string]interface{})
+
+	// Include current fuzzer statistics
+	coverageData["iterations"] = e.lastIterations
+	coverageData["corpus_size"] = e.lastCorpusSize
+	coverageData["coverage_percent"] = e.lastCoverage
+	coverageData["guard_nb"] = e.lastGuardNb
+	coverageData["speed"] = e.lastSpeed
+
+	// Try to read Honggfuzz workspace files for additional coverage info
+	workspaceDir := e.outputDir
+	if workspaceDir == "" && e.config != nil {
+		workspaceDir = e.config.OutputDir
+	}
+	if workspaceDir == "" {
+		workspaceDir = "/tmp/honggfuzz"
+	}
+
+	// Look for coverage-related files in workspace
+	pattern := filepath.Join(workspaceDir, "*.cov")
+	covFiles, err := filepath.Glob(pattern)
+	if err == nil && len(covFiles) > 0 {
+		coverageData["coverage_files"] = covFiles
+		coverageData["coverage_file_count"] = len(covFiles)
+	}
+
+	return coverageData, nil
+}
+
+// generateCoverageReport generates a comprehensive coverage report
+func (e *Engine) generateCoverageReport(coverageData map[string]interface{}) error {
+	reportFile := filepath.Join(e.config.CoverageDir, "honggfuzz-coverage-report.txt")
+
+	reportContent := []string{
+		fmt.Sprintf("Honggfuzz Coverage Report - Generated at %s", time.Now().Format(time.RFC3339)),
+		"===============================================",
+		"",
+		fmt.Sprintf("Iterations: %v", coverageData["iterations"]),
+		fmt.Sprintf("Corpus Size: %v", coverageData["corpus_size"]),
+		fmt.Sprintf("Coverage Percentage: %v%%", coverageData["coverage_percent"]),
+		fmt.Sprintf("Guard Number: %v", coverageData["guard_nb"]),
+		fmt.Sprintf("Speed: %v/sec", coverageData["speed"]),
+		"",
+	}
+
+	if sancovEnabled, ok := coverageData["sancov_enabled"].(bool); ok && sancovEnabled {
+		reportContent = append(reportContent, "Sanitizer Coverage (Sancov) Information:")
+		reportContent = append(reportContent, "--------------------------------------")
+		if sancovCount, ok := coverageData["sancov_count"].(int); ok {
+			reportContent = append(reportContent, fmt.Sprintf("Sancov Files: %d", sancovCount))
+		}
+		if coveredPCs, ok := coverageData["covered_pcs"].(int); ok {
+			reportContent = append(reportContent, fmt.Sprintf("Covered PCs: %d", coveredPCs))
+		}
+		reportContent = append(reportContent, "")
+	}
+
+	reportContent = append(reportContent, "Configuration:")
+	reportContent = append(reportContent, "--------------")
+	reportContent = append(reportContent, fmt.Sprintf("Coverage Format: %s", e.config.CoverageFormat))
+	reportContent = append(reportContent, fmt.Sprintf("Coverage Directory: %s", e.config.CoverageDir))
+	reportContent = append(reportContent, fmt.Sprintf("Sancov Enabled: %v", e.config.HonggfuzzOptions.Sancov))
+
+	reportText := strings.Join(reportContent, "\n")
+	if err := os.WriteFile(reportFile, []byte(reportText), 0644); err != nil {
+		return fmt.Errorf("failed to write coverage report: %w", err)
+	}
+
+	coverageData["report_file"] = reportFile
+	return nil
+}
+
+// monitorCoverage monitors and periodically collects coverage data
+func (e *Engine) monitorCoverage() {
+	defer e.wg.Done()
+
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-e.ctx.Done():
+			// Final coverage collection before exit
+			if data, err := e.CollectCoverageData(); err == nil {
+				e.coverageMutex.Lock()
+				e.coverageData = data
+				e.coverageMutex.Unlock()
+			}
+			return
+		case <-ticker.C:
+			if !e.isRunning.Load() {
+				return
+			}
+			if data, err := e.CollectCoverageData(); err == nil {
+				e.coverageMutex.Lock()
+				e.coverageData = data
+				e.coverageMutex.Unlock()
+			} else {
+				e.log.WithError(err).Debug("Failed to collect coverage data")
+			}
+		}
+	}
+}
+
+// GetCoverageData returns the current coverage data
+func (e *Engine) GetCoverageData() map[string]interface{} {
+	e.coverageMutex.RLock()
+	defer e.coverageMutex.RUnlock()
+
+	// Return a copy of the coverage data
+	data := make(map[string]interface{})
+	for k, v := range e.coverageData {
+		data[k] = v
+	}
+	return data
 }

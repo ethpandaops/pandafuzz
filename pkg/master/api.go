@@ -57,6 +57,8 @@ type JobRequest struct {
 	UseCampaignCorpus bool             `json:"use_campaign_corpus,omitempty"` // Whether to inherit corpus from campaign
 	Priority          int              `json:"priority,omitempty"`            // Job priority (0-100, higher is more important)
 	QueueName         string           `json:"queue_name,omitempty"`          // Specific queue to use (critical/default/low)
+	EnableCoverage    bool             `json:"enable_coverage,omitempty"`     // Whether to enable coverage collection
+	CoverageFormat    string           `json:"coverage_format,omitempty"`     // Coverage format (lcov, html, json)
 }
 
 // JobCompleteRequest represents a job completion request
@@ -641,6 +643,8 @@ func (s *Server) handleJobCreate(w http.ResponseWriter, r *http.Request) {
 		CollectionID:      req.CollectionID,
 		UseCampaignCorpus: req.UseCampaignCorpus,
 		Priority:          req.Priority,
+		EnableCoverage:    req.EnableCoverage,
+		CoverageFormat:    req.CoverageFormat,
 	}
 
 	job, err := s.services.Job.CreateJob(r.Context(), jobReq)

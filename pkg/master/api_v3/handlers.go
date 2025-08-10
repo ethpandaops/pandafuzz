@@ -4,14 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/errors"
+	"github.com/ethpandaops/pandafuzz/pkg/master/repository"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
+	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
@@ -19,12 +24,14 @@ import (
 
 // HandlerV3 implements the v3 API handlers
 type HandlerV3 struct {
-	services  *service.Manager
-	campaign  *CampaignServiceAdapter
-	corpus    *CorpusServiceAdapter
-	validator *Validator
-	logger    logrus.FieldLogger
-	config    *Config
+	services       *service.Manager
+	campaign       *CampaignServiceAdapter
+	corpus         *CorpusServiceAdapter
+	coverageRepo   repository.CoverageRepository
+	storageBackend backend.StorageBackend
+	validator      *Validator
+	logger         logrus.FieldLogger
+	config         *Config
 }
 
 // Config holds API v3 configuration
@@ -36,90 +43,105 @@ type Config struct {
 }
 
 // NewHandlerV3 creates a new v3 API handler
-func NewHandlerV3(services *service.Manager, logger logrus.FieldLogger, config *Config) *HandlerV3 {
+func NewHandlerV3(services *service.Manager, coverageRepo repository.CoverageRepository, storageBackend backend.StorageBackend, logger logrus.FieldLogger, config *Config) *HandlerV3 {
+	var campaign *CampaignServiceAdapter
+	var corpus *CorpusServiceAdapter
+
+	if services != nil {
+		campaign = NewCampaignServiceAdapter(services.Campaign)
+		corpus = NewCorpusServiceAdapter(services.Corpus)
+	}
+
 	return &HandlerV3{
-		services:  services,
-		campaign:  NewCampaignServiceAdapter(services.Campaign),
-		corpus:    NewCorpusServiceAdapter(services.Corpus),
-		validator: NewValidator(),
-		logger:    logger.WithField("api_version", "v3"),
-		config:    config,
+		services:       services,
+		campaign:       campaign,
+		corpus:         corpus,
+		coverageRepo:   coverageRepo,
+		storageBackend: storageBackend,
+		validator:      NewValidator(),
+		logger:         logger.WithField("api_version", "v3"),
+		config:         config,
 	}
 }
 
 // RegisterRoutes registers all v3 API routes
 func (h *HandlerV3) RegisterRoutes(router *mux.Router) {
 	// Apply versioning middleware
-	v3 := router.PathPrefix("/api/v3").Subrouter()
-	v3.Use(h.versioningMiddleware)
-	v3.Use(h.requestValidationMiddleware)
-	v3.Use(h.loggingMiddleware)
+	// Note: Don't create /api/v3 prefix here as Integration already does it
+	router.Use(h.versioningMiddleware)
+	router.Use(h.requestValidationMiddleware)
+	router.Use(h.loggingMiddleware)
 
 	// Bot management
-	v3.HandleFunc("/bots", h.listBots).Methods("GET")
-	v3.HandleFunc("/bots", h.registerBot).Methods("POST")
-	v3.HandleFunc("/bots/{botId}", h.getBot).Methods("GET")
-	v3.HandleFunc("/bots/{botId}", h.deregisterBot).Methods("DELETE")
-	v3.HandleFunc("/bots/{botId}/heartbeat", h.botHeartbeat).Methods("POST")
-	v3.HandleFunc("/bots/{botId}/jobs/next", h.getNextJob).Methods("POST")
-	v3.HandleFunc("/bots/{botId}/jobs/complete", h.completeJob).Methods("POST")
-	v3.HandleFunc("/bots/{botId}/metrics", h.getBotMetrics).Methods("GET")
+	router.HandleFunc("/bots", h.listBots).Methods("GET")
+	router.HandleFunc("/bots", h.registerBot).Methods("POST")
+	router.HandleFunc("/bots/{botId}", h.getBot).Methods("GET")
+	router.HandleFunc("/bots/{botId}", h.deregisterBot).Methods("DELETE")
+	router.HandleFunc("/bots/{botId}/heartbeat", h.botHeartbeat).Methods("POST")
+	router.HandleFunc("/bots/{botId}/jobs/next", h.getNextJob).Methods("POST")
+	router.HandleFunc("/bots/{botId}/jobs/complete", h.completeJob).Methods("POST")
+	router.HandleFunc("/bots/{botId}/metrics", h.getBotMetrics).Methods("GET")
 
 	// Job management
-	v3.HandleFunc("/jobs", h.listJobs).Methods("GET")
-	v3.HandleFunc("/jobs", h.createJob).Methods("POST")
-	v3.HandleFunc("/jobs/{jobId}", h.getJob).Methods("GET")
-	v3.HandleFunc("/jobs/{jobId}", h.cancelJob).Methods("DELETE")
-	v3.HandleFunc("/jobs/{jobId}/logs", h.getJobLogs).Methods("GET")
-	v3.HandleFunc("/jobs/{jobId}/progress", h.getJobProgress).Methods("GET")
-	v3.HandleFunc("/jobs/{jobId}/crashes", h.getJobCrashes).Methods("GET")
+	router.HandleFunc("/jobs", h.listJobs).Methods("GET")
+	router.HandleFunc("/jobs", h.createJob).Methods("POST")
+	router.HandleFunc("/jobs/{jobId}", h.getJob).Methods("GET")
+	router.HandleFunc("/jobs/{jobId}", h.cancelJob).Methods("DELETE")
+	router.HandleFunc("/jobs/{jobId}/logs", h.getJobLogs).Methods("GET")
+	router.HandleFunc("/jobs/{jobId}/progress", h.getJobProgress).Methods("GET")
+	router.HandleFunc("/jobs/{jobId}/crashes", h.getJobCrashes).Methods("GET")
+
+	// Coverage management
+	router.HandleFunc("/jobs/{jobId}/coverage", h.listJobCoverage).Methods("GET")
+	router.HandleFunc("/jobs/{jobId}/coverage/{reportId}", h.getJobCoverageReport).Methods("GET")
+	router.HandleFunc("/jobs/{jobId}/coverage/{reportId}/metadata", h.getJobCoverageMetadata).Methods("GET")
 
 	// Campaign management
-	v3.HandleFunc("/campaigns", h.listCampaigns).Methods("GET")
-	v3.HandleFunc("/campaigns", h.createCampaign).Methods("POST")
-	v3.HandleFunc("/campaigns/{campaignId}", h.getCampaign).Methods("GET")
-	v3.HandleFunc("/campaigns/{campaignId}", h.updateCampaign).Methods("PATCH")
-	v3.HandleFunc("/campaigns/{campaignId}", h.deleteCampaign).Methods("DELETE")
-	v3.HandleFunc("/campaigns/{campaignId}/stats", h.getCampaignStats).Methods("GET")
+	router.HandleFunc("/campaigns", h.listCampaigns).Methods("GET")
+	router.HandleFunc("/campaigns", h.createCampaign).Methods("POST")
+	router.HandleFunc("/campaigns/{campaignId}", h.getCampaign).Methods("GET")
+	router.HandleFunc("/campaigns/{campaignId}", h.updateCampaign).Methods("PATCH")
+	router.HandleFunc("/campaigns/{campaignId}", h.deleteCampaign).Methods("DELETE")
+	router.HandleFunc("/campaigns/{campaignId}/stats", h.getCampaignStats).Methods("GET")
 
 	// Corpus management
-	v3.HandleFunc("/corpus", h.listCorpus).Methods("GET")
-	v3.HandleFunc("/corpus", h.uploadCorpus).Methods("POST")
-	v3.HandleFunc("/corpus/{corpusId}", h.getCorpusFile).Methods("GET")
-	v3.HandleFunc("/corpus/{corpusId}", h.deleteCorpusFile).Methods("DELETE")
-	v3.HandleFunc("/corpus/{corpusId}/download", h.downloadCorpusFile).Methods("GET")
-	v3.HandleFunc("/corpus/sync", h.syncCorpus).Methods("POST")
-	v3.HandleFunc("/corpus/promote", h.promoteCrashToCorpus).Methods("POST")
+	router.HandleFunc("/corpus", h.listCorpus).Methods("GET")
+	router.HandleFunc("/corpus", h.uploadCorpus).Methods("POST")
+	router.HandleFunc("/corpus/{corpusId}", h.getCorpusFile).Methods("GET")
+	router.HandleFunc("/corpus/{corpusId}", h.deleteCorpusFile).Methods("DELETE")
+	router.HandleFunc("/corpus/{corpusId}/download", h.downloadCorpusFile).Methods("GET")
+	router.HandleFunc("/corpus/sync", h.syncCorpus).Methods("POST")
+	router.HandleFunc("/corpus/promote", h.promoteCrashToCorpus).Methods("POST")
 
 	// Crash management
-	v3.HandleFunc("/crashes", h.listCrashes).Methods("GET")
-	v3.HandleFunc("/crashes/{crashId}", h.getCrash).Methods("GET")
-	v3.HandleFunc("/crashes/{crashId}/input", h.getCrashInput).Methods("GET")
+	router.HandleFunc("/crashes", h.listCrashes).Methods("GET")
+	router.HandleFunc("/crashes/{crashId}", h.getCrash).Methods("GET")
+	router.HandleFunc("/crashes/{crashId}/input", h.getCrashInput).Methods("GET")
 
 	// Reproducibility
-	v3.HandleFunc("/reproducibility/requests", h.listReproductionRequests).Methods("GET")
-	v3.HandleFunc("/reproducibility/requests", h.createReproductionRequest).Methods("POST")
-	v3.HandleFunc("/reproducibility/requests/{requestId}", h.getReproductionRequest).Methods("GET")
-	v3.HandleFunc("/reproducibility/results", h.submitReproductionResult).Methods("POST")
+	router.HandleFunc("/reproducibility/requests", h.listReproductionRequests).Methods("GET")
+	router.HandleFunc("/reproducibility/requests", h.createReproductionRequest).Methods("POST")
+	router.HandleFunc("/reproducibility/requests/{requestId}", h.getReproductionRequest).Methods("GET")
+	router.HandleFunc("/reproducibility/results", h.submitReproductionResult).Methods("POST")
 
 	// Result submission
-	v3.HandleFunc("/results/batch", h.submitBatchResults).Methods("POST")
-	v3.HandleFunc("/results/crash", h.submitCrashResult).Methods("POST")
-	v3.HandleFunc("/results/coverage", h.submitCoverageResult).Methods("POST")
-	v3.HandleFunc("/results/corpus", h.submitCorpusUpdate).Methods("POST")
+	router.HandleFunc("/results/batch", h.submitBatchResults).Methods("POST")
+	router.HandleFunc("/results/crash", h.submitCrashResult).Methods("POST")
+	router.HandleFunc("/results/coverage", h.submitCoverageResult).Methods("POST")
+	router.HandleFunc("/results/corpus", h.submitCorpusUpdate).Methods("POST")
 
 	// System management
-	v3.HandleFunc("/system/stats", h.getSystemStats).Methods("GET")
-	v3.HandleFunc("/system/health", h.healthCheck).Methods("GET")
-	v3.HandleFunc("/system/recovery", h.triggerRecovery).Methods("POST")
-	v3.HandleFunc("/system/maintenance", h.triggerMaintenance).Methods("POST")
-	v3.HandleFunc("/system/timeouts", h.listTimeouts).Methods("GET")
-	v3.HandleFunc("/system/timeouts/{type}/{id}", h.forceTimeout).Methods("POST")
+	router.HandleFunc("/system/stats", h.getSystemStats).Methods("GET")
+	router.HandleFunc("/system/health", h.healthCheck).Methods("GET")
+	router.HandleFunc("/system/recovery", h.triggerRecovery).Methods("POST")
+	router.HandleFunc("/system/maintenance", h.triggerMaintenance).Methods("POST")
+	router.HandleFunc("/system/timeouts", h.listTimeouts).Methods("GET")
+	router.HandleFunc("/system/timeouts/{type}/{id}", h.forceTimeout).Methods("POST")
 
 	// Swagger UI (if enabled)
 	if h.config.EnableSwaggerUI {
-		v3.HandleFunc("/docs", h.swaggerUI).Methods("GET")
-		v3.HandleFunc("/openapi.yaml", h.openAPISpec).Methods("GET")
+		router.HandleFunc("/docs", h.swaggerUI).Methods("GET")
+		router.HandleFunc("/openapi.yaml", h.openAPISpec).Methods("GET")
 	}
 }
 
@@ -420,6 +442,8 @@ func (h *HandlerV3) createJob(w http.ResponseWriter, r *http.Request) {
 		CorpusID:          req.CorpusID,
 		CollectionID:      req.CollectionID,
 		UseCampaignCorpus: req.UseCampaignCorpus,
+		EnableCoverage:    req.EnableCoverage,
+		CoverageFormat:    req.CoverageFormat,
 	}
 
 	job, err := h.services.Job.CreateJob(r.Context(), createReq)
@@ -1241,7 +1265,304 @@ func (h *HandlerV3) openAPISpec(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "api_v3/openapi.yaml")
 }
 
+// Coverage management handlers
+
+// listJobCoverage lists all coverage reports for a specific job
+func (h *HandlerV3) listJobCoverage(w http.ResponseWriter, r *http.Request) {
+	jobID := mux.Vars(r)["jobId"]
+	if jobID == "" {
+		h.writeError(w, &ValidationError{
+			Field:   "jobId",
+			Message: "job ID is required",
+		})
+		return
+	}
+
+	// Parse query parameters
+	params := parsePaginationParams(r)
+	format := r.URL.Query().Get("format")
+	fromTimeStr := r.URL.Query().Get("from")
+	toTimeStr := r.URL.Query().Get("to")
+
+	// Build filter
+	filter := &repository.CoverageReportFilter{
+		JobID:  jobID,
+		Format: format,
+	}
+
+	if fromTimeStr != "" {
+		fromTime, err := time.Parse(time.RFC3339, fromTimeStr)
+		if err != nil {
+			h.writeError(w, &ValidationError{
+				Field:   "from",
+				Message: "invalid date format, use RFC3339",
+			})
+			return
+		}
+		filter.FromTime = &fromTime
+	}
+
+	if toTimeStr != "" {
+		toTime, err := time.Parse(time.RFC3339, toTimeStr)
+		if err != nil {
+			h.writeError(w, &ValidationError{
+				Field:   "to",
+				Message: "invalid date format, use RFC3339",
+			})
+			return
+		}
+		filter.ToTime = &toTime
+	}
+
+	// Get coverage reports from repository
+	reports, total, err := h.coverageRepo.GetReportsByJobID(r.Context(), jobID, filter, params.Offset, params.Limit)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Convert to response format
+	responseReports := make([]CoverageReportResponse, len(reports))
+	for i, report := range reports {
+		responseReports[i] = CoverageReportResponse{
+			ID:        report.ID,
+			JobID:     report.JobID,
+			Format:    report.Format,
+			Size:      report.Size,
+			CreatedAt: report.CreatedAt,
+			FilePath:  report.StoragePath,
+		}
+	}
+
+	response := CoverageReportListResponse{
+		Reports:   responseReports,
+		Count:     len(responseReports),
+		Page:      params.Page,
+		Limit:     params.Limit,
+		Total:     total,
+		SortBy:    params.SortBy,
+		SortOrder: params.SortOrder,
+	}
+
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+// getJobCoverageReport downloads a specific coverage report
+func (h *HandlerV3) getJobCoverageReport(w http.ResponseWriter, r *http.Request) {
+	jobID := mux.Vars(r)["jobId"]
+	reportID := mux.Vars(r)["reportId"]
+
+	if jobID == "" {
+		h.writeError(w, &ValidationError{
+			Field:   "jobId",
+			Message: "job ID is required",
+		})
+		return
+	}
+
+	if reportID == "" {
+		h.writeError(w, &ValidationError{
+			Field:   "reportId",
+			Message: "report ID is required",
+		})
+		return
+	}
+
+	// Get the coverage report
+	report, err := h.coverageRepo.GetReportByID(r.Context(), reportID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Verify the report belongs to the specified job
+	if report.JobID != jobID {
+		h.writeError(w, &NotFoundError{
+			Resource: "coverage report",
+			ID:       reportID,
+		})
+		return
+	}
+
+	var content []byte
+
+	// Try to read from storage backend first if available
+	if h.storageBackend != nil {
+		reader, err := h.storageBackend.Retrieve(r.Context(), report.StoragePath)
+		if err == nil {
+			defer reader.Close()
+			content, err = io.ReadAll(reader)
+			if err != nil {
+				h.logger.WithError(err).WithFields(logrus.Fields{
+					"report_id":    reportID,
+					"job_id":       jobID,
+					"storage_path": report.StoragePath,
+				}).Error("Failed to read coverage report from storage backend")
+			}
+		}
+	}
+
+	// If storage backend failed or not available, try direct filesystem access
+	if len(content) == 0 {
+		// The storage path might be an absolute path like /app/data/coverage/...
+		// or a relative path like coverage/...
+		filePath := report.StoragePath
+		if !strings.HasPrefix(filePath, "/") {
+			// If it's a relative path, prepend the data directory
+			filePath = filepath.Join("/app/data", filePath)
+		}
+
+		fileContent, err := os.ReadFile(filePath)
+		if err != nil {
+			h.logger.WithError(err).WithFields(logrus.Fields{
+				"report_id":    reportID,
+				"job_id":       jobID,
+				"file_path":    filePath,
+				"storage_path": report.StoragePath,
+			}).Error("Failed to read coverage report file from filesystem")
+
+			h.writeError(w, &NotFoundError{
+				Resource: "coverage report file",
+				ID:       reportID,
+			})
+			return
+		}
+		content = fileContent
+	}
+
+	// Check if content was successfully read
+	if len(content) == 0 {
+		h.writeError(w, &NotFoundError{
+			Resource: "coverage report file",
+			ID:       reportID,
+		})
+		return
+	}
+
+	// Determine content type based on format
+	contentType := h.getContentTypeForFormat(report.Format)
+
+	// Set response headers for file download
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+
+	// Set filename based on report format
+	filename := fmt.Sprintf("coverage_report_%s_%s.%s", jobID[:8], reportID[:8], h.getFileExtensionForFormat(report.Format))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+
+	// Set cache headers
+	w.Header().Set("Cache-Control", "public, max-age=3600") // Cache for 1 hour
+	w.Header().Set("ETag", fmt.Sprintf("\"%s\"", reportID))
+
+	// Write the file content
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(content); err != nil {
+		h.logger.WithError(err).WithField("report_id", reportID).Error("Failed to write coverage report response")
+		return
+	}
+
+	h.logger.WithFields(logrus.Fields{
+		"report_id": reportID,
+		"job_id":    jobID,
+		"format":    report.Format,
+		"size":      len(content),
+	}).Debug("Coverage report downloaded successfully")
+}
+
+// getJobCoverageMetadata retrieves metadata for a specific coverage report
+func (h *HandlerV3) getJobCoverageMetadata(w http.ResponseWriter, r *http.Request) {
+	jobID := mux.Vars(r)["jobId"]
+	reportID := mux.Vars(r)["reportId"]
+
+	if jobID == "" {
+		h.writeError(w, &ValidationError{
+			Field:   "jobId",
+			Message: "job ID is required",
+		})
+		return
+	}
+
+	if reportID == "" {
+		h.writeError(w, &ValidationError{
+			Field:   "reportId",
+			Message: "report ID is required",
+		})
+		return
+	}
+
+	// Get the coverage report to verify it exists and belongs to the job
+	report, err := h.coverageRepo.GetReportByID(r.Context(), reportID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Verify the report belongs to the specified job
+	if report.JobID != jobID {
+		h.writeError(w, &NotFoundError{
+			Resource: "coverage report",
+			ID:       reportID,
+		})
+		return
+	}
+
+	// Get the coverage metadata
+	metadata, err := h.coverageRepo.GetMetadataByReportID(r.Context(), reportID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Convert to response format
+	response := CoverageMetadataResponse{
+		LineCoverage:     metadata.LineCoverage,
+		FunctionCoverage: metadata.FunctionCoverage,
+		BranchCoverage:   metadata.BranchCoverage,
+		TotalLines:       metadata.TotalLines,
+		CoveredLines:     metadata.CoveredLines,
+		TotalFunctions:   metadata.TotalFunctions,
+		CoveredFunctions: metadata.CoveredFunctions,
+		CollectedAt:      metadata.CollectedAt,
+		ReportID:         metadata.ReportID,
+		JobID:            report.JobID,
+	}
+
+	h.writeJSON(w, http.StatusOK, response)
+}
+
 // Helper methods
+
+// getContentTypeForFormat returns the appropriate content type for a coverage format
+func (h *HandlerV3) getContentTypeForFormat(format string) string {
+	switch strings.ToLower(format) {
+	case "html":
+		return "text/html"
+	case "json":
+		return "application/json"
+	case "lcov":
+		return "text/plain"
+	case "cobertura":
+		return "application/xml"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// getFileExtensionForFormat returns the appropriate file extension for a coverage format
+func (h *HandlerV3) getFileExtensionForFormat(format string) string {
+	switch strings.ToLower(format) {
+	case "html":
+		return "html"
+	case "json":
+		return "json"
+	case "lcov":
+		return "lcov"
+	case "cobertura":
+		return "xml"
+	default:
+		return "bin"
+	}
+}
 
 func (h *HandlerV3) decodeAndValidate(w http.ResponseWriter, r *http.Request, v interface{}) error {
 	// Decode JSON

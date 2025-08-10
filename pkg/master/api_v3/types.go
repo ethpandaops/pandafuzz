@@ -50,6 +50,8 @@ type JobRequest struct {
 	CorpusID          string           `json:"corpus_id,omitempty" validate:"omitempty,uuid"`
 	CollectionID      string           `json:"collection_id,omitempty" validate:"omitempty,uuid"`
 	UseCampaignCorpus bool             `json:"use_campaign_corpus,omitempty"`
+	EnableCoverage    bool             `json:"enable_coverage,omitempty"`
+	CoverageFormat    string           `json:"coverage_format,omitempty" validate:"omitempty,oneof=json html lcov cobertura"`
 }
 
 // JobCompleteRequest represents a job completion request
@@ -196,4 +198,42 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Code, e.Message)
+}
+
+// Coverage types
+
+// CoverageReportResponse represents a coverage report in API responses
+type CoverageReportResponse struct {
+	ID        string    `json:"id"`
+	JobID     string    `json:"job_id"`
+	Format    string    `json:"format"`
+	Size      int64     `json:"size"`
+	CreatedAt time.Time `json:"created_at"`
+	FilePath  string    `json:"file_path,omitempty"`
+	Checksum  string    `json:"checksum,omitempty"`
+}
+
+// CoverageMetadataResponse represents coverage metadata in API responses
+type CoverageMetadataResponse struct {
+	LineCoverage     *float64  `json:"line_coverage"`
+	FunctionCoverage *float64  `json:"function_coverage"`
+	BranchCoverage   *float64  `json:"branch_coverage"`
+	TotalLines       *int      `json:"total_lines"`
+	CoveredLines     *int      `json:"covered_lines"`
+	TotalFunctions   *int      `json:"total_functions"`
+	CoveredFunctions *int      `json:"covered_functions"`
+	CollectedAt      time.Time `json:"collected_at"`
+	ReportID         string    `json:"coverage_id"`
+	JobID            string    `json:"job_id"`
+}
+
+// CoverageReportListResponse represents a list of coverage reports
+type CoverageReportListResponse struct {
+	Reports   []CoverageReportResponse `json:"reports"`
+	Count     int                      `json:"count"`
+	Page      int                      `json:"page"`
+	Limit     int                      `json:"limit"`
+	Total     int                      `json:"total"`
+	SortBy    string                   `json:"sort_by,omitempty"`
+	SortOrder string                   `json:"sort_order,omitempty"`
 }

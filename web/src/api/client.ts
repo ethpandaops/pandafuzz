@@ -7,14 +7,18 @@ import {
   SystemStatus,
   HealthCheck,
   ApiError,
+  CoverageReport,
+  CoverageMetadata,
+  CoverageReportFilter,
 } from '../types';
 
 export class PandaFuzzAPI {
   private client: AxiosInstance;
+  private v1Client: AxiosInstance; // For endpoints not yet in v3
   private baseURL: string;
 
   constructor(baseURL: string = '') {
-    this.baseURL = baseURL || '/api/v1';
+    this.baseURL = baseURL || '/api/v3';
     this.client = axios.create({
       baseURL: this.baseURL,
       headers: {
@@ -22,30 +26,38 @@ export class PandaFuzzAPI {
       },
     });
 
-    // Request interceptor for auth (if needed)
-    this.client.interceptors.request.use(
-      (config) => {
-        // Add auth token if available
-        const token = localStorage.getItem('auth_token');
-        if (token) {
-          config.headers.Authorization = `Bearer ${token}`;
-        }
-        return config;
+    // Create v1 client for endpoints not yet implemented in v3
+    this.v1Client = axios.create({
+      baseURL: '/api/v1',
+      headers: {
+        'Content-Type': 'application/json',
       },
-      (error) => Promise.reject(error)
-    );
+    });
 
-    // Response interceptor for error handling
-    this.client.interceptors.response.use(
-      (response) => response,
-      (error) => {
-        if (error.response?.data) {
-          const apiError: ApiError = error.response.data;
-          return Promise.reject(new Error(apiError.error || 'Unknown error'));
-        }
-        return Promise.reject(error);
+    // Request interceptor for auth (if needed) - apply to both clients
+    const authInterceptor = (config: any) => {
+      // Add auth token if available
+      const token = localStorage.getItem('auth_token');
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
       }
-    );
+      return config;
+    };
+
+    this.client.interceptors.request.use(authInterceptor, (error) => Promise.reject(error));
+    this.v1Client.interceptors.request.use(authInterceptor, (error) => Promise.reject(error));
+
+    // Response interceptor for error handling - apply to both clients
+    const errorInterceptor = (error: any) => {
+      if (error.response?.data) {
+        const apiError: ApiError = error.response.data;
+        return Promise.reject(new Error(apiError.error || 'Unknown error'));
+      }
+      return Promise.reject(error);
+    };
+
+    this.client.interceptors.response.use((response) => response, errorInterceptor);
+    this.v1Client.interceptors.response.use((response) => response, errorInterceptor);
   }
 
   // System endpoints
@@ -146,7 +158,8 @@ export class PandaFuzzAPI {
     sort_order?: 'asc' | 'desc';
   }): Promise<CrashResult[]> {
     try {
-      const response = await this.client.get<{
+      // Use v1 API for crashes since v3 doesn't have this endpoint yet
+      const response = await this.v1Client.get<{
         crashes: CrashResult[];
         count: number;
         limit: number;
@@ -264,6 +277,132 @@ export class PandaFuzzAPI {
 
   getJobLogStreamUrl(jobId: string): string {
     return `${this.baseURL}/jobs/${jobId}/logs/stream`;
+  }
+
+  // Coverage endpoints (API v3)
+  async getCoverageReports(
+    jobId: string,
+    filter?: CoverageReportFilter
+  ): Promise<CoverageReport[]> {
+    try {
+      const params = {
+        ...(filter?.format && { format: filter.format }),
+        ...(filter?.limit && { limit: filter.limit }),
+        ...(filter?.offset && { offset: filter.offset }),
+        ...(filter?.sort_by && { sort_by: filter.sort_by }),
+        ...(filter?.sort_order && { sort_order: filter.sort_order }),
+      };
+
+      // Use v3 API endpoint for coverage
+      const response = await axios.get<{reports: CoverageReport[], total: number}>(
+        `/api/v3/jobs/${jobId}/coverage`,
+        { 
+          params,
+          headers: {
+            'Content-Type': 'application/json',
+            ...(localStorage.getItem('auth_token') && {
+              Authorization: `Bearer ${localStorage.getItem('auth_token')}`
+            })
+          }
+        }
+      );
+
+      // Handle both array response and object with reports array
+      if (Array.isArray(response.data)) {
+        return response.data;
+      }
+      return response.data.reports || [];
+    } catch (error) {
+      console.warn('Coverage reports endpoint error:', error);
+      return [];
+    }
+  }
+
+  async getCoverageMetadata(
+    jobId: string,
+    reportId: string
+  ): Promise<CoverageMetadata> {
+    const response = await axios.get<CoverageMetadata>(
+      `/api/v3/jobs/${jobId}/coverage/${reportId}/metadata`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          ...(localStorage.getItem('auth_token') && {
+            Authorization: `Bearer ${localStorage.getItem('auth_token')}`
+          })
+        }
+      }
+    );
+    return response.data;
+  }
+
+  async downloadCoverageReport(
+    jobId: string,
+    reportId: string
+  ): Promise<Blob> {
+    const response = await axios.get(
+      `/api/v3/jobs/${jobId}/coverage/${reportId}`,
+      {
+        responseType: 'blob',
+        headers: {
+          'Accept': 'application/json, text/html, text/plain, application/octet-stream',
+          ...(localStorage.getItem('auth_token') && {
+            Authorization: `Bearer ${localStorage.getItem('auth_token')}`
+          })
+        },
+      }
+    );
+    return response.data;
+  }
+
+  // Helper method for coverage statistics
+  async getCoverageStats(jobId: string): Promise<any> {
+    try {
+      const reports = await this.getCoverageReports(jobId);
+      
+      if (reports.length === 0) {
+        return {
+          line_coverage: 0,
+          function_coverage: 0,
+          branch_coverage: 0,
+          total_reports: 0,
+        };
+      }
+
+      // Get metadata for the most recent report
+      const latestReport = reports[0]; // Assuming sorted by created_at DESC
+      try {
+        const metadata = await this.getCoverageMetadata(jobId, latestReport.id);
+        return {
+          line_coverage: metadata.line_coverage || 0,
+          function_coverage: metadata.function_coverage || 0,
+          branch_coverage: metadata.branch_coverage || 0,
+          total_lines: metadata.total_lines || 0,
+          covered_lines: metadata.covered_lines || 0,
+          total_functions: metadata.total_functions || 0,
+          covered_functions: metadata.covered_functions || 0,
+          total_reports: reports.length,
+          latest_report_id: latestReport.id,
+          latest_report_date: latestReport.created_at,
+        };
+      } catch (metadataError) {
+        console.warn('Failed to fetch coverage metadata:', metadataError);
+        return {
+          line_coverage: 0,
+          function_coverage: 0,
+          branch_coverage: 0,
+          total_reports: reports.length,
+        };
+      }
+    } catch (error) {
+      console.warn('Failed to fetch coverage stats:', error);
+      return {
+        line_coverage: 0,
+        function_coverage: 0,
+        branch_coverage: 0,
+        total_reports: 0,
+      };
+    }
   }
 }
 

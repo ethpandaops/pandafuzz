@@ -71,8 +71,10 @@ type Job struct {
 	CampaignID        *string                `json:"campaign_id" db:"campaign_id"`
 	CollectionID      *string                `json:"collection_id" db:"collection_id"` // Corpus collection ID
 	UseCampaignCorpus bool                   `json:"use_campaign_corpus" db:"use_campaign_corpus"`
-	Metadata          map[string]interface{} `json:"metadata" db:"metadata"` // For job-specific data (e.g., crashID for minimization)
-	Priority          int                    `json:"priority" db:"priority"` // Job priority (0-100, higher is more important)
+	Metadata          map[string]interface{} `json:"metadata" db:"metadata"`               // For job-specific data (e.g., crashID for minimization)
+	Priority          int                    `json:"priority" db:"priority"`               // Job priority (0-100, higher is more important)
+	EnableCoverage    bool                   `json:"enable_coverage" db:"enable_coverage"` // Whether to collect coverage
+	CoverageFormat    string                 `json:"coverage_format" db:"coverage_format"` // Coverage format (lcov, html, json)
 }
 
 type JobType string

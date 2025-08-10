@@ -9,6 +9,11 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/ethpandaops/pandafuzz/pkg/infrastructure/persistence/sqlite"
+	apiv3 "github.com/ethpandaops/pandafuzz/pkg/master/api_v3"
+	"github.com/ethpandaops/pandafuzz/pkg/master/repository"
+	"github.com/ethpandaops/pandafuzz/pkg/storage"
 )
 
 // setupRouter configures the HTTP router with all routes and middleware
@@ -61,6 +66,9 @@ func (s *Server) setupRouter() error {
 	apiV2 := s.router.PathPrefix("/api/v2").Subrouter()
 	s.setupAPIv2Routes(apiV2)
 
+	// API v3 routes
+	s.setupAPIv3Routes()
+
 	// Health and metrics endpoints
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
 	s.router.HandleFunc("/status", s.handleStatus).Methods("GET")
@@ -80,6 +88,67 @@ func (s *Server) setupRouter() error {
 	return nil
 }
 
+// setupAPIv3Routes configures API v3 routes
+func (s *Server) setupAPIv3Routes() {
+	s.logger.Info("Setting up API v3 routes")
+
+	// Check that we're using SQLiteStorage
+	if _, ok := s.state.db.(*storage.SQLiteStorage); !ok {
+		s.logger.Error("Database is not SQLiteStorage, API v3 coverage features will not be available")
+		return
+	}
+
+	// Create a new SQLite connection for the coverage repository
+	// This will connect to the same database file
+	dbPath := s.config.Database.Path
+	if dbPath == "" {
+		dbPath = "pandafuzz.db"
+	}
+
+	connConfig := sqlite.ConnectionConfig{
+		FilePath:              dbPath,
+		MaxOpenConnections:    10,
+		MaxIdleConnections:    10,
+		ConnectionMaxIdleTime: 5 * time.Minute,
+		ConnectionMaxLifetime: time.Hour,
+		EnableForeignKeys:     true,
+		EnableWAL:             true,
+		BusyTimeout:           5000,
+		CacheSize:             -2000,
+	}
+
+	sqliteConn, err := sqlite.NewConnection(connConfig, s.logger)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to create SQLite connection for coverage repository")
+		return
+	}
+
+	// Create coverage repository adapter for v1 table
+	// Use the v1 adapter to read from existing coverage table instead of coverage_reports
+	s.logger.Info("Creating coverage repository v1 adapter")
+	coverageRepo, err := repository.NewCoverageRepositoryV1Adapter(sqliteConn, nil, s.logger)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to create coverage repository adapter")
+		return
+	}
+	s.logger.Info("Coverage repository v1 adapter created successfully")
+
+	// Create integration config
+	config := apiv3.DefaultIntegrationConfig()
+	config.EnableCORS = true
+	config.AllowedOrigins = []string{"*"}
+	config.EnableBackwardsCompatibility = false // We have separate v2 routes
+	config.EnableDeprecationWarnings = false
+
+	// Create integration
+	integration := apiv3.NewIntegration(s.services, coverageRepo, s.storageBackend, s.logger, config)
+
+	// Register routes
+	integration.RegisterRoutes(s.router)
+
+	s.logger.Info("API v3 routes registered successfully")
+}
+
 // setupAPIRoutes configures API v1 routes
 func (s *Server) setupAPIRoutes(router *mux.Router) {
 	// Bot lifecycle management
@@ -94,6 +163,7 @@ func (s *Server) setupAPIRoutes(router *mux.Router) {
 	// Result communication (Bot -> Master)
 	router.HandleFunc("/results/crash", s.handleResultCrash).Methods("POST")
 	router.HandleFunc("/results/coverage", s.handleResultCoverage).Methods("POST")
+	router.HandleFunc("/results/coverage-report", s.handleSubmitCoverageReport).Methods("POST")
 	router.HandleFunc("/results/corpus", s.handleResultCorpus).Methods("POST")
 	router.HandleFunc("/results/status", s.handleResultStatus).Methods("POST")
 
@@ -110,6 +180,7 @@ func (s *Server) setupAPIRoutes(router *mux.Router) {
 	router.HandleFunc("/jobs/available-corpora", s.handleListAvailableCorpora).Methods("GET")
 	router.HandleFunc("/jobs/{id}", s.handleJobGet).Methods("GET")
 	router.HandleFunc("/jobs/{id}/cancel", s.handleJobCancel).Methods("PUT")
+	router.HandleFunc("/jobs/{id}/coverage", s.handleGetCoverageReport).Methods("GET")
 	router.HandleFunc("/jobs/{id}/logs", s.handleJobLogsV2).Methods("GET")
 	router.HandleFunc("/jobs/{id}/logs/stream", s.handleJobLogStream).Methods("GET")
 	router.HandleFunc("/jobs/{id}/logs/push", s.handleLogPush).Methods("POST")

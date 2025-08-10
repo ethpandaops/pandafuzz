@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ethpandaops/pandafuzz/pkg/master/repository"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
+	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
@@ -16,7 +18,7 @@ type Integration struct {
 }
 
 // NewIntegration creates a new API v3 integration
-func NewIntegration(services *service.Manager, logger logrus.FieldLogger, config *IntegrationConfig) *Integration {
+func NewIntegration(services *service.Manager, coverageRepo repository.CoverageRepository, storageBackend backend.StorageBackend, logger logrus.FieldLogger, config *IntegrationConfig) *Integration {
 	// Create v3 handler config
 	handlerConfig := &Config{
 		MaxRequestSize:  config.MaxRequestSize,
@@ -26,7 +28,7 @@ func NewIntegration(services *service.Manager, logger logrus.FieldLogger, config
 	}
 
 	// Create handler
-	handler := NewHandlerV3(services, logger, handlerConfig)
+	handler := NewHandlerV3(services, coverageRepo, storageBackend, logger, handlerConfig)
 
 	// Setup middleware stack
 	middleware := []func(http.Handler) http.Handler{}

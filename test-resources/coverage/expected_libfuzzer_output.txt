@@ -1,0 +1,55 @@
+# Expected LibFuzzer Output Samples
+
+## Successful Compilation with Coverage
+✓ Found clang++, building with LibFuzzer and coverage
+✓ Successfully built with LibFuzzer and coverage instrumentation
+✓ Created LibFuzzer test binary with coverage: /tmp/tmp.XXXXXX/libfuzzer_coverage_test
+
+## LibFuzzer Execution with Coverage
+INFO: Seed: 1234567890
+INFO: Loaded 1 modules   (2345 inline 8-bit counters): 2345 [0x5555555, 0x5555fff), 
+INFO: Loaded 1 PC tables (2345 PCs): 2345 [0x6666000,0x6667000), 
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+LibFuzzer harness initialized
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED cov: 123 ft: 124 corp: 1/1b exec/s: 0 rss: 25Mb
+#10	NEW    cov: 234 ft: 245 corp: 2/3b lim: 4 exec/s: 0 rss: 26Mb L: 2/2 MS: 1 InsertByte-
+#25	NEW    cov: 345 ft: 367 corp: 3/6b lim: 4 exec/s: 0 rss: 26Mb L: 3/3 MS: 2 ShuffleBytes-ChangeBit-
+#50	NEW    cov: 456 ft: 489 corp: 4/10b lim: 6 exec/s: 0 rss: 27Mb L: 4/4 MS: 1 CrossOver-
+
+## Coverage-Specific Output Lines
+Type A data
+Subtype AB
+Found pattern: COVERAGE
+XYZ pattern found
+INIT command with 10 bytes
+
+## LLVM Coverage Profile Generation
+INFO: profiling: /tmp/fuzzer.profraw: Profile data written
+
+## Coverage Summary at Exit
+#1000000	DONE   cov: 1234 ft: 1567 corp: 156/2345b lim: 4096 exec/s: 123456 rss: 89Mb
+Done 1000000 runs in 8 second(s)
+stat::number_of_executed_units: 1000000
+stat::average_exec_per_sec:     123456
+stat::new_units_added:          156
+stat::slowest_unit_time_sec:    0
+stat::peak_rss_mb:              89
+stat::coverage_pct:             67.8
+
+## Post-run Coverage Report Commands
+$ llvm-profdata merge -sparse fuzzer.profraw -o fuzzer.profdata
+$ llvm-cov report ./harness -instr-profile=fuzzer.profdata
+
+Filename                      Regions    Missed Regions     Cover   Functions  Missed Functions  Executed       Lines      Missed Lines     Cover    Branches   Missed Branches     Cover
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+libfuzzer_coverage_harness.cc      234                78    66.67%          12                 2    83.33%         456               145    68.20%         123                 34    72.36%
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+TOTAL                              234                78    66.67%          12                 2    83.33%         456               145    68.20%         123                 34    72.36%
+
+## LCOV Format Generation
+$ llvm-cov export -format=lcov ./harness -instr-profile=fuzzer.profdata > coverage.lcov
+
+## HTML Report Generation  
+$ llvm-cov show ./harness -instr-profile=fuzzer.profdata -format=html -output-dir=coverage_html/
+$ genhtml coverage.lcov --output-directory coverage_html_lcov/
