@@ -70,7 +70,7 @@ JOB_RESPONSE=$(curl -s -X POST "http://localhost:8080/api/v3/jobs" \
     "target": "/app/data/binaries/api-test-binary",
     "duration": 45000000000,
     "enable_coverage": true,
-    "coverage_format": "lcov",
+    "coverage_format": "raw",
     "config": {
       "memory_limit": 256,
       "timeout": 1000

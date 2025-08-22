@@ -465,6 +465,12 @@ func (fje *FuzzerJobExecutor) createFuzzer(job *common.Job) (fuzzer.Fuzzer, erro
 
 // collectCoverage collects and reports coverage data for a job
 func (fje *FuzzerJobExecutor) collectCoverage(job *common.Job, fuzz fuzzer.Fuzzer) {
+	// AFL++ uses raw coverage files, not stats-based coverage
+	if job.Fuzzer == "aflplusplus" || job.Fuzzer == "afl++" {
+		fje.logger.WithField("job_id", job.ID).Debug("AFL++ uses raw coverage files, skipping stats-based coverage collection")
+		return
+	}
+
 	fje.logger.WithFields(logrus.Fields{
 		"job_id":          job.ID,
 		"coverage_format": job.CoverageFormat,

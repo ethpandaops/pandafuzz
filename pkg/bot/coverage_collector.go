@@ -81,12 +81,23 @@ func (cc *CoverageCollector) CollectAndStore(ctx context.Context, job *common.Jo
 	default:
 	}
 
-	// Try multiple formats if none specified or if primary format fails
+	// AFL++ only uses raw coverage format
+	if job.Fuzzer == "aflplusplus" || job.Fuzzer == "afl++" {
+		cc.logger.WithField("job_id", job.ID).Info("AFL++ uses raw coverage format, collecting raw files")
+		if err := cc.CollectAndStoreRawAFLFiles(ctx, job); err != nil {
+			cc.logger.WithError(err).WithField("job_id", job.ID).Error("Failed to collect raw AFL++ coverage files")
+			return fmt.Errorf("failed to collect raw AFL++ coverage files: %w", err)
+		}
+		cc.logger.WithField("job_id", job.ID).Info("Raw AFL++ coverage collection completed successfully")
+		return nil
+	}
+
+	// For other fuzzers, try multiple formats if none specified
 	if job.CoverageFormat == "" {
 		return cc.tryMultipleFormats(ctx, job, fuzzer)
 	}
 
-	// Generate coverage file for specified format
+	// Generate coverage file for specified format (non-AFL++)
 	data, format, err := cc.generateCoverageFile(ctx, job, fuzzer)
 	if err != nil {
 		cc.logger.WithError(err).WithFields(logrus.Fields{
@@ -134,11 +145,8 @@ func (cc *CoverageCollector) generateCoverageFile(ctx context.Context, job *comm
 
 	switch job.Fuzzer {
 	case "aflplusplus", "afl++":
-		format = job.CoverageFormat
-		if format == "" {
-			format = "json" // Default format for AFL++
-		}
-		data, err = cc.generateAFLCoverage(ctx, job, format)
+		// AFL++ should not reach here, it's handled earlier
+		return nil, "", fmt.Errorf("AFL++ should use raw coverage collection")
 
 	case "libfuzzer":
 		format = job.CoverageFormat
@@ -169,42 +177,11 @@ func (cc *CoverageCollector) generateCoverageFile(ctx context.Context, job *comm
 	return data, format, nil
 }
 
-// generateAFLCoverage generates coverage data for AFL++ fuzzer
+// generateAFLCoverage is deprecated - AFL++ now only uses raw coverage
+// Raw coverage files are collected directly via CollectAndStoreRawAFLFiles
+// This function is kept for reference but should not be called
 func (cc *CoverageCollector) generateAFLCoverage(ctx context.Context, job *common.Job, format string) ([]byte, error) {
-	// AFL++ output is in WorkDir/output/afl_output
-	outputDir := filepath.Join(job.WorkDir, "output", "afl_output")
-
-	// Extract bitmap coverage using the AFL++ extractor
-	coverageData, err := cc.aflExtract.ExtractBitmapCoverage(ctx, outputDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract AFL++ bitmap coverage: %w", err)
-	}
-
-	// Convert to requested format
-	switch format {
-	case "json":
-		jsonData, err := cc.aflExtract.ConvertToJSON(ctx, coverageData)
-		if err != nil {
-			// Fallback to direct marshal
-			return json.Marshal(coverageData)
-		}
-		return []byte(jsonData), nil
-	case "lcov":
-		// Generate LCOV format using the AFL++ extractor
-		targetBinary := filepath.Join(job.WorkDir, filepath.Base(job.Target))
-		lcovData, err := cc.aflExtract.ConvertToLCOV(ctx, coverageData, targetBinary)
-		if err != nil {
-			cc.logger.WithError(err).Warn("Failed to generate LCOV for AFL++, returning JSON")
-			jsonData, jsonErr := cc.aflExtract.ConvertToJSON(ctx, coverageData)
-			if jsonErr != nil {
-				return json.Marshal(coverageData)
-			}
-			return []byte(jsonData), nil
-		}
-		return []byte(lcovData), nil
-	default:
-		return nil, fmt.Errorf("unsupported coverage format for AFL++: %s", format)
-	}
+	return nil, fmt.Errorf("AFL++ coverage should use raw format via CollectAndStoreRawAFLFiles")
 }
 
 // generateLibFuzzerCoverage generates coverage data for LibFuzzer
@@ -469,6 +446,7 @@ func (cc *CoverageCollector) reportCoverageToMaster(ctx context.Context, job *co
 func (cc *CoverageCollector) tryMultipleFormats(ctx context.Context, job *common.Job, fuzzer types.Fuzzer) error {
 	cc.logger.WithField("job_id", job.ID).Debug("Trying multiple coverage formats")
 
+	// For non-AFL++ fuzzers, try these formats
 	formats := []string{"json", "lcov"}
 	var lastErr error
 	successCount := 0

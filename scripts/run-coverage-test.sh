@@ -299,7 +299,7 @@ JOB_DATA=$(cat <<EOF
   "collection_id": "${COLLECTION_ID}",
   "duration": 60000000000,
   "enable_coverage": true,
-  "coverage_format": "lcov",
+  "coverage_format": "raw",
   "config": $JOB_CONFIG
 }
 EOF
