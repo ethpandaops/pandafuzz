@@ -253,6 +253,10 @@ func (s *SQLiteStorage) createTablesContext(ctx context.Context) error {
 		format TEXT NOT NULL,
 		storage_path TEXT NOT NULL,
 		size INTEGER NOT NULL,
+		file_type TEXT,
+		fuzzer_stats_path TEXT,
+		plot_data_path TEXT,
+		fuzz_bitmap_path TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
 	);
@@ -291,6 +295,7 @@ func (s *SQLiteStorage) createTablesContext(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_jobs_enable_coverage ON jobs(enable_coverage);
 	CREATE INDEX IF NOT EXISTS idx_jobs_coverage_report_id ON jobs(coverage_report_id);
 	CREATE INDEX IF NOT EXISTS idx_coverage_reports_job_id ON coverage_reports(job_id);
+	CREATE INDEX IF NOT EXISTS idx_coverage_reports_file_type ON coverage_reports(file_type);
 	CREATE INDEX IF NOT EXISTS idx_coverage_metadata_job_id ON coverage_metadata(job_id);
 	CREATE INDEX IF NOT EXISTS idx_coverage_metadata_report_id ON coverage_metadata(report_id);
 	`

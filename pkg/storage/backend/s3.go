@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -68,6 +69,7 @@ func NewS3Backend(cfg config.S3Config, logger logrus.FieldLogger, metrics *monit
 			"corpus":     cfg.CorpusBucket,
 			"quarantine": cfg.QuarantineBucket,
 			"backup":     cfg.BackupBucket,
+			"coverage":   cfg.CoverageBucket,
 		},
 		logger:            logger.WithField("backend", "s3"),
 		metrics:           metrics,
@@ -111,7 +113,8 @@ func (s *S3Backend) Store(ctx context.Context, key string, reader io.Reader, siz
 	}
 
 	logger := monitoring.WithRequestID(ctx, s.logger)
-	bucket := s.buckets["corpus"]
+	// Intelligently select bucket based on path prefix
+	bucket := s.selectBucketForPath(key)
 
 	logger = logger.WithFields(logrus.Fields{
 		"key":           key,
@@ -167,7 +170,8 @@ func (s *S3Backend) Store(ctx context.Context, key string, reader io.Reader, siz
 // Retrieve downloads an object from S3.
 // The caller must close the returned reader when done.
 func (s *S3Backend) Retrieve(ctx context.Context, key string) (io.ReadCloser, error) {
-	bucket := s.buckets["corpus"]
+	// Intelligently select bucket based on path prefix
+	bucket := s.selectBucketForPath(key)
 
 	object, err := s.client.GetObject(ctx, bucket, key, minio.GetObjectOptions{})
 	if err != nil {
@@ -189,7 +193,8 @@ func (s *S3Backend) Retrieve(ctx context.Context, key string) (io.ReadCloser, er
 
 // Delete removes an object from S3.
 func (s *S3Backend) Delete(ctx context.Context, key string) error {
-	bucket := s.buckets["corpus"]
+	// Intelligently select bucket based on path prefix
+	bucket := s.selectBucketForPath(key)
 
 	err := s.client.RemoveObject(ctx, bucket, key, minio.RemoveObjectOptions{})
 	if err != nil {
@@ -202,7 +207,8 @@ func (s *S3Backend) Delete(ctx context.Context, key string) error {
 
 // Exists checks if an object exists in S3.
 func (s *S3Backend) Exists(ctx context.Context, key string) (bool, error) {
-	bucket := s.buckets["corpus"]
+	// Intelligently select bucket based on path prefix
+	bucket := s.selectBucketForPath(key)
 
 	_, err := s.client.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
 	if err != nil {
@@ -218,7 +224,8 @@ func (s *S3Backend) Exists(ctx context.Context, key string) (bool, error) {
 // List returns objects with the given prefix.
 // It performs a recursive listing to include all objects under the prefix.
 func (s *S3Backend) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
-	bucket := s.buckets["corpus"]
+	// Intelligently select bucket based on path prefix
+	bucket := s.selectBucketForPath(prefix)
 
 	var objects []ObjectInfo
 
@@ -275,7 +282,8 @@ func (s *S3Backend) DeleteMany(ctx context.Context, keys []string) error {
 
 // GetMetadata retrieves object metadata from S3.
 func (s *S3Backend) GetMetadata(ctx context.Context, key string) (*ObjectMetadata, error) {
-	bucket := s.buckets["corpus"]
+	// Intelligently select bucket based on path prefix
+	bucket := s.selectBucketForPath(key)
 
 	stat, err := s.client.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
 	if err != nil {
@@ -297,7 +305,8 @@ func (s *S3Backend) GetMetadata(ctx context.Context, key string) (*ObjectMetadat
 // SetMetadata updates object metadata by copying the object.
 // S3 requires copying the object to update metadata.
 func (s *S3Backend) SetMetadata(ctx context.Context, key string, metadata map[string]string) error {
-	bucket := s.buckets["corpus"]
+	// Intelligently select bucket based on path prefix
+	bucket := s.selectBucketForPath(key)
 
 	// Get current object info
 	stat, err := s.client.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
@@ -338,7 +347,8 @@ func (s *S3Backend) SetMetadata(ctx context.Context, key string, metadata map[st
 func (s *S3Backend) GetPresignedURL(ctx context.Context, key string, expiry time.Duration) (string, error) {
 	startTime := time.Now()
 	logger := monitoring.WithRequestID(ctx, s.logger)
-	bucket := s.buckets["corpus"]
+	// Intelligently select bucket based on path prefix
+	bucket := s.selectBucketForPath(key)
 
 	logger = logger.WithFields(logrus.Fields{
 		"key":    key,
@@ -376,7 +386,8 @@ func (s *S3Backend) GetPresignedURL(ctx context.Context, key string, expiry time
 func (s *S3Backend) PutPresignedURL(ctx context.Context, key string, expiry time.Duration) (string, error) {
 	startTime := time.Now()
 	logger := monitoring.WithRequestID(ctx, s.logger)
-	bucket := s.buckets["corpus"]
+	// Intelligently select bucket based on path prefix
+	bucket := s.selectBucketForPath(key)
 
 	logger = logger.WithFields(logrus.Fields{
 		"key":    key,
@@ -558,4 +569,36 @@ func (s *S3Backend) BackupObject(ctx context.Context, key string) error {
 func (s *S3Backend) StoreWithReader(ctx context.Context, key string, data []byte) error {
 	reader := bytes.NewReader(data)
 	return s.Store(ctx, key, reader, int64(len(data)))
+}
+
+// selectBucketForPath intelligently selects the appropriate bucket based on the storage path.
+// This enables using different buckets for different types of data:
+// - Paths starting with "coverage/" use the coverage bucket
+// - Paths starting with "quarantine/" use the quarantine bucket
+// - Paths starting with "backup/" use the backup bucket
+// - All other paths use the corpus bucket (default)
+func (s *S3Backend) selectBucketForPath(path string) string {
+	// Check for coverage paths
+	if strings.HasPrefix(path, "coverage/") {
+		if bucket, ok := s.buckets["coverage"]; ok && bucket != "" {
+			return bucket
+		}
+	}
+
+	// Check for quarantine paths
+	if strings.HasPrefix(path, "quarantine/") {
+		if bucket, ok := s.buckets["quarantine"]; ok && bucket != "" {
+			return bucket
+		}
+	}
+
+	// Check for backup paths
+	if strings.HasPrefix(path, "backup/") {
+		if bucket, ok := s.buckets["backup"]; ok && bucket != "" {
+			return bucket
+		}
+	}
+
+	// Default to corpus bucket
+	return s.buckets["corpus"]
 }

@@ -57,7 +57,7 @@ func (s *jobService) CreateJob(ctx context.Context, req CreateJobRequest) (*comm
 	}
 
 	// Validate fuzzer type
-	validFuzzers := []string{"afl++", "libfuzzer", "honggfuzz"}
+	validFuzzers := []string{"aflplusplus", "afl++", "libfuzzer", "honggfuzz"}
 	isValid := false
 	for _, valid := range validFuzzers {
 		if req.Fuzzer == valid {

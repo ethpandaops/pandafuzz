@@ -37,18 +37,19 @@ type MasterConfig struct {
 
 // BotConfig holds all bot agent configuration
 type BotConfig struct {
-	ID           string              `yaml:"id" json:"id" validate:"required"`
-	Name         string              `yaml:"name" json:"name"`
-	MasterURL    string              `yaml:"master_url" json:"master_url" validate:"required,url"`
-	APIPort      int                 `yaml:"api_port" json:"api_port"`
-	Capabilities []string            `yaml:"capabilities" json:"capabilities" validate:"required"`
-	Fuzzing      FuzzingConfig       `yaml:"fuzzing" json:"fuzzing" validate:"required"`
-	Timeouts     BotTimeoutConfig    `yaml:"timeouts" json:"timeouts" validate:"required"`
-	Retry        BotRetryConfig      `yaml:"retry" json:"retry"`
-	Resources    BotResourceConfig   `yaml:"resources" json:"resources"`
-	Logging      LoggingConfig       `yaml:"logging" json:"logging"`
-	WorkerMode   bool                `yaml:"worker_mode" json:"worker_mode"`
-	Redis        *config.RedisConfig `yaml:"redis" json:"redis"`
+	ID           string                `yaml:"id" json:"id" validate:"required"`
+	Name         string                `yaml:"name" json:"name"`
+	MasterURL    string                `yaml:"master_url" json:"master_url" validate:"required,url"`
+	APIPort      int                   `yaml:"api_port" json:"api_port"`
+	Capabilities []string              `yaml:"capabilities" json:"capabilities" validate:"required"`
+	Fuzzing      FuzzingConfig         `yaml:"fuzzing" json:"fuzzing" validate:"required"`
+	Timeouts     BotTimeoutConfig      `yaml:"timeouts" json:"timeouts" validate:"required"`
+	Retry        BotRetryConfig        `yaml:"retry" json:"retry"`
+	Resources    BotResourceConfig     `yaml:"resources" json:"resources"`
+	Logging      LoggingConfig         `yaml:"logging" json:"logging"`
+	WorkerMode   bool                  `yaml:"worker_mode" json:"worker_mode"`
+	Redis        *config.RedisConfig   `yaml:"redis" json:"redis"`
+	Storage      *config.StorageConfig `yaml:"storage" json:"storage"`
 }
 
 // ServerConfig holds HTTP server configuration

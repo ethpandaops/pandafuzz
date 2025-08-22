@@ -177,6 +177,7 @@ func (r *CoverageRepositoryV1Adapter) GetReportsByJobID(ctx context.Context, job
 		// Use the new coverage_reports table if it exists
 		r.log.Debug("Using coverage_reports table")
 
+		// Include all reports (including raw format)
 		baseWhere := "WHERE job_id = ?"
 		args := []any{jobID}
 

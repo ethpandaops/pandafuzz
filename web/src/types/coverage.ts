@@ -33,7 +33,7 @@ export interface CoverageMetadata {
   collected_at: string;
 }
 
-export type CoverageFormat = 'json' | 'html' | 'lcov' | 'cobertura';
+export type CoverageFormat = 'json' | 'html' | 'lcov' | 'cobertura' | 'raw';
 
 // API Response types
 export interface CoverageReportListResponse {

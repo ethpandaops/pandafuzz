@@ -133,7 +133,7 @@ func (cc *CoverageCollector) generateCoverageFile(ctx context.Context, job *comm
 	var err error
 
 	switch job.Fuzzer {
-	case "afl++":
+	case "aflplusplus", "afl++":
 		format = job.CoverageFormat
 		if format == "" {
 			format = "json" // Default format for AFL++

@@ -47,11 +47,12 @@ const JobCoverageView: React.FC<JobCoverageViewProps> = ({ jobId, onError }) => 
           sort_order: 'desc',
         });
         
-        // Add jobId to each report
-        const reportsWithJobId = coverageReports.map(report => ({
-          ...report,
-          jobId: jobId
-        }));
+        // Add jobId to each report (including raw format)
+        const reportsWithJobId = coverageReports
+          .map(report => ({
+            ...report,
+            jobId: jobId
+          }));
         
         setReports(reportsWithJobId);
       } catch (err) {
@@ -68,17 +69,24 @@ const JobCoverageView: React.FC<JobCoverageViewProps> = ({ jobId, onError }) => 
     fetchReports();
   }, [jobId, onError]);
 
-  const handleDownloadReport = async (jobId: string, reportId: string) => {
+  const handleDownloadReport = async (jobId: string, reportId: string, format?: string) => {
     try {
       setDownloadingReports(prev => new Set(prev).add(reportId));
       
       const blob = await coverageAPI.downloadCoverageReport(jobId, reportId);
       
+      // Determine file extension based on format
+      let extension = '.txt';
+      if (format === 'json') extension = '.json';
+      else if (format === 'lcov') extension = '.lcov';
+      else if (format === 'html') extension = '.html';
+      else if (format === 'raw') extension = '.zip';
+      
       // Create download link
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `coverage-job-${jobId}-report-${reportId}.txt`;
+      a.download = `coverage-${jobId.substring(0, 8)}-${reportId.substring(0, 8)}${extension}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -131,13 +139,14 @@ const JobCoverageView: React.FC<JobCoverageViewProps> = ({ jobId, onError }) => 
               <TableRow>
                 <TableCell>Job ID</TableCell>
                 <TableCell>Report ID</TableCell>
+                <TableCell>Format</TableCell>
                 <TableCell>Updated</TableCell>
                 <TableCell align="center">Download</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
               <TableRow>
-                <TableCell colSpan={4} align="center">
+                <TableCell colSpan={5} align="center">
                   <Typography variant="body2" color="text.secondary" py={2}>
                     No coverage reports available yet
                   </Typography>
@@ -168,6 +177,7 @@ const JobCoverageView: React.FC<JobCoverageViewProps> = ({ jobId, onError }) => 
             <TableRow>
               <TableCell>Job ID</TableCell>
               <TableCell>Report ID</TableCell>
+              <TableCell>Format</TableCell>
               <TableCell>Updated</TableCell>
               <TableCell align="center">Download</TableCell>
             </TableRow>
@@ -186,6 +196,11 @@ const JobCoverageView: React.FC<JobCoverageViewProps> = ({ jobId, onError }) => 
                   </Typography>
                 </TableCell>
                 <TableCell>
+                  <Typography variant="body2" color={report.format === 'raw' ? 'primary' : 'inherit'}>
+                    {report.format?.toUpperCase() || 'UNKNOWN'}
+                  </Typography>
+                </TableCell>
+                <TableCell>
                   <Typography variant="body2">
                     {formatDate(report.created_at)}
                   </Typography>
@@ -193,7 +208,7 @@ const JobCoverageView: React.FC<JobCoverageViewProps> = ({ jobId, onError }) => 
                 <TableCell align="center">
                   <IconButton
                     size="small"
-                    onClick={() => handleDownloadReport(report.jobId, report.id)}
+                    onClick={() => handleDownloadReport(report.jobId, report.id, report.format)}
                     disabled={downloadingReports.has(report.id)}
                   >
                     {downloadingReports.has(report.id) ? (

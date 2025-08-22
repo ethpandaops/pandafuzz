@@ -44,6 +44,7 @@ type S3Config struct {
 	CorpusBucket     string `yaml:"corpus_bucket" json:"corpus_bucket" default:"pandafuzz-corpus" validate:"required_if=Type s3"`
 	QuarantineBucket string `yaml:"quarantine_bucket" json:"quarantine_bucket" default:"pandafuzz-quarantine"`
 	BackupBucket     string `yaml:"backup_bucket" json:"backup_bucket" default:"pandafuzz-backup"`
+	CoverageBucket   string `yaml:"coverage_bucket" json:"coverage_bucket" default:"pandafuzz-coverage"`
 
 	// S3 specific options
 	UseSSL       bool `yaml:"use_ssl" json:"use_ssl" default:"true"`
@@ -156,6 +157,9 @@ func (c *S3Config) SetDefaults() {
 	if c.BackupBucket == "" {
 		c.BackupBucket = "pandafuzz-backup"
 	}
+	if c.CoverageBucket == "" {
+		c.CoverageBucket = "pandafuzz-coverage"
+	}
 	if c.PartSize == 0 {
 		c.PartSize = 64 * 1024 * 1024 // 64MB
 	}
@@ -188,6 +192,9 @@ func (c *MinIOConfig) SetDefaults() {
 	}
 	if c.BackupBucket == "" {
 		c.BackupBucket = "backup"
+	}
+	if c.CoverageBucket == "" {
+		c.CoverageBucket = "coverage"
 	}
 	if c.PartSize == 0 {
 		c.PartSize = 64 * 1024 * 1024 // 64MB

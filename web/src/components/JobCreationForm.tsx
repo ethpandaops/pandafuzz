@@ -58,7 +58,7 @@ const JobCreationForm: React.FC<JobCreationFormProps> = ({
 }) => {
   const [formData, setFormData] = useState<JobFormData>({
     name: '',
-    fuzzer: 'afl++',
+    fuzzer: 'aflplusplus',
     target: '',
     target_args: '',
     priority: JobPriority.Normal,
@@ -136,7 +136,7 @@ const JobCreationForm: React.FC<JobCreationFormProps> = ({
             value={formData.fuzzer}
             onChange={(e) => handleInputChange('fuzzer', e.target.value)}
           >
-            <MenuItem value="afl++">AFL++</MenuItem>
+            <MenuItem value="aflplusplus">AFL++</MenuItem>
             <MenuItem value="libfuzzer">LibFuzzer</MenuItem>
             <MenuItem value="honggfuzz">Honggfuzz</MenuItem>
           </TextField>

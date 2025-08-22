@@ -1391,8 +1391,8 @@ func (s *Server) validateJobRequest(req *JobRequest) error {
 	if req.Fuzzer == "" {
 		return fmt.Errorf("fuzzer is required")
 	}
-	if req.Fuzzer != "afl++" && req.Fuzzer != "libfuzzer" {
-		return fmt.Errorf("unsupported fuzzer: %s (supported: afl++, libfuzzer)", req.Fuzzer)
+	if req.Fuzzer != "aflplusplus" && req.Fuzzer != "libfuzzer" {
+		return fmt.Errorf("unsupported fuzzer: %s (supported: aflplusplus, libfuzzer)", req.Fuzzer)
 	}
 
 	// Validate duration

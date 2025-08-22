@@ -1,14 +1,14 @@
 package master
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
+	"github.com/ethpandaops/pandafuzz/pkg/storage"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
@@ -68,7 +68,131 @@ func (s *Server) handleSubmitCoverageReport(w http.ResponseWriter, r *http.Reque
 	ctx, cancel := context.WithTimeout(r.Context(), s.config.Timeouts.DatabaseOp)
 	defer cancel()
 
-	// Extract metrics from coverage_data
+	// Check if this is a raw coverage report with file paths
+	if fileType, ok := req.CoverageData["file_type"].(string); ok && fileType == "raw" {
+		// Handle raw coverage files - insert directly into SQL table with transaction support
+		s.logger.WithFields(logrus.Fields{
+			"report_id": req.ReportID,
+			"job_id":    req.JobID,
+			"file_type": fileType,
+		}).Debug("Processing raw coverage report")
+
+		// Get SQLite connection directly
+		sqliteStorage, ok := s.state.db.(*storage.SQLiteStorage)
+		if !ok {
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Database type not supported", nil)
+			return
+		}
+
+		db := sqliteStorage.GetDB()
+
+		// Extract file paths from coverage data
+		var fuzzerStatsPath, plotDataPath, fuzzBitmapPath string
+		var size int64
+
+		if val, ok := req.CoverageData["fuzzer_stats_path"].(string); ok {
+			fuzzerStatsPath = val
+		}
+		if val, ok := req.CoverageData["plot_data_path"].(string); ok {
+			plotDataPath = val
+		}
+		if val, ok := req.CoverageData["fuzz_bitmap_path"].(string); ok {
+			fuzzBitmapPath = val
+		}
+		if val, ok := req.CoverageData["size"].(float64); ok {
+			size = int64(val)
+		}
+
+		// Validate at least one file path is provided
+		if fuzzerStatsPath == "" && plotDataPath == "" && fuzzBitmapPath == "" {
+			s.logger.WithFields(logrus.Fields{
+				"report_id": req.ReportID,
+				"job_id":    req.JobID,
+			}).Warn("No raw coverage file paths provided in report")
+			s.writeErrorResponse(w, http.StatusBadRequest, "At least one raw coverage file path must be provided", nil)
+			return
+		}
+
+		// Begin transaction for atomic operation
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			s.logger.WithError(err).Error("Failed to begin transaction")
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to start database transaction", err)
+			return
+		}
+
+		// Ensure transaction is handled properly
+		committed := false
+		defer func() {
+			if !committed {
+				if rollbackErr := tx.Rollback(); rollbackErr != nil {
+					s.logger.WithError(rollbackErr).Warn("Failed to rollback transaction")
+				}
+			}
+		}()
+
+		// Insert into coverage_reports table with raw file paths
+		insertQuery := `
+			INSERT INTO coverage_reports (id, job_id, format, storage_path, size, file_type, 
+				fuzzer_stats_path, plot_data_path, fuzz_bitmap_path, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`
+
+		storagePath := fmt.Sprintf("coverage/%s", req.JobID)
+
+		_, err = tx.ExecContext(ctx, insertQuery,
+			req.ReportID,
+			req.JobID,
+			"raw",
+			storagePath,
+			size,
+			"raw",
+			fuzzerStatsPath,
+			plotDataPath,
+			fuzzBitmapPath,
+			req.CollectedAt,
+		)
+
+		if err != nil {
+			s.logger.WithError(err).WithFields(logrus.Fields{
+				"report_id": req.ReportID,
+				"job_id":    req.JobID,
+			}).Error("Failed to insert raw coverage report into database")
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store raw coverage report", err)
+			return
+		}
+
+		// Commit the transaction
+		if err := tx.Commit(); err != nil {
+			s.logger.WithError(err).WithFields(logrus.Fields{
+				"report_id": req.ReportID,
+				"job_id":    req.JobID,
+			}).Error("Failed to commit transaction for raw coverage report")
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to commit raw coverage report", err)
+			return
+		}
+		committed = true
+
+		s.logger.WithFields(logrus.Fields{
+			"report_id":         req.ReportID,
+			"job_id":            req.JobID,
+			"fuzzer_stats_path": fuzzerStatsPath,
+			"plot_data_path":    plotDataPath,
+			"fuzz_bitmap_path":  fuzzBitmapPath,
+		}).Info("Raw coverage report stored successfully")
+
+		// Return success response
+		w.WriteHeader(http.StatusCreated)
+		s.writeJSONResponse(w, map[string]interface{}{
+			"status":    "success",
+			"message":   "Raw coverage report stored",
+			"report_id": req.ReportID,
+			"timestamp": time.Now(),
+		})
+		return
+	}
+
+	// Extract metrics from coverage_data for non-raw reports
 	edges := int64(0)
 	newEdges := int64(0)
 	execCount := int64(0)
@@ -234,38 +358,80 @@ func (s *Server) handleSubmitCoverageReport(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-// generateCoverageFiles creates coverage files on disk with actual data
+// generateCoverageFiles creates coverage files and stores them in the storage backend
 func (s *Server) generateCoverageFiles(ctx context.Context, jobID string, coverageData map[string]interface{}) error {
-	// Create coverage directory
-	coverageDir := filepath.Join("/app/data/coverage", jobID)
-	if err := os.MkdirAll(coverageDir, 0755); err != nil {
-		return fmt.Errorf("failed to create coverage directory: %w", err)
-	}
-
 	timestamp := time.Now().Unix()
+	reportID := fmt.Sprintf("coverage-%s-%d", jobID, timestamp)
 
 	// Generate JSON file with actual coverage data
-	jsonPath := filepath.Join(coverageDir, fmt.Sprintf("coverage-%d.json", timestamp))
 	jsonData, err := json.MarshalIndent(coverageData, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal coverage data: %w", err)
 	}
-	if err := os.WriteFile(jsonPath, jsonData, 0644); err != nil {
-		return fmt.Errorf("failed to write JSON file: %w", err)
+
+	// Store JSON file in storage backend
+	jsonStoragePath := fmt.Sprintf("coverage/%s/%s.json", jobID, reportID)
+	jsonReader := bytes.NewReader(jsonData)
+	if err := s.storageBackend.Store(ctx, jsonStoragePath, jsonReader, int64(len(jsonData))); err != nil {
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"job_id":       jobID,
+			"storage_path": jsonStoragePath,
+		}).Error("Failed to store JSON coverage file")
+		return fmt.Errorf("failed to store JSON coverage file: %w", err)
 	}
 
 	// Generate LCOV file if applicable (basic format)
-	lcovPath := filepath.Join(coverageDir, fmt.Sprintf("coverage-%d.lcov", timestamp))
 	lcovContent := s.generateLCOVFromMetrics(coverageData)
-	if err := os.WriteFile(lcovPath, []byte(lcovContent), 0644); err != nil {
-		s.logger.WithError(err).Warn("Failed to write LCOV file")
+	lcovStoragePath := fmt.Sprintf("coverage/%s/%s.lcov", jobID, reportID)
+	lcovReader := bytes.NewReader([]byte(lcovContent))
+	if err := s.storageBackend.Store(ctx, lcovStoragePath, lcovReader, int64(len(lcovContent))); err != nil {
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"job_id":       jobID,
+			"storage_path": lcovStoragePath,
+		}).Warn("Failed to store LCOV coverage file")
+	}
+
+	// Store coverage report metadata in database with proper storage paths
+	sqliteStorage, ok := s.state.db.(*storage.SQLiteStorage)
+	if ok {
+		db := sqliteStorage.GetDB()
+
+		// Insert JSON report record
+		insertQuery := `
+			INSERT OR REPLACE INTO coverage_reports (id, job_id, format, storage_path, size, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`
+		_, err = db.ExecContext(ctx, insertQuery,
+			fmt.Sprintf("%s-json", reportID),
+			jobID,
+			"json",
+			jsonStoragePath,
+			int64(len(jsonData)),
+			time.Now(),
+		)
+		if err != nil {
+			s.logger.WithError(err).Warn("Failed to record JSON coverage report in database")
+		}
+
+		// Insert LCOV report record
+		_, err = db.ExecContext(ctx, insertQuery,
+			fmt.Sprintf("%s-lcov", reportID),
+			jobID,
+			"lcov",
+			lcovStoragePath,
+			int64(len(lcovContent)),
+			time.Now(),
+		)
+		if err != nil {
+			s.logger.WithError(err).Warn("Failed to record LCOV coverage report in database")
+		}
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"job_id":    jobID,
-		"json_file": jsonPath,
-		"lcov_file": lcovPath,
-	}).Debug("Generated coverage files")
+		"job_id":            jobID,
+		"json_storage_path": jsonStoragePath,
+		"lcov_storage_path": lcovStoragePath,
+	}).Info("Generated and stored coverage files in storage backend")
 
 	return nil
 }

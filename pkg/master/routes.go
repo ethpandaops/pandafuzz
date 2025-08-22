@@ -141,7 +141,7 @@ func (s *Server) setupAPIv3Routes() {
 	config.EnableDeprecationWarnings = false
 
 	// Create integration
-	integration := apiv3.NewIntegration(s.services, coverageRepo, s.storageBackend, s.logger, config)
+	integration := apiv3.NewIntegration(s.services, coverageRepo, s.storageBackend, s.state.db, s.logger, config)
 
 	// Register routes
 	integration.RegisterRoutes(s.router)
@@ -181,6 +181,9 @@ func (s *Server) setupAPIRoutes(router *mux.Router) {
 	router.HandleFunc("/jobs/{id}", s.handleJobGet).Methods("GET")
 	router.HandleFunc("/jobs/{id}/cancel", s.handleJobCancel).Methods("PUT")
 	router.HandleFunc("/jobs/{id}/coverage", s.handleGetCoverageReport).Methods("GET")
+	router.HandleFunc("/jobs/{id}/coverage/raw", s.handleGetRawCoverageFiles).Methods("GET")
+	router.HandleFunc("/jobs/{id}/coverage/raw/{fileType}", s.handleDownloadRawCoverageFile).Methods("GET")
+	router.HandleFunc("/jobs/{id}/coverage/raw/all/zip", s.handleGetAllRawFiles).Methods("GET")
 	router.HandleFunc("/jobs/{id}/logs", s.handleJobLogsV2).Methods("GET")
 	router.HandleFunc("/jobs/{id}/logs/stream", s.handleJobLogStream).Methods("GET")
 	router.HandleFunc("/jobs/{id}/logs/push", s.handleLogPush).Methods("POST")

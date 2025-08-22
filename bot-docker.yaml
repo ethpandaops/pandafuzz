@@ -64,6 +64,24 @@ bot:
     result_reporting: "30s"      # Timeout for result reporting
     file_upload: "5m"            # Timeout for uploading results
 
+  # Storage configuration - Using MinIO for shared storage with master
+  storage:
+    type: "minio"
+    minio:
+      endpoint: "minio:9000"
+      access_key_id: "pandafuzz"
+      secret_access_key: "pandafuzz123"
+      corpus_bucket: "corpus"
+      quarantine_bucket: "quarantine"
+      backup_bucket: "backup"
+      coverage_bucket: "coverage"
+      use_ssl: false
+      use_path_style: true
+      health_check: true
+    max_file_size: 104857600  # 100MB
+    enable_dedup: true
+    enable_compression: false
+
   # Logging configuration
   logging:
     level: "info"              # Log level (debug, info, warn, error)

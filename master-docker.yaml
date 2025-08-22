@@ -23,11 +23,20 @@ master:
     idle_conns: 1
     timeout: "30s"
 
-  # Storage configuration - Updated to use /app/data which has a volume mount
+  # Storage configuration - Using MinIO for shared storage
   storage:
-    type: "filesystem"
-    filesystem:
-      base_path: "/app/data"
+    type: "minio"
+    minio:
+      endpoint: "minio:9000"
+      access_key_id: "pandafuzz"
+      secret_access_key: "pandafuzz123"
+      corpus_bucket: "corpus"
+      quarantine_bucket: "quarantine"
+      backup_bucket: "backup"
+      coverage_bucket: "coverage"
+      use_ssl: false
+      use_path_style: true
+      health_check: true
     max_file_size: 104857600  # 100MB
 
   # Timeout configuration

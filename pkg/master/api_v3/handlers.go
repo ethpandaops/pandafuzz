@@ -1,7 +1,9 @@
 package api_v3
 
 import (
+	"archive/zip"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +18,7 @@ import (
 	"github.com/ethpandaops/pandafuzz/pkg/errors"
 	"github.com/ethpandaops/pandafuzz/pkg/master/repository"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
+	"github.com/ethpandaops/pandafuzz/pkg/storage"
 	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -32,6 +35,7 @@ type HandlerV3 struct {
 	validator      *Validator
 	logger         logrus.FieldLogger
 	config         *Config
+	db             interface{} // Database connection (SQLite)
 }
 
 // Config holds API v3 configuration
@@ -43,7 +47,7 @@ type Config struct {
 }
 
 // NewHandlerV3 creates a new v3 API handler
-func NewHandlerV3(services *service.Manager, coverageRepo repository.CoverageRepository, storageBackend backend.StorageBackend, logger logrus.FieldLogger, config *Config) *HandlerV3 {
+func NewHandlerV3(services *service.Manager, coverageRepo repository.CoverageRepository, storageBackend backend.StorageBackend, db interface{}, logger logrus.FieldLogger, config *Config) *HandlerV3 {
 	var campaign *CampaignServiceAdapter
 	var corpus *CorpusServiceAdapter
 
@@ -61,6 +65,7 @@ func NewHandlerV3(services *service.Manager, coverageRepo repository.CoverageRep
 		validator:      NewValidator(),
 		logger:         logger.WithField("api_version", "v3"),
 		config:         config,
+		db:             db,
 	}
 }
 
@@ -1386,48 +1391,180 @@ func (h *HandlerV3) getJobCoverageReport(w http.ResponseWriter, r *http.Request)
 
 	var content []byte
 
-	// Try to read from storage backend first if available
-	if h.storageBackend != nil {
-		reader, err := h.storageBackend.Retrieve(r.Context(), report.StoragePath)
-		if err == nil {
-			defer reader.Close()
-			content, err = io.ReadAll(reader)
-			if err != nil {
-				h.logger.WithError(err).WithFields(logrus.Fields{
-					"report_id":    reportID,
-					"job_id":       jobID,
-					"storage_path": report.StoragePath,
-				}).Error("Failed to read coverage report from storage backend")
-			}
+	// Special handling for raw coverage files - return all files as a zip
+	if report.Format == "raw" {
+		// Query database for raw file paths
+		sqliteDB, ok := h.db.(*storage.SQLiteStorage)
+		if !ok {
+			h.writeError(w, fmt.Errorf("database type not supported"))
+			return
 		}
-	}
-
-	// If storage backend failed or not available, try direct filesystem access
-	if len(content) == 0 {
-		// The storage path might be an absolute path like /app/data/coverage/...
-		// or a relative path like coverage/...
-		filePath := report.StoragePath
-		if !strings.HasPrefix(filePath, "/") {
-			// If it's a relative path, prepend the data directory
-			filePath = filepath.Join("/app/data", filePath)
-		}
-
-		fileContent, err := os.ReadFile(filePath)
+		db := sqliteDB.GetDB()
+		query := `
+			SELECT fuzzer_stats_path, plot_data_path, fuzz_bitmap_path
+			FROM coverage_reports 
+			WHERE id = ? AND file_type = 'raw'
+		`
+		var fuzzerStatsPath, plotDataPath, fuzzBitmapPath sql.NullString
+		err := db.QueryRowContext(r.Context(), query, reportID).Scan(&fuzzerStatsPath, &plotDataPath, &fuzzBitmapPath)
 		if err != nil {
-			h.logger.WithError(err).WithFields(logrus.Fields{
-				"report_id":    reportID,
-				"job_id":       jobID,
-				"file_path":    filePath,
-				"storage_path": report.StoragePath,
-			}).Error("Failed to read coverage report file from filesystem")
-
+			h.logger.WithError(err).WithField("report_id", reportID).Error("Failed to find raw coverage file paths")
 			h.writeError(w, &NotFoundError{
-				Resource: "coverage report file",
+				Resource: "raw coverage files",
 				ID:       reportID,
 			})
 			return
 		}
-		content = fileContent
+
+		// Create a temporary directory for files
+		tempDir := filepath.Join("/tmp", fmt.Sprintf("coverage_%s_%s", jobID[:8], reportID[:8]))
+		if err := os.MkdirAll(tempDir, 0755); err != nil {
+			h.logger.WithError(err).Error("Failed to create temp directory")
+			h.writeError(w, fmt.Errorf("failed to prepare files: %w", err))
+			return
+		}
+		defer os.RemoveAll(tempDir)
+
+		// Download each raw file if available
+		files := map[string]sql.NullString{
+			"fuzzer_stats": fuzzerStatsPath,
+			"plot_data":    plotDataPath,
+			"fuzz_bitmap":  fuzzBitmapPath,
+		}
+
+		hasFiles := false
+		for fileType, pathValue := range files {
+			if !pathValue.Valid || pathValue.String == "" {
+				continue
+			}
+
+			if h.storageBackend != nil {
+				reader, err := h.storageBackend.Retrieve(r.Context(), pathValue.String)
+				if err != nil {
+					h.logger.WithError(err).WithFields(logrus.Fields{
+						"file_type": fileType,
+						"path":      pathValue.String,
+					}).Warn("Failed to retrieve raw file")
+					continue
+				}
+
+				destPath := filepath.Join(tempDir, fileType)
+				if fileType == "fuzz_bitmap" {
+					destPath += ".bin"
+				} else {
+					destPath += ".txt"
+				}
+
+				file, err := os.Create(destPath)
+				if err != nil {
+					reader.Close()
+					h.logger.WithError(err).WithField("file_type", fileType).Warn("Failed to create temp file")
+					continue
+				}
+
+				_, err = io.Copy(file, reader)
+				file.Close()
+				reader.Close()
+
+				if err != nil {
+					h.logger.WithError(err).WithField("file_type", fileType).Warn("Failed to write temp file")
+					continue
+				}
+				hasFiles = true
+			}
+		}
+
+		if !hasFiles {
+			h.writeError(w, &NotFoundError{
+				Resource: "raw coverage files",
+				ID:       reportID,
+			})
+			return
+		}
+
+		// Create zip file
+		zipPath := filepath.Join("/tmp", fmt.Sprintf("raw_coverage_%s.zip", reportID[:8]))
+		if err := h.createZipFile(tempDir, zipPath); err != nil {
+			h.logger.WithError(err).Error("Failed to create zip file")
+			h.writeError(w, fmt.Errorf("failed to create zip file: %w", err))
+			return
+		}
+		defer os.Remove(zipPath)
+
+		// Read zip file
+		content, err = os.ReadFile(zipPath)
+		if err != nil {
+			h.logger.WithError(err).Error("Failed to read zip file")
+			h.writeError(w, fmt.Errorf("failed to read zip file: %w", err))
+			return
+		}
+
+		// Set zip-specific headers
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"raw_coverage_%s.zip\"", jobID[:8]))
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Header().Set("ETag", fmt.Sprintf("\"%s\"", reportID))
+
+		// Write the zip content
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write(content); err != nil {
+			h.logger.WithError(err).WithField("report_id", reportID).Error("Failed to write raw coverage zip response")
+			return
+		}
+
+		h.logger.WithFields(logrus.Fields{
+			"report_id": reportID,
+			"job_id":    jobID,
+			"format":    "raw",
+			"size":      len(content),
+		}).Info("Raw coverage files downloaded successfully as zip")
+		return
+	} else {
+		// Regular coverage files (JSON, LCOV)
+		// Try to read from storage backend first if available
+		if h.storageBackend != nil {
+			reader, err := h.storageBackend.Retrieve(r.Context(), report.StoragePath)
+			if err == nil {
+				defer reader.Close()
+				content, err = io.ReadAll(reader)
+				if err != nil {
+					h.logger.WithError(err).WithFields(logrus.Fields{
+						"report_id":    reportID,
+						"job_id":       jobID,
+						"storage_path": report.StoragePath,
+					}).Error("Failed to read coverage report from storage backend")
+				}
+			}
+		}
+
+		// If storage backend failed or not available, try direct filesystem access
+		if len(content) == 0 {
+			// The storage path might be an absolute path like /app/data/coverage/...
+			// or a relative path like coverage/...
+			filePath := report.StoragePath
+			if !strings.HasPrefix(filePath, "/") {
+				// If it's a relative path, prepend the data directory
+				filePath = filepath.Join("/app/data", filePath)
+			}
+
+			fileContent, err := os.ReadFile(filePath)
+			if err != nil {
+				h.logger.WithError(err).WithFields(logrus.Fields{
+					"report_id":    reportID,
+					"job_id":       jobID,
+					"file_path":    filePath,
+					"storage_path": report.StoragePath,
+				}).Error("Failed to read coverage report file from filesystem")
+
+				h.writeError(w, &NotFoundError{
+					Resource: "coverage report file",
+					ID:       reportID,
+				})
+				return
+			}
+			content = fileContent
+		}
 	}
 
 	// Check if content was successfully read
@@ -1593,6 +1730,47 @@ func (h *HandlerV3) writeJSON(w http.ResponseWriter, status int, data interface{
 	if err := json.NewEncoder(w).Encode(data); err != nil {
 		h.logger.WithError(err).Error("Failed to encode JSON response")
 	}
+}
+
+// createZipFile creates a zip file from a directory
+func (h *HandlerV3) createZipFile(sourceDir, destPath string) error {
+	zipFile, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+
+	zipWriter := zip.NewWriter(zipFile)
+	defer zipWriter.Close()
+
+	return filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return err
+		}
+
+		zipEntry, err := zipWriter.Create(relPath)
+		if err != nil {
+			return err
+		}
+
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		_, err = io.Copy(zipEntry, file)
+		return err
+	})
 }
 
 func (h *HandlerV3) writeError(w http.ResponseWriter, err error) {

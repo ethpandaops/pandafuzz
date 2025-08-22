@@ -173,7 +173,7 @@ func (rje *RealJobExecutor) ExecuteJob(job *common.Job) (success bool, message s
 
 	// Execute based on fuzzer type
 	switch job.Fuzzer {
-	case "afl++", "afl":
+	case "aflplusplus", "afl++", "afl":
 		return rje.executeAFLJob(execution)
 	case "libfuzzer":
 		return rje.executeLibFuzzerJob(execution)

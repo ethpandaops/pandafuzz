@@ -236,6 +236,7 @@ func (r *CoverageRepositoryImpl) GetReportsByJobID(ctx context.Context, jobID st
 	}
 
 	// Build base query with filters
+	// Include all reports (including raw format)
 	baseWhere := "WHERE job_id = ?"
 	args := []any{jobID}
 

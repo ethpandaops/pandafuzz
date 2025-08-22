@@ -16,13 +16,14 @@ import (
 
 // FuzzerJobExecutor handles job execution using the fuzzer interface
 type FuzzerJobExecutor struct {
-	config        *common.BotConfig
-	logger        *logrus.Logger
-	resultChan    chan common.FuzzerEvent
-	activeFuzzers map[string]fuzzer.Fuzzer
-	mu            sync.RWMutex
-	botID         string
-	resultHandler interface{} // Handler for reporting results to master
+	config            *common.BotConfig
+	logger            *logrus.Logger
+	resultChan        chan common.FuzzerEvent
+	activeFuzzers     map[string]fuzzer.Fuzzer
+	mu                sync.RWMutex
+	botID             string
+	resultHandler     interface{} // Handler for reporting results to master
+	coverageCollector *CoverageCollector
 }
 
 // NewFuzzerJobExecutor creates a new fuzzer-based job executor
@@ -331,6 +332,16 @@ exitLoop:
 	// Collect coverage if enabled (before returning)
 	if job.EnableCoverage && fuzz != nil {
 		fje.collectCoverage(job, fuzz)
+
+		// For AFL++ jobs, also collect raw coverage files
+		if job.Fuzzer == "afl++" || job.Fuzzer == "aflplusplus" || job.Fuzzer == "afl" {
+			if fje.coverageCollector != nil {
+				ctx := context.Background()
+				if err := fje.coverageCollector.CollectAndStoreRawAFLFiles(ctx, job); err != nil {
+					fje.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to collect raw AFL++ files")
+				}
+			}
+		}
 	}
 
 	if timedOut {
@@ -396,6 +407,11 @@ func (fje *FuzzerJobExecutor) GetFuzzer(jobID string) (fuzzer.Fuzzer, bool) {
 // SetResultHandler sets the result handler for reporting to master
 func (fje *FuzzerJobExecutor) SetResultHandler(handler interface{}) {
 	fje.resultHandler = handler
+}
+
+// SetCoverageCollector sets the coverage collector for raw file collection
+func (fje *FuzzerJobExecutor) SetCoverageCollector(collector *CoverageCollector) {
+	fje.coverageCollector = collector
 }
 
 // CleanupJob removes the fuzzer from active jobs and performs cleanup
