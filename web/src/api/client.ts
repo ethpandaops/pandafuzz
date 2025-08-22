@@ -271,7 +271,8 @@ export class PandaFuzzAPI {
     if (limit) params.append('limit', limit.toString());
     if (offset) params.append('offset', offset.toString());
     
-    const response = await this.client.get(`/jobs/${jobId}/logs?${params.toString()}`);
+    // Use v1 client for logs endpoint as it's not implemented in v3 yet
+    const response = await this.v1Client.get(`/jobs/${jobId}/logs?${params.toString()}`);
     return response.data;
   }
 
