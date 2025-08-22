@@ -1,0 +1,796 @@
+# Corpus resource schemas for PandaFuzz API v1
+# Manages fuzzing corpus files, collections, and synchronization
+
+CorpusEntry:
+  type: object
+  description: A single file in the fuzzing corpus
+  required:
+    - id
+    - filename
+    - sha256
+    - size
+    - source
+    - created_at
+    - coverage_edges
+    - generation
+  properties:
+    id:
+      type: string
+      format: uuid
+      description: Unique corpus entry identifier
+      example: "550e8400-e29b-41d4-a716-446655440003"
+    filename:
+      type: string
+      maxLength: 255
+      pattern: '^[^/\\:*?"<>|]+$'
+      description: Original filename
+      example: "input_001.txt"
+    sha256:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: SHA256 hash of the file content
+      example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    size:
+      type: integer
+      format: int64
+      minimum: 0
+      description: File size in bytes
+      example: 4096
+    source:
+      $ref: '#/CorpusSource'
+    campaign_id:
+      type: string
+      format: uuid
+      nullable: true
+      description: Associated campaign ID
+      example: "550e8400-e29b-41d4-a716-446655440002"
+    job_id:
+      type: string
+      format: uuid
+      nullable: true
+      description: Job that generated this entry
+      example: "550e8400-e29b-41d4-a716-446655440001"
+    bot_id:
+      type: string
+      format: uuid
+      nullable: true
+      description: Bot that created this entry
+      example: "550e8400-e29b-41d4-a716-446655440000"
+    created_at:
+      type: string
+      format: date-time
+      description: When the entry was created
+      example: "2023-12-01T11:30:00Z"
+    discovered_at:
+      type: string
+      format: date-time
+      nullable: true
+      description: When the input was first discovered during fuzzing
+      example: "2023-12-01T11:25:15Z"
+    coverage_edges:
+      type: integer
+      minimum: 0
+      description: Number of coverage edges triggered
+      example: 1250
+    new_coverage_edges:
+      type: integer
+      minimum: 0
+      description: Number of new coverage edges discovered
+      example: 15
+    execution_time_us:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Execution time in microseconds
+      example: 5000
+    parent_id:
+      type: string
+      format: uuid
+      nullable: true
+      description: Parent corpus entry ID (for mutations)
+      example: "550e8400-e29b-41d4-a716-446655440004"
+    generation:
+      type: integer
+      minimum: 0
+      description: Generation number (0 for seeds, increments for mutations)
+      example: 3
+    mutation_info:
+      $ref: '#/MutationInfo'
+    priority_score:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 1
+      description: Priority score for corpus selection (0-1)
+      example: 0.85
+    access_count:
+      type: integer
+      minimum: 0
+      description: Number of times this entry was used for fuzzing
+      example: 150
+    last_accessed:
+      type: string
+      format: date-time
+      nullable: true
+      description: When this entry was last used
+      example: "2023-12-01T14:20:30Z"
+    is_seed:
+      type: boolean
+      description: Whether this is a seed file (not generated)
+      example: false
+    is_quarantined:
+      type: boolean
+      description: Whether this entry is quarantined
+      example: false
+    quarantine_reason:
+      type: string
+      maxLength: 500
+      nullable: true
+      description: Reason for quarantine if applicable
+      example: "Causes excessive memory usage"
+    tags:
+      type: array
+      description: Classification tags
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+        maxLength: 50
+      maxItems: 20
+      example: ["high-coverage", "new-path", "interesting"]
+    metadata:
+      type: object
+      description: Additional metadata
+      additionalProperties:
+        type: string
+      maxProperties: 20
+
+CorpusSource:
+  type: string
+  enum:
+    - seed
+    - mutation
+    - manual_upload
+    - crash_promotion
+    - corpus_sync
+    - minimization
+    - import
+  description: How this corpus entry was created
+  example: "mutation"
+
+MutationInfo:
+  type: object
+  description: Information about how this entry was generated through mutation
+  properties:
+    mutator:
+      type: string
+      maxLength: 100
+      description: Name of the mutator that generated this entry
+      example: "bit_flip"
+    mutation_type:
+      type: string
+      enum: [bit_flip, byte_flip, arithmetic, interesting_values, dictionary, splice, custom]
+      description: Type of mutation applied
+      example: "bit_flip"
+    mutation_offset:
+      type: integer
+      minimum: 0
+      description: Byte offset where mutation was applied
+      example: 42
+    mutation_length:
+      type: integer
+      minimum: 0
+      description: Length of the mutation in bytes
+      example: 4
+    mutation_data:
+      type: string
+      format: byte
+      maxLength: 1000
+      description: Base64-encoded mutation data
+      example: "ZGVhZGJlZWY="
+    fuzzer_cycle:
+      type: integer
+      minimum: 0
+      description: Fuzzer cycle when this was generated
+      example: 125000
+
+CorpusCollection:
+  type: object
+  description: A named collection of corpus entries
+  required:
+    - id
+    - name
+    - entry_count
+    - total_size
+    - created_at
+    - updated_at
+  properties:
+    id:
+      type: string
+      format: uuid
+      description: Unique collection identifier
+      example: "550e8400-e29b-41d4-a716-446655440005"
+    name:
+      type: string
+      maxLength: 200
+      description: Human-readable collection name
+      example: "HTTP Request Corpus"
+    description:
+      type: string
+      maxLength: 1000
+      description: Collection description
+      example: "Curated corpus of HTTP requests for parser testing"
+    collection_type:
+      type: string
+      enum: [seed, generated, curated, temporary, archive]
+      description: Type of corpus collection
+      example: "curated"
+    campaign_id:
+      type: string
+      format: uuid
+      nullable: true
+      description: Associated campaign ID
+      example: "550e8400-e29b-41d4-a716-446655440002"
+    owner:
+      type: string
+      maxLength: 100
+      description: Collection owner
+      example: "security-team"
+    entry_count:
+      type: integer
+      minimum: 0
+      description: Number of entries in collection
+      example: 1500
+    total_size:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total size of all entries in bytes
+      example: 104857600
+    coverage_edges:
+      type: integer
+      minimum: 0
+      description: Total unique coverage edges
+      example: 25600
+    created_at:
+      type: string
+      format: date-time
+      description: Collection creation timestamp
+      example: "2023-12-01T08:00:00Z"
+    updated_at:
+      type: string
+      format: date-time
+      description: Last update timestamp
+      example: "2023-12-01T14:30:00Z"
+    access_policy:
+      $ref: '#/AccessPolicy'
+    sync_config:
+      $ref: '#/SyncConfig'
+    tags:
+      type: array
+      description: Collection tags
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+        maxLength: 50
+      maxItems: 20
+      example: ["baseline", "high-quality", "production"]
+    metadata:
+      type: object
+      description: Additional collection metadata
+      additionalProperties:
+        type: string
+      maxProperties: 30
+
+AccessPolicy:
+  type: object
+  description: Access control policy for corpus collection
+  properties:
+    visibility:
+      type: string
+      enum: [public, private, campaign_only, owner_only]
+      default: campaign_only
+      description: Who can access this collection
+      example: "campaign_only"
+    read_permissions:
+      type: array
+      description: Users/groups with read access
+      items:
+        type: string
+        maxLength: 100
+      maxItems: 50
+    write_permissions:
+      type: array
+      description: Users/groups with write access
+      items:
+        type: string
+        maxLength: 100
+      maxItems: 20
+    allow_download:
+      type: boolean
+      default: true
+      description: Allow downloading collection contents
+    allow_sync:
+      type: boolean
+      default: true
+      description: Allow syncing with other collections
+
+SyncConfig:
+  type: object
+  description: Configuration for corpus synchronization
+  properties:
+    auto_sync:
+      type: boolean
+      default: false
+      description: Enable automatic synchronization
+    sync_interval:
+      $ref: 'common.yaml#/Duration'
+      description: Synchronization interval
+      example: "10m"
+    sync_targets:
+      type: array
+      description: Target collections for synchronization
+      items:
+        type: string
+        format: uuid
+      maxItems: 10
+    sync_filters:
+      $ref: '#/SyncFilters'
+    last_sync:
+      type: string
+      format: date-time
+      nullable: true
+      description: Last synchronization timestamp
+      example: "2023-12-01T14:00:00Z"
+
+SyncFilters:
+  type: object
+  description: Filters for corpus synchronization
+  properties:
+    min_coverage:
+      type: integer
+      minimum: 0
+      description: Minimum coverage edges required
+      example: 100
+    max_size:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Maximum file size in bytes
+      example: 1048576
+    min_generation:
+      type: integer
+      minimum: 0
+      description: Minimum generation number
+      example: 0
+    max_generation:
+      type: integer
+      minimum: 0
+      description: Maximum generation number
+      example: 50
+    include_sources:
+      type: array
+      description: Include only these sources
+      items:
+        $ref: '#/CorpusSource'
+    exclude_sources:
+      type: array
+      description: Exclude these sources
+      items:
+        $ref: '#/CorpusSource'
+    include_tags:
+      type: array
+      description: Include only entries with these tags
+      items:
+        type: string
+      maxItems: 20
+    exclude_tags:
+      type: array
+      description: Exclude entries with these tags
+      items:
+        type: string
+      maxItems: 20
+    created_after:
+      type: string
+      format: date-time
+      description: Include only entries created after this time
+    priority_threshold:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 1
+      description: Minimum priority score
+      example: 0.5
+
+CorpusSync:
+  type: object
+  description: Request to synchronize corpus between collections or campaigns
+  required:
+    - source_type
+    - source_id
+    - target_type
+    - target_id
+  properties:
+    source_type:
+      type: string
+      enum: [collection, campaign, job]
+      description: Type of synchronization source
+      example: "campaign"
+    source_id:
+      type: string
+      format: uuid
+      description: Source identifier
+      example: "550e8400-e29b-41d4-a716-446655440002"
+    target_type:
+      type: string
+      enum: [collection, campaign, job]
+      description: Type of synchronization target
+      example: "campaign"
+    target_id:
+      type: string
+      format: uuid
+      description: Target identifier
+      example: "550e8400-e29b-41d4-a716-446655440006"
+    sync_mode:
+      type: string
+      enum: [copy, move, link, mirror]
+      default: copy
+      description: How to synchronize entries
+      example: "copy"
+    filters:
+      $ref: '#/SyncFilters'
+    dry_run:
+      type: boolean
+      default: false
+      description: Perform validation without actual sync
+    bidirectional:
+      type: boolean
+      default: false
+      description: Synchronize in both directions
+    conflict_resolution:
+      type: string
+      enum: [skip, overwrite, rename, error]
+      default: skip
+      description: How to handle conflicts
+      example: "skip"
+
+CorpusSyncResponse:
+  type: object
+  description: Result of corpus synchronization operation
+  required:
+    - sync_id
+    - status
+    - started_at
+    - entries_processed
+    - entries_synced
+    - entries_skipped
+    - bytes_transferred
+  properties:
+    sync_id:
+      type: string
+      format: uuid
+      description: Unique synchronization operation ID
+      example: "550e8400-e29b-41d4-a716-446655440007"
+    status:
+      type: string
+      enum: [running, completed, failed, cancelled]
+      description: Synchronization status
+      example: "completed"
+    started_at:
+      type: string
+      format: date-time
+      description: When synchronization started
+      example: "2023-12-01T14:00:00Z"
+    completed_at:
+      type: string
+      format: date-time
+      nullable: true
+      description: When synchronization completed
+      example: "2023-12-01T14:05:30Z"
+    entries_processed:
+      type: integer
+      minimum: 0
+      description: Total entries processed
+      example: 1500
+    entries_synced:
+      type: integer
+      minimum: 0
+      description: Entries successfully synchronized
+      example: 1200
+    entries_skipped:
+      type: integer
+      minimum: 0
+      description: Entries skipped due to filters or conflicts
+      example: 250
+    entries_failed:
+      type: integer
+      minimum: 0
+      description: Entries that failed to sync
+      example: 50
+    bytes_transferred:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total bytes transferred
+      example: 125829120
+    processing_time:
+      $ref: 'common.yaml#/Duration'
+      description: Total processing time
+      example: "5m30s"
+    errors:
+      type: array
+      description: Error messages if any failures occurred
+      items:
+        type: string
+        maxLength: 500
+      maxItems: 100
+    warnings:
+      type: array
+      description: Warning messages
+      items:
+        type: string
+        maxLength: 500
+      maxItems: 100
+
+QuarantineRequest:
+  type: object
+  description: Request to quarantine corpus entries
+  required:
+    - entries
+    - reason
+  properties:
+    entries:
+      type: array
+      description: Corpus entry IDs to quarantine
+      items:
+        type: string
+        format: uuid
+      minItems: 1
+      maxItems: 1000
+      example: ["550e8400-e29b-41d4-a716-446655440003"]
+    reason:
+      type: string
+      maxLength: 500
+      description: Reason for quarantine
+      example: "Causes excessive memory usage leading to OOM kills"
+    severity:
+      type: string
+      enum: [low, medium, high, critical]
+      default: medium
+      description: Severity level of the issue
+      example: "high"
+    automatic:
+      type: boolean
+      default: false
+      description: Whether this was an automatic quarantine
+    duration:
+      $ref: 'common.yaml#/Duration'
+      description: Quarantine duration (empty = indefinite)
+      example: "24h"
+    requester:
+      type: string
+      maxLength: 100
+      description: Who requested the quarantine
+      example: "bot-monitor-system"
+
+QuarantineResponse:
+  type: object
+  description: Response to quarantine request
+  required:
+    - quarantined_count
+    - failed_count
+    - quarantine_id
+  properties:
+    quarantined_count:
+      type: integer
+      minimum: 0
+      description: Number of entries successfully quarantined
+      example: 1
+    failed_count:
+      type: integer
+      minimum: 0
+      description: Number of entries that failed to quarantine
+      example: 0
+    quarantine_id:
+      type: string
+      format: uuid
+      description: Unique quarantine operation ID
+      example: "550e8400-e29b-41d4-a716-446655440008"
+    results:
+      type: array
+      description: Per-entry quarantine results
+      items:
+        type: object
+        properties:
+          entry_id:
+            type: string
+            format: uuid
+          status:
+            type: string
+            enum: [quarantined, failed, already_quarantined]
+          message:
+            type: string
+    quarantine_expires_at:
+      type: string
+      format: date-time
+      nullable: true
+      description: When quarantine expires (if temporary)
+      example: "2023-12-02T14:00:00Z"
+
+CorpusListResponse:
+  type: object
+  description: Paginated list of corpus entries
+  required:
+    - entries
+    - pagination
+  properties:
+    entries:
+      type: array
+      items:
+        $ref: '#/CorpusEntry'
+    pagination:
+      $ref: 'common.yaml#/Pagination'
+    filters:
+      type: object
+      description: Applied filters
+      properties:
+        campaign_id:
+          type: string
+          format: uuid
+        job_id:
+          type: string
+          format: uuid
+        source:
+          type: array
+          items:
+            $ref: '#/CorpusSource'
+        min_coverage:
+          type: integer
+        max_size:
+          type: integer
+        is_quarantined:
+          type: boolean
+        tags:
+          type: array
+          items:
+            type: string
+    statistics:
+      type: object
+      description: Summary statistics
+      properties:
+        total_entries:
+          type: integer
+        total_size_bytes:
+          type: integer
+          format: int64
+        unique_coverage_edges:
+          type: integer
+        average_size:
+          type: number
+          format: float
+        source_breakdown:
+          type: object
+          additionalProperties:
+            type: integer
+
+CorpusUploadRequest:
+  type: object
+  description: Request to upload corpus files
+  required:
+    - files
+  properties:
+    collection_id:
+      type: string
+      format: uuid
+      description: Target collection ID
+      example: "550e8400-e29b-41d4-a716-446655440005"
+    campaign_id:
+      type: string
+      format: uuid
+      description: Associated campaign ID
+      example: "550e8400-e29b-41d4-a716-446655440002"
+    job_id:
+      type: string
+      format: uuid
+      description: Associated job ID
+      example: "550e8400-e29b-41d4-a716-446655440001"
+    files:
+      type: array
+      description: Files to upload (multipart form data)
+      items:
+        type: string
+        format: binary
+      minItems: 1
+      maxItems: 1000
+    source:
+      $ref: '#/CorpusSource'
+      default: manual_upload
+    tags:
+      type: array
+      description: Tags to apply to uploaded entries
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+        maxLength: 50
+      maxItems: 20
+    deduplicate:
+      type: boolean
+      default: true
+      description: Check for duplicates before uploading
+    overwrite_duplicates:
+      type: boolean
+      default: false
+      description: Overwrite existing duplicate entries
+
+CorpusUploadResponse:
+  type: object
+  description: Response to corpus upload request
+  required:
+    - upload_id
+    - total_files
+    - uploaded_count
+    - duplicate_count
+    - failed_count
+    - total_bytes
+  properties:
+    upload_id:
+      type: string
+      format: uuid
+      description: Unique upload operation ID
+      example: "550e8400-e29b-41d4-a716-446655440009"
+    total_files:
+      type: integer
+      minimum: 0
+      description: Total files in upload request
+      example: 100
+    uploaded_count:
+      type: integer
+      minimum: 0
+      description: Files successfully uploaded
+      example: 95
+    duplicate_count:
+      type: integer
+      minimum: 0
+      description: Files skipped as duplicates
+      example: 3
+    failed_count:
+      type: integer
+      minimum: 0
+      description: Files that failed to upload
+      example: 2
+    total_bytes:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total bytes uploaded
+      example: 52428800
+    processing_time:
+      $ref: 'common.yaml#/Duration'
+      description: Upload processing time
+      example: "45s"
+    uploaded_entries:
+      type: array
+      description: Successfully uploaded entries
+      items:
+        type: object
+        properties:
+          entry_id:
+            type: string
+            format: uuid
+          filename:
+            type: string
+          size:
+            type: integer
+          sha256:
+            type: string
+    errors:
+      type: array
+      description: Upload errors
+      items:
+        type: object
+        properties:
+          filename:
+            type: string
+          error:
+            type: string
+          details:
+            type: string

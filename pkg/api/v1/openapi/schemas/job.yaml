@@ -1,0 +1,609 @@
+# Job resource schemas for PandaFuzz API v1
+# Manages fuzzing job creation, execution, and monitoring
+
+Job:
+  type: object
+  description: A fuzzing job that executes on a bot
+  required:
+    - id
+    - name
+    - target_binary
+    - fuzzer_type
+    - status
+    - config
+    - created_at
+    - timeout_at
+    - priority
+  properties:
+    id:
+      type: string
+      format: uuid
+      description: Unique job identifier
+      example: "550e8400-e29b-41d4-a716-446655440001"
+    name:
+      type: string
+      maxLength: 200
+      description: Human-readable job name
+      example: "Security test of web parser"
+    description:
+      type: string
+      maxLength: 1000
+      description: Detailed job description
+      example: "Fuzzing HTTP request parser for buffer overflow vulnerabilities"
+    target_binary:
+      type: string
+      maxLength: 500
+      description: Path or identifier of the target binary
+      example: "/usr/bin/http_parser"
+    fuzzer_type:
+      $ref: 'common.yaml#/FuzzerType'
+    status:
+      $ref: '#/JobStatus'
+    config:
+      $ref: '#/JobConfig'
+    campaign_id:
+      type: string
+      format: uuid
+      nullable: true
+      description: Associated campaign ID
+      example: "550e8400-e29b-41d4-a716-446655440002"
+    bot_id:
+      type: string
+      format: uuid
+      nullable: true
+      description: Assigned bot ID
+      example: "550e8400-e29b-41d4-a716-446655440000"
+    priority:
+      type: integer
+      minimum: 1
+      maximum: 10
+      description: Job priority (1=lowest, 10=highest)
+      example: 5
+    created_at:
+      type: string
+      format: date-time
+      description: Job creation timestamp
+      example: "2023-12-01T10:30:00Z"
+    assigned_at:
+      type: string
+      format: date-time
+      nullable: true
+      description: When job was assigned to a bot
+      example: "2023-12-01T10:35:00Z"
+    started_at:
+      type: string
+      format: date-time
+      nullable: true
+      description: When job execution started
+      example: "2023-12-01T10:36:00Z"
+    completed_at:
+      type: string
+      format: date-time
+      nullable: true
+      description: When job execution completed
+      example: "2023-12-01T12:06:00Z"
+    timeout_at:
+      type: string
+      format: date-time
+      description: When job will timeout
+      example: "2023-12-01T12:30:00Z"
+    progress:
+      $ref: '#/JobProgress'
+    results:
+      $ref: '#/JobResult'
+    tags:
+      type: array
+      description: Job classification tags
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+        maxLength: 50
+      maxItems: 20
+      example: ["security", "regression", "nightly"]
+    metadata:
+      type: object
+      description: Additional job metadata
+      additionalProperties:
+        type: string
+      example:
+        source: "ci_pipeline"
+        commit_hash: "a1b2c3d4"
+
+JobStatus:
+  type: string
+  enum:
+    - pending
+    - queued
+    - assigned
+    - running
+    - completed
+    - failed
+    - timeout
+    - cancelled
+    - paused
+  description: Current status of the job
+  example: "running"
+
+JobConfig:
+  type: object
+  description: Configuration parameters for job execution
+  required:
+    - duration
+    - resource_limits
+  properties:
+    duration:
+      $ref: 'common.yaml#/Duration'
+      description: Maximum execution duration
+      example: "1h30m"
+    resource_limits:
+      $ref: 'common.yaml#/ResourceLimits'
+    fuzzer_args:
+      type: array
+      description: Additional arguments for the fuzzer
+      items:
+        type: string
+        maxLength: 100
+      maxItems: 50
+      example: ["-m", "none", "-t", "5000"]
+    dictionary_path:
+      type: string
+      maxLength: 500
+      description: Path to fuzzing dictionary file
+      example: "/data/dictionaries/http.dict"
+    seed_corpus:
+      type: array
+      description: Initial corpus file paths or IDs
+      items:
+        type: string
+        maxLength: 500
+      maxItems: 1000
+      example: ["/data/corpus/seed1", "/data/corpus/seed2"]
+    environment_variables:
+      type: object
+      description: Environment variables for job execution
+      additionalProperties:
+        type: string
+        maxLength: 1000
+      maxProperties: 100
+      example:
+        ASAN_OPTIONS: "detect_odr_violation=0"
+        MSAN_OPTIONS: "print_stats=1"
+    working_directory:
+      type: string
+      maxLength: 500
+      description: Working directory for job execution
+      example: "/tmp/job_550e8400"
+    output_directory:
+      type: string
+      maxLength: 500
+      description: Directory for job outputs
+      example: "/data/outputs/550e8400"
+    enable_coverage:
+      type: boolean
+      default: false
+      description: Enable code coverage collection
+    coverage_format:
+      type: string
+      enum: [json, html, lcov, cobertura]
+      default: json
+      description: Coverage report format
+    sanitizers:
+      type: array
+      description: Enabled sanitizers
+      items:
+        type: string
+        enum: [asan, msan, tsan, ubsan]
+      uniqueItems: true
+      example: ["asan", "ubsan"]
+    minimize_crashes:
+      type: boolean
+      default: true
+      description: Automatically minimize found crashes
+    deduplicate_crashes:
+      type: boolean
+      default: true
+      description: Deduplicate crashes by stack trace
+
+JobProgress:
+  type: object
+  description: Real-time job execution progress
+  required:
+    - percent_complete
+    - executions_total
+    - executions_per_second
+    - crashes_found
+    - updated_at
+  properties:
+    percent_complete:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 100
+      description: Completion percentage
+      example: 75.5
+    executions_total:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total number of executions
+      example: 1500000
+    executions_per_second:
+      type: number
+      format: float
+      minimum: 0
+      description: Current execution rate
+      example: 1250.75
+    crashes_found:
+      type: integer
+      minimum: 0
+      description: Number of crashes discovered
+      example: 5
+    unique_crashes:
+      type: integer
+      minimum: 0
+      description: Number of unique crashes
+      example: 3
+    coverage_edges:
+      type: integer
+      minimum: 0
+      description: Code coverage edges discovered
+      example: 15420
+    corpus_size:
+      type: integer
+      minimum: 0
+      description: Current corpus size in files
+      example: 1250
+    corpus_bytes:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Current corpus size in bytes
+      example: 104857600
+    last_new_path:
+      type: string
+      format: date-time
+      nullable: true
+      description: When last new path was found
+      example: "2023-12-01T11:45:30Z"
+    last_crash:
+      type: string
+      format: date-time
+      nullable: true
+      description: When last crash was found
+      example: "2023-12-01T11:30:15Z"
+    updated_at:
+      type: string
+      format: date-time
+      description: When progress was last updated
+      example: "2023-12-01T11:50:00Z"
+
+JobResult:
+  type: object
+  description: Final results of job execution
+  properties:
+    exit_code:
+      type: integer
+      description: Job exit code
+      example: 0
+    execution_time:
+      $ref: 'common.yaml#/Duration'
+      description: Actual execution time
+      example: "1h25m30s"
+    total_executions:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total executions performed
+      example: 2000000
+    average_exec_per_second:
+      type: number
+      format: float
+      minimum: 0
+      description: Average execution rate
+      example: 1150.5
+    crashes_total:
+      type: integer
+      minimum: 0
+      description: Total crashes found
+      example: 8
+    crashes_unique:
+      type: integer
+      minimum: 0
+      description: Unique crashes found
+      example: 5
+    coverage_final:
+      type: integer
+      minimum: 0
+      description: Final coverage edges
+      example: 16750
+    corpus_final_size:
+      type: integer
+      minimum: 0
+      description: Final corpus size in files
+      example: 1850
+    corpus_final_bytes:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Final corpus size in bytes
+      example: 157286400
+    peak_memory_usage:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Peak memory usage in bytes
+      example: 536870912
+    disk_usage:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total disk usage in bytes
+      example: 1073741824
+    error_message:
+      type: string
+      maxLength: 2000
+      description: Error message if job failed
+      example: "Timeout: exceeded maximum duration"
+    warnings:
+      type: array
+      description: Warning messages during execution
+      items:
+        type: string
+        maxLength: 500
+      maxItems: 50
+
+JobRequest:
+  type: object
+  description: Request to create a new fuzzing job
+  required:
+    - name
+    - target_binary
+    - fuzzer_type
+    - config
+  properties:
+    name:
+      type: string
+      maxLength: 200
+      description: Human-readable job name
+      example: "HTTP parser security test"
+    description:
+      type: string
+      maxLength: 1000
+      description: Detailed job description
+      example: "Comprehensive fuzzing of HTTP request parser"
+    target_binary:
+      type: string
+      maxLength: 500
+      description: Target binary path or identifier
+      example: "/usr/bin/http_parser"
+    fuzzer_type:
+      $ref: 'common.yaml#/FuzzerType'
+    config:
+      $ref: '#/JobConfig'
+    campaign_id:
+      type: string
+      format: uuid
+      description: Associated campaign ID
+      example: "550e8400-e29b-41d4-a716-446655440002"
+    priority:
+      type: integer
+      minimum: 1
+      maximum: 10
+      default: 5
+      description: Job priority
+      example: 7
+    schedule_after:
+      type: string
+      format: date-time
+      description: Earliest execution time
+      example: "2023-12-01T15:00:00Z"
+    depends_on:
+      type: array
+      description: Job dependencies (must complete first)
+      items:
+        type: string
+        format: uuid
+      maxItems: 10
+    tags:
+      type: array
+      description: Classification tags
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+        maxLength: 50
+      maxItems: 20
+      example: ["security", "high-priority"]
+    metadata:
+      type: object
+      description: Additional metadata
+      additionalProperties:
+        type: string
+      maxProperties: 50
+
+JobListResponse:
+  type: object
+  description: Paginated list of jobs
+  required:
+    - jobs
+    - pagination
+  properties:
+    jobs:
+      type: array
+      items:
+        $ref: '#/Job'
+    pagination:
+      $ref: 'common.yaml#/Pagination'
+    filters:
+      type: object
+      description: Applied filters
+      properties:
+        status:
+          type: array
+          items:
+            $ref: '#/JobStatus'
+        fuzzer_type:
+          type: array
+          items:
+            $ref: 'common.yaml#/FuzzerType'
+        campaign_id:
+          type: string
+          format: uuid
+        bot_id:
+          type: string
+          format: uuid
+        priority_min:
+          type: integer
+        priority_max:
+          type: integer
+        created_after:
+          type: string
+          format: date-time
+        created_before:
+          type: string
+          format: date-time
+
+JobLogEntry:
+  type: object
+  description: Single log entry from job execution
+  required:
+    - timestamp
+    - level
+    - message
+  properties:
+    timestamp:
+      type: string
+      format: date-time
+      description: Log entry timestamp
+      example: "2023-12-01T11:30:15.123Z"
+    level:
+      type: string
+      enum: [trace, debug, info, warn, error, fatal]
+      description: Log level
+      example: "info"
+    message:
+      type: string
+      maxLength: 2000
+      description: Log message
+      example: "Found new crash: timeout after 5000ms"
+    source:
+      type: string
+      maxLength: 100
+      description: Log source component
+      example: "fuzzer_engine"
+    job_id:
+      type: string
+      format: uuid
+      description: Associated job ID
+      example: "550e8400-e29b-41d4-a716-446655440001"
+    context:
+      type: object
+      description: Additional log context
+      additionalProperties:
+        type: string
+      maxProperties: 20
+
+JobLogsResponse:
+  type: object
+  description: Collection of job log entries
+  required:
+    - job_id
+    - logs
+    - total_entries
+  properties:
+    job_id:
+      type: string
+      format: uuid
+      description: Job identifier
+      example: "550e8400-e29b-41d4-a716-446655440001"
+    logs:
+      type: array
+      items:
+        $ref: '#/JobLogEntry'
+      maxItems: 10000
+    total_entries:
+      type: integer
+      minimum: 0
+      description: Total number of log entries available
+      example: 15000
+    pagination:
+      $ref: 'common.yaml#/Pagination'
+    filters:
+      type: object
+      description: Applied log filters
+      properties:
+        level:
+          type: array
+          items:
+            type: string
+            enum: [trace, debug, info, warn, error, fatal]
+        since:
+          type: string
+          format: date-time
+        until:
+          type: string
+          format: date-time
+        source:
+          type: string
+
+JobActionRequest:
+  type: object
+  description: Request to perform an action on a job
+  required:
+    - action
+  properties:
+    action:
+      type: string
+      enum: [start, pause, resume, cancel, restart]
+      description: Action to perform
+      example: "pause"
+    reason:
+      type: string
+      maxLength: 500
+      description: Reason for the action
+      example: "Pausing for system maintenance"
+    force:
+      type: boolean
+      default: false
+      description: Force the action even if risky
+    scheduled_at:
+      type: string
+      format: date-time
+      description: When to perform the action
+      example: "2023-12-01T15:00:00Z"
+
+JobActionResponse:
+  type: object
+  description: Response to job action request
+  required:
+    - job_id
+    - action
+    - status
+    - performed_at
+  properties:
+    job_id:
+      type: string
+      format: uuid
+      description: Job identifier
+      example: "550e8400-e29b-41d4-a716-446655440001"
+    action:
+      type: string
+      enum: [start, pause, resume, cancel, restart]
+      description: Action that was performed
+      example: "pause"
+    status:
+      type: string
+      enum: [accepted, rejected, completed, failed]
+      description: Action result status
+      example: "completed"
+    performed_at:
+      type: string
+      format: date-time
+      description: When action was performed
+      example: "2023-12-01T12:00:00Z"
+    message:
+      type: string
+      maxLength: 500
+      description: Additional status message
+      example: "Job paused successfully"
+    new_job_status:
+      $ref: '#/JobStatus'

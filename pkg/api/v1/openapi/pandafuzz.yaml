@@ -1,0 +1,4152 @@
+openapi: 3.0.3
+info:
+  title: PandaFuzz API
+  version: 1.0.0
+  description: |
+    PandaFuzz distributed fuzzing orchestration platform API.
+    
+    This API provides comprehensive access to all platform features including:
+    - Bot management and orchestration
+    - Job lifecycle management
+    - Campaign coordination
+    - Corpus synchronization and management
+    - Crash analysis and deduplication
+    - Real-time analytics and monitoring
+    
+    ## Authentication
+    The API supports both JWT Bearer tokens and API keys for authentication.
+    
+    ## Rate Limiting
+    API endpoints are rate-limited based on authentication method:
+    - Authenticated requests: 1000 requests per hour
+    - Unauthenticated requests: 100 requests per hour
+    
+    ## Pagination
+    List endpoints support both offset-based and cursor-based pagination.
+    
+    ## Field Selection
+    Use the `fields` query parameter to specify which fields to include in responses.
+  contact:
+    name: PandaFuzz Team
+    url: https://github.com/ethpandaops/pandafuzz
+    email: support@ethpandaops.io
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development server
+  - url: https://pandafuzz.staging.ethpandaops.io/api/v1
+    description: Staging environment
+  - url: https://pandafuzz.ethpandaops.io/api/v1
+    description: Production environment
+
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+
+tags:
+  - name: bots
+    description: Bot agent management and orchestration
+  - name: jobs
+    description: Fuzzing job lifecycle management
+  - name: campaigns
+    description: Campaign coordination and management
+  - name: corpus
+    description: Corpus synchronization and management
+  - name: crashes
+    description: Crash analysis and deduplication
+  - name: analytics
+    description: Performance metrics and analytics
+  - name: events
+    description: Real-time event streaming
+  - name: batch
+    description: Batch operations for performance
+  - name: health
+    description: System health and monitoring
+
+paths:
+  # Health and System Status
+  /health:
+    get:
+      tags: [health]
+      summary: System health check
+      description: Check the overall health status of the PandaFuzz system
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: System is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+              example:
+                status: healthy
+                timestamp: "2024-01-15T10:30:00Z"
+                version: "1.0.0"
+                uptime: "PT72H30M15S"
+                checks:
+                  database:
+                    status: healthy
+                    latency_ms: 2
+                  storage:
+                    status: healthy
+                    available_space_gb: 500
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /ready:
+    get:
+      tags: [health]
+      summary: Readiness probe
+      description: Check if the system is ready to accept requests
+      operationId: getReadiness
+      security: []
+      responses:
+        '200':
+          description: System is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessStatus'
+              example:
+                ready: true
+                timestamp: "2024-01-15T10:30:00Z"
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  # Bot Management
+  /bots:
+    get:
+      tags: [bots]
+      summary: List bots
+      description: Retrieve a paginated list of registered bots with optional filtering
+      operationId: listBots
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/FieldsParam'
+        - name: status
+          in: query
+          description: Filter by bot status
+          schema:
+            $ref: '#/components/schemas/BotStatus'
+        - name: capabilities
+          in: query
+          description: Filter by bot capabilities (comma-separated)
+          schema:
+            type: string
+            example: "fuzzing,analysis"
+        - name: online_only
+          in: query
+          description: Only return online bots
+          schema:
+            type: boolean
+            default: false
+        - $ref: '#/components/parameters/SortParam'
+      responses:
+        '200':
+          description: Successfully retrieved bots
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BotListResponse'
+              example:
+                data:
+                  - id: "01234567-89ab-cdef-0123-456789abcdef"
+                    name: "fuzzer-bot-01"
+                    hostname: "worker-001.internal"
+                    status: idle
+                    capabilities: ["fuzzing", "analysis"]
+                    last_heartbeat: "2024-01-15T10:30:00Z"
+                    is_online: true
+                    current_job_id: null
+                    registered_at: "2024-01-15T08:00:00Z"
+                pagination:
+                  total: 150
+                  limit: 50
+                  offset: 0
+                  has_more: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags: [bots]
+      summary: Register a new bot
+      description: Register a new bot agent with the system
+      operationId: createBot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BotCreateRequest'
+            example:
+              name: "fuzzer-bot-02"
+              hostname: "worker-002.internal"
+              capabilities: ["fuzzing", "analysis"]
+              api_endpoint: "http://worker-002.internal:8081"
+              metadata:
+                region: "us-west-2"
+                instance_type: "c5.xlarge"
+      responses:
+        '201':
+          description: Bot successfully registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bot'
+              example:
+                id: "01234567-89ab-cdef-0123-456789abcdef"
+                name: "fuzzer-bot-02"
+                hostname: "worker-002.internal"
+                status: idle
+                capabilities: ["fuzzing", "analysis"]
+                last_heartbeat: "2024-01-15T10:30:00Z"
+                is_online: true
+                current_job_id: null
+                registered_at: "2024-01-15T10:30:00Z"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /bots/{botId}:
+    parameters:
+      - $ref: '#/components/parameters/BotIdParam'
+
+    get:
+      tags: [bots]
+      summary: Get bot details
+      description: Retrieve detailed information about a specific bot
+      operationId: getBot
+      parameters:
+        - $ref: '#/components/parameters/FieldsParam'
+      responses:
+        '200':
+          description: Successfully retrieved bot details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bot'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags: [bots]
+      summary: Update bot
+      description: Update bot information and configuration
+      operationId: updateBot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BotUpdateRequest'
+      responses:
+        '200':
+          description: Bot successfully updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bot'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags: [bots]
+      summary: Unregister bot
+      description: Remove a bot from the system
+      operationId: deleteBot
+      responses:
+        '204':
+          description: Bot successfully unregistered
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Cannot delete bot with active jobs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /bots/{botId}/heartbeat:
+    parameters:
+      - $ref: '#/components/parameters/BotIdParam'
+
+    post:
+      tags: [bots]
+      summary: Send bot heartbeat
+      description: Update bot status and last seen timestamp
+      operationId: sendBotHeartbeat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BotHeartbeatRequest'
+            example:
+              status: busy
+              current_job_id: "01234567-89ab-cdef-0123-456789abcdef"
+              resource_usage:
+                cpu_percent: 75.5
+                memory_bytes: 2147483648
+                disk_usage_bytes: 10737418240
+      responses:
+        '200':
+          description: Heartbeat acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BotHeartbeatResponse'
+              example:
+                acknowledged: true
+                next_heartbeat_interval_seconds: 30
+                assigned_job_id: "01234567-89ab-cdef-0123-456789abcdef"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /bots/{botId}/jobs:
+    parameters:
+      - $ref: '#/components/parameters/BotIdParam'
+
+    get:
+      tags: [bots]
+      summary: Get bot jobs
+      description: Retrieve jobs assigned to or executed by this bot
+      operationId: getBotJobs
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - name: status
+          in: query
+          description: Filter by job status
+          schema:
+            $ref: '#/components/schemas/JobStatus'
+      responses:
+        '200':
+          description: Successfully retrieved bot jobs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # Job Management
+  /jobs:
+    get:
+      tags: [jobs]
+      summary: List jobs
+      description: Retrieve a paginated list of jobs with optional filtering
+      operationId: listJobs
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/FieldsParam'
+        - name: status
+          in: query
+          description: Filter by job status
+          schema:
+            $ref: '#/components/schemas/JobStatus'
+        - name: campaign_id
+          in: query
+          description: Filter by campaign ID
+          schema:
+            type: string
+            format: uuid
+        - name: bot_id
+          in: query
+          description: Filter by assigned bot ID
+          schema:
+            type: string
+            format: uuid
+        - name: fuzzer
+          in: query
+          description: Filter by fuzzer type
+          schema:
+            $ref: '#/components/schemas/FuzzerType'
+        - $ref: '#/components/parameters/SortParam'
+      responses:
+        '200':
+          description: Successfully retrieved jobs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobListResponse'
+              example:
+                data:
+                  - id: "01234567-89ab-cdef-0123-456789abcdef"
+                    name: "libfuzzer-test-job"
+                    status: running
+                    fuzzer: libfuzzer
+                    campaign_id: "01234567-89ab-cdef-0123-456789abcdef"
+                    assigned_bot_id: "01234567-89ab-cdef-0123-456789abcdef"
+                    created_at: "2024-01-15T10:00:00Z"
+                    started_at: "2024-01-15T10:05:00Z"
+                    timeout_at: "2024-01-15T11:00:00Z"
+                pagination:
+                  total: 75
+                  limit: 20
+                  offset: 0
+                  has_more: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags: [jobs]
+      summary: Create a new job
+      description: Submit a new fuzzing job to the system
+      operationId: createJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobCreateRequest'
+            example:
+              name: "libfuzzer-target-test"
+              fuzzer: libfuzzer
+              target_binary: "/path/to/target"
+              campaign_id: "01234567-89ab-cdef-0123-456789abcdef"
+              timeout_seconds: 3600
+              config:
+                max_total_time: 3600
+                max_len: 1024
+                use_value_profile: true
+              enable_coverage: true
+      responses:
+        '201':
+          description: Job successfully created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{jobId}:
+    parameters:
+      - $ref: '#/components/parameters/JobIdParam'
+
+    get:
+      tags: [jobs]
+      summary: Get job details
+      description: Retrieve detailed information about a specific job
+      operationId: getJob
+      parameters:
+        - $ref: '#/components/parameters/FieldsParam'
+      responses:
+        '200':
+          description: Successfully retrieved job details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags: [jobs]
+      summary: Update job
+      description: Update job configuration and parameters
+      operationId: updateJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobUpdateRequest'
+      responses:
+        '200':
+          description: Job successfully updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Cannot update running job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags: [jobs]
+      summary: Cancel job
+      description: Cancel a pending or running job
+      operationId: deleteJob
+      responses:
+        '204':
+          description: Job successfully cancelled
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Cannot cancel completed job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{jobId}/logs:
+    parameters:
+      - $ref: '#/components/parameters/JobIdParam'
+
+    get:
+      tags: [jobs]
+      summary: Get job logs
+      description: Retrieve execution logs for a job
+      operationId: getJobLogs
+      parameters:
+        - name: follow
+          in: query
+          description: Stream logs in real-time (Server-Sent Events)
+          schema:
+            type: boolean
+            default: false
+        - name: tail
+          in: query
+          description: Number of lines to return from the end
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+            default: 1000
+        - name: since
+          in: query
+          description: Only return logs after this timestamp
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Successfully retrieved job logs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobLogsResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-sent events stream for real-time logs
+              example: |
+                data: {"timestamp": "2024-01-15T10:30:00Z", "level": "info", "message": "Starting fuzzing session"}
+                
+                data: {"timestamp": "2024-01-15T10:30:01Z", "level": "info", "message": "Loaded 100 seed inputs"}
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{jobId}/coverage:
+    parameters:
+      - $ref: '#/components/parameters/JobIdParam'
+
+    get:
+      tags: [jobs]
+      summary: Get job coverage reports
+      description: Retrieve coverage reports generated by a job
+      operationId: getJobCoverage
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - name: format
+          in: query
+          description: Filter by coverage report format
+          schema:
+            $ref: '#/components/schemas/CoverageFormat'
+      responses:
+        '200':
+          description: Successfully retrieved coverage reports
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageReportListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{jobId}/coverage/{reportId}:
+    parameters:
+      - $ref: '#/components/parameters/JobIdParam'
+      - $ref: '#/components/parameters/ReportIdParam'
+
+    get:
+      tags: [jobs]
+      summary: Download coverage report
+      description: Download a specific coverage report file
+      operationId: downloadCoverageReport
+      responses:
+        '200':
+          description: Coverage report file
+          content:
+            application/json:
+              schema:
+                type: object
+                description: JSON coverage report
+            text/html:
+              schema:
+                type: string
+                description: HTML coverage report
+            text/plain:
+              schema:
+                type: string
+                description: LCOV or text coverage report
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: Binary coverage report
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{jobId}/artifacts:
+    parameters:
+      - $ref: '#/components/parameters/JobIdParam'
+
+    get:
+      tags: [jobs]
+      summary: List job artifacts
+      description: Retrieve artifacts generated by a job (crashes, corpus files, etc.)
+      operationId: getJobArtifacts
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - name: type
+          in: query
+          description: Filter by artifact type
+          schema:
+            type: string
+            enum: [crash, corpus, coverage, log]
+      responses:
+        '200':
+          description: Successfully retrieved job artifacts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # Campaign Management
+  /campaigns:
+    get:
+      tags: [campaigns]
+      summary: List campaigns
+      description: Retrieve a paginated list of campaigns with optional filtering
+      operationId: listCampaigns
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/FieldsParam'
+        - name: status
+          in: query
+          description: Filter by campaign status
+          schema:
+            $ref: '#/components/schemas/CampaignStatus'
+        - name: tags
+          in: query
+          description: Filter by tags (comma-separated)
+          schema:
+            type: string
+            example: "security,performance"
+        - $ref: '#/components/parameters/SortParam'
+      responses:
+        '200':
+          description: Successfully retrieved campaigns
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CampaignListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags: [campaigns]
+      summary: Create a new campaign
+      description: Create a new fuzzing campaign
+      operationId: createCampaign
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CampaignCreateRequest'
+            example:
+              name: "HTTP Parser Security Test"
+              description: "Comprehensive security testing of HTTP parser implementation"
+              target_binary: "/usr/bin/http-parser"
+              tags: ["security", "parser", "http"]
+              max_duration_seconds: 86400
+              job_template:
+                fuzzer: libfuzzer
+                timeout_seconds: 3600
+                config:
+                  max_total_time: 3600
+                  max_len: 4096
+      responses:
+        '201':
+          description: Campaign successfully created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Campaign'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /campaigns/{campaignId}:
+    parameters:
+      - $ref: '#/components/parameters/CampaignIdParam'
+
+    get:
+      tags: [campaigns]
+      summary: Get campaign details
+      description: Retrieve detailed information about a specific campaign
+      operationId: getCampaign
+      parameters:
+        - $ref: '#/components/parameters/FieldsParam'
+      responses:
+        '200':
+          description: Successfully retrieved campaign details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Campaign'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags: [campaigns]
+      summary: Update campaign
+      description: Update campaign configuration and settings
+      operationId: updateCampaign
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CampaignUpdateRequest'
+      responses:
+        '200':
+          description: Campaign successfully updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Campaign'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags: [campaigns]
+      summary: Delete campaign
+      description: Delete a campaign and all associated data
+      operationId: deleteCampaign
+      responses:
+        '204':
+          description: Campaign successfully deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Cannot delete campaign with active jobs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /campaigns/{campaignId}/start:
+    parameters:
+      - $ref: '#/components/parameters/CampaignIdParam'
+
+    post:
+      tags: [campaigns]
+      summary: Start campaign
+      description: Start or resume a campaign
+      operationId: startCampaign
+      responses:
+        '200':
+          description: Campaign successfully started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Campaign'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Campaign already running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /campaigns/{campaignId}/stop:
+    parameters:
+      - $ref: '#/components/parameters/CampaignIdParam'
+
+    post:
+      tags: [campaigns]
+      summary: Stop campaign
+      description: Stop or pause a running campaign
+      operationId: stopCampaign
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: Reason for stopping the campaign
+                  example: "User requested pause for analysis"
+      responses:
+        '200':
+          description: Campaign successfully stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Campaign'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Campaign not running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /campaigns/{campaignId}/stats:
+    parameters:
+      - $ref: '#/components/parameters/CampaignIdParam'
+
+    get:
+      tags: [campaigns]
+      summary: Get campaign statistics
+      description: Retrieve comprehensive statistics for a campaign
+      operationId: getCampaignStats
+      responses:
+        '200':
+          description: Successfully retrieved campaign statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CampaignStats'
+              example:
+                campaign_id: "01234567-89ab-cdef-0123-456789abcdef"
+                total_jobs: 25
+                active_jobs: 3
+                completed_jobs: 20
+                failed_jobs: 2
+                total_crashes: 15
+                unique_crashes: 8
+                corpus_size: 1500
+                total_coverage_edges: 125000
+                execution_time_seconds: 72000
+                last_updated: "2024-01-15T10:30:00Z"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # Corpus Management
+  /corpus:
+    get:
+      tags: [corpus]
+      summary: List corpus entries
+      description: Retrieve a paginated list of corpus entries with optional filtering
+      operationId: listCorpus
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/FieldsParam'
+        - name: campaign_id
+          in: query
+          description: Filter by campaign ID
+          schema:
+            type: string
+            format: uuid
+        - name: job_id
+          in: query
+          description: Filter by job ID
+          schema:
+            type: string
+            format: uuid
+        - name: min_coverage
+          in: query
+          description: Minimum coverage threshold
+          schema:
+            type: integer
+            minimum: 0
+        - $ref: '#/components/parameters/SortParam'
+      responses:
+        '200':
+          description: Successfully retrieved corpus entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorpusListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags: [corpus]
+      summary: Upload corpus files
+      description: Upload multiple corpus files to a campaign
+      operationId: uploadCorpus
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - campaign_id
+                - files
+              properties:
+                campaign_id:
+                  type: string
+                  format: uuid
+                  description: Target campaign ID
+                job_id:
+                  type: string
+                  format: uuid
+                  description: Optional job ID for context
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                  description: Corpus files to upload
+                  minItems: 1
+                  maxItems: 1000
+                tags:
+                  type: string
+                  description: Comma-separated tags for the corpus files
+                  example: "seed,minimal,edge-case"
+      responses:
+        '201':
+          description: Corpus files successfully uploaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorpusUploadResponse'
+              example:
+                uploaded_count: 95
+                duplicate_count: 5
+                total_size_bytes: 2048576
+                upload_id: "01234567-89ab-cdef-0123-456789abcdef"
+                errors: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /corpus/{entryId}:
+    parameters:
+      - $ref: '#/components/parameters/CorpusEntryIdParam'
+
+    get:
+      tags: [corpus]
+      summary: Get corpus entry details
+      description: Retrieve detailed information about a specific corpus entry
+      operationId: getCorpusEntry
+      parameters:
+        - $ref: '#/components/parameters/FieldsParam'
+      responses:
+        '200':
+          description: Successfully retrieved corpus entry details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorpusEntry'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags: [corpus]
+      summary: Delete corpus entry
+      description: Remove a corpus entry from the system
+      operationId: deleteCorpusEntry
+      responses:
+        '204':
+          description: Corpus entry successfully deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /corpus/{entryId}/download:
+    parameters:
+      - $ref: '#/components/parameters/CorpusEntryIdParam'
+
+    get:
+      tags: [corpus]
+      summary: Download corpus file
+      description: Download the binary content of a corpus file
+      operationId: downloadCorpusFile
+      responses:
+        '200':
+          description: Corpus file content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: Filename for download
+              example: 'attachment; filename="corpus_entry_123.bin"'
+            Content-Length:
+              schema:
+                type: integer
+              description: File size in bytes
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /corpus/sync:
+    post:
+      tags: [corpus]
+      summary: Synchronize corpus
+      description: Synchronize corpus between campaigns or jobs
+      operationId: syncCorpus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CorpusSyncRequest'
+            example:
+              source_campaign_id: "01234567-89ab-cdef-0123-456789abcdef"
+              target_campaign_id: "fedcba98-7654-3210-fedc-ba9876543210"
+              sync_strategy: "coverage_based"
+              min_coverage: 1000
+              max_files: 500
+      responses:
+        '200':
+          description: Corpus synchronization completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorpusSyncResponse'
+              example:
+                sync_id: "01234567-89ab-cdef-0123-456789abcdef"
+                synced_files: 150
+                total_size_bytes: 3145728
+                duration_seconds: 45
+                strategy_used: "coverage_based"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /corpus/quarantine:
+    get:
+      tags: [corpus]
+      summary: List quarantined corpus entries
+      description: Retrieve entries that have been quarantined due to analysis results
+      operationId: listQuarantinedCorpus
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - name: reason
+          in: query
+          description: Filter by quarantine reason
+          schema:
+            type: string
+            enum: [malformed, timeout, crash, suspicious]
+      responses:
+        '200':
+          description: Successfully retrieved quarantined corpus entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorpusListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /corpus/selection:
+    post:
+      tags: [corpus]
+      summary: Select corpus subset
+      description: Select an optimal subset of corpus for a specific purpose
+      operationId: selectCorpus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CorpusSelectionRequest'
+            example:
+              campaign_id: "01234567-89ab-cdef-0123-456789abcdef"
+              selection_strategy: "coverage_maximizing"
+              max_entries: 100
+              min_coverage: 500
+              criteria:
+                prefer_small_files: true
+                include_edge_cases: true
+      responses:
+        '200':
+          description: Corpus selection completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorpusSelectionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # Crash Management
+  /crashes:
+    get:
+      tags: [crashes]
+      summary: List crashes
+      description: Retrieve a paginated list of crashes with optional filtering
+      operationId: listCrashes
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/FieldsParam'
+        - name: campaign_id
+          in: query
+          description: Filter by campaign ID
+          schema:
+            type: string
+            format: uuid
+        - name: job_id
+          in: query
+          description: Filter by job ID
+          schema:
+            type: string
+            format: uuid
+        - name: unique_only
+          in: query
+          description: Only return unique crashes
+          schema:
+            type: boolean
+            default: false
+        - name: crash_type
+          in: query
+          description: Filter by crash type
+          schema:
+            $ref: '#/components/schemas/CrashType'
+        - name: severity
+          in: query
+          description: Filter by crash severity
+          schema:
+            $ref: '#/components/schemas/CrashSeverity'
+        - $ref: '#/components/parameters/SortParam'
+      responses:
+        '200':
+          description: Successfully retrieved crashes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CrashListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /crashes/{crashId}:
+    parameters:
+      - $ref: '#/components/parameters/CrashIdParam'
+
+    get:
+      tags: [crashes]
+      summary: Get crash details
+      description: Retrieve detailed information about a specific crash
+      operationId: getCrash
+      parameters:
+        - $ref: '#/components/parameters/FieldsParam'
+      responses:
+        '200':
+          description: Successfully retrieved crash details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Crash'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /crashes/{crashId}/minimize:
+    parameters:
+      - $ref: '#/components/parameters/CrashIdParam'
+
+    post:
+      tags: [crashes]
+      summary: Minimize crash input
+      description: Create a job to minimize the crash-triggering input
+      operationId: minimizeCrash
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                strategy:
+                  type: string
+                  enum: [binary_search, delta_debugging, hierarchical]
+                  default: delta_debugging
+                timeout_seconds:
+                  type: integer
+                  minimum: 60
+                  maximum: 3600
+                  default: 600
+                priority:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  default: 5
+      responses:
+        '202':
+          description: Minimization job created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    enum: [queued]
+                  estimated_completion:
+                    type: string
+                    format: date-time
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Crash already being minimized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /crashes/{crashId}/deduplicate:
+    parameters:
+      - $ref: '#/components/parameters/CrashIdParam'
+
+    post:
+      tags: [crashes]
+      summary: Deduplicate crash
+      description: Find and group similar crashes using various deduplication algorithms
+      operationId: deduplicateCrash
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                algorithm:
+                  type: string
+                  enum: [stack_trace, hash_based, fuzzy_matching]
+                  default: stack_trace
+                threshold:
+                  type: number
+                  minimum: 0.0
+                  maximum: 1.0
+                  default: 0.8
+                  description: Similarity threshold for fuzzy matching
+      responses:
+        '200':
+          description: Deduplication completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CrashDeduplicationResponse'
+              example:
+                crash_id: "01234567-89ab-cdef-0123-456789abcdef"
+                is_unique: false
+                duplicate_of: "fedcba98-7654-3210-fedc-ba9876543210"
+                similarity_score: 0.95
+                algorithm_used: "stack_trace"
+                group_id: "crash-group-001"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /crashes/{crashId}/reproduce:
+    parameters:
+      - $ref: '#/components/parameters/CrashIdParam'
+
+    post:
+      tags: [crashes]
+      summary: Reproduce crash
+      description: Create a job to reproduce and verify the crash
+      operationId: reproduceCrash
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                attempts:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  default: 3
+                timeout_seconds:
+                  type: integer
+                  minimum: 30
+                  maximum: 600
+                  default: 300
+                environment:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Environment variables for reproduction
+      responses:
+        '202':
+          description: Reproduction job created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    enum: [queued]
+                  attempts_scheduled:
+                    type: integer
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # Analytics
+  /analytics:
+    get:
+      tags: [analytics]
+      summary: Get system analytics
+      description: Retrieve comprehensive analytics and metrics for the system
+      operationId: getAnalytics
+      parameters:
+        - name: time_range
+          in: query
+          description: Time range for analytics
+          schema:
+            type: string
+            enum: [1h, 6h, 24h, 7d, 30d]
+            default: 24h
+        - name: campaign_id
+          in: query
+          description: Filter analytics by campaign
+          schema:
+            type: string
+            format: uuid
+        - name: metrics
+          in: query
+          description: Specific metrics to include (comma-separated)
+          schema:
+            type: string
+            example: "coverage,crashes,performance"
+      responses:
+        '200':
+          description: Successfully retrieved analytics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /analytics/metrics:
+    get:
+      tags: [analytics]
+      summary: Get real-time metrics
+      description: Retrieve current system metrics and performance indicators
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Successfully retrieved metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsResponse'
+            application/prometheus:
+              schema:
+                type: string
+                description: Prometheus format metrics
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /analytics/coverage:
+    get:
+      tags: [analytics]
+      summary: Get coverage trends
+      description: Retrieve coverage analysis and trend data
+      operationId: getCoverageTrends
+      parameters:
+        - name: campaign_id
+          in: query
+          description: Filter by campaign ID
+          schema:
+            type: string
+            format: uuid
+        - name: time_range
+          in: query
+          description: Time range for trends
+          schema:
+            type: string
+            enum: [1h, 6h, 24h, 7d, 30d]
+            default: 24h
+        - name: granularity
+          in: query
+          description: Data point granularity
+          schema:
+            type: string
+            enum: [minute, hour, day]
+            default: hour
+      responses:
+        '200':
+          description: Successfully retrieved coverage trends
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageTrendsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /analytics/performance:
+    get:
+      tags: [analytics]
+      summary: Get performance statistics
+      description: Retrieve performance metrics and bottleneck analysis
+      operationId: getPerformanceStats
+      parameters:
+        - name: time_range
+          in: query
+          description: Time range for analysis
+          schema:
+            type: string
+            enum: [1h, 6h, 24h, 7d, 30d]
+            default: 24h
+        - name: component
+          in: query
+          description: Filter by system component
+          schema:
+            type: string
+            enum: [bots, jobs, storage, database]
+      responses:
+        '200':
+          description: Successfully retrieved performance statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PerformanceStatsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # Events (Server-Sent Events)
+  /events:
+    get:
+      tags: [events]
+      summary: Real-time event stream
+      description: Subscribe to real-time system events via Server-Sent Events
+      operationId: getEventStream
+      parameters:
+        - name: types
+          in: query
+          description: Event types to subscribe to (comma-separated)
+          schema:
+            type: string
+            example: "job.started,job.completed,crash.detected"
+        - name: campaign_id
+          in: query
+          description: Filter events by campaign ID
+          schema:
+            type: string
+            format: uuid
+        - name: bot_id
+          in: query
+          description: Filter events by bot ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Event stream established
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-sent events stream
+              example: |
+                event: job.started
+                data: {"job_id": "01234567-89ab-cdef-0123-456789abcdef", "campaign_id": "fedcba98-7654-3210-fedc-ba9876543210", "timestamp": "2024-01-15T10:30:00Z"}
+                
+                event: crash.detected
+                data: {"crash_id": "abcdef01-2345-6789-abcd-ef0123456789", "job_id": "01234567-89ab-cdef-0123-456789abcdef", "type": "segfault", "timestamp": "2024-01-15T10:35:00Z"}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # Batch Operations
+  /batch:
+    post:
+      tags: [batch]
+      summary: Execute batch operations
+      description: Execute multiple operations in a single transactional request
+      operationId: executeBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchRequest'
+            example:
+              operations:
+                - operation: "create_job"
+                  data:
+                    name: "batch-job-1"
+                    fuzzer: "libfuzzer"
+                    target_binary: "/path/to/target1"
+                    campaign_id: "01234567-89ab-cdef-0123-456789abcdef"
+                - operation: "create_job"
+                  data:
+                    name: "batch-job-2"
+                    fuzzer: "aflplusplus"
+                    target_binary: "/path/to/target2"
+                    campaign_id: "01234567-89ab-cdef-0123-456789abcdef"
+              options:
+                atomic: true
+                fail_fast: false
+      responses:
+        '200':
+          description: Batch operations completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResponse'
+        '207':
+          description: Partial success - some operations failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "JWT token for authentication. Include as 'Authorization: Bearer <token>'"
+    
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: "API key for service authentication. Include as 'X-API-Key: <key>'"
+
+  parameters:
+    # Common Parameters
+    LimitParam:
+      name: limit
+      in: query
+      description: Maximum number of items to return
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 50
+      example: 100
+
+    OffsetParam:
+      name: offset
+      in: query
+      description: Number of items to skip (for offset-based pagination)
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+      example: 100
+
+    CursorParam:
+      name: cursor
+      in: query
+      description: Cursor for cursor-based pagination
+      schema:
+        type: string
+      example: "eyJpZCI6IjEyMzQ1IiwidGltZXN0YW1wIjoiMjAyNC0wMS0xNVQxMDozMDowMFoifQ=="
+
+    FieldsParam:
+      name: fields
+      in: query
+      description: Comma-separated list of fields to include in response (sparse fieldsets)
+      schema:
+        type: string
+      example: "id,name,status,created_at"
+
+    SortParam:
+      name: sort
+      in: query
+      description: Sort specification (field:direction,field:direction)
+      schema:
+        type: string
+        pattern: '^[a-zA-Z_][a-zA-Z0-9_]*:(asc|desc)(,[a-zA-Z_][a-zA-Z0-9_]*:(asc|desc))*$'
+      example: "created_at:desc,name:asc"
+
+    # Resource-specific Parameters
+    BotIdParam:
+      name: botId
+      in: path
+      required: true
+      description: Unique identifier for a bot
+      schema:
+        type: string
+        format: uuid
+      example: "01234567-89ab-cdef-0123-456789abcdef"
+
+    JobIdParam:
+      name: jobId
+      in: path
+      required: true
+      description: Unique identifier for a job
+      schema:
+        type: string
+        format: uuid
+      example: "01234567-89ab-cdef-0123-456789abcdef"
+
+    CampaignIdParam:
+      name: campaignId
+      in: path
+      required: true
+      description: Unique identifier for a campaign
+      schema:
+        type: string
+        format: uuid
+      example: "01234567-89ab-cdef-0123-456789abcdef"
+
+    CrashIdParam:
+      name: crashId
+      in: path
+      required: true
+      description: Unique identifier for a crash
+      schema:
+        type: string
+        format: uuid
+      example: "01234567-89ab-cdef-0123-456789abcdef"
+
+    CorpusEntryIdParam:
+      name: entryId
+      in: path
+      required: true
+      description: Unique identifier for a corpus entry
+      schema:
+        type: string
+        format: uuid
+      example: "01234567-89ab-cdef-0123-456789abcdef"
+
+    ReportIdParam:
+      name: reportId
+      in: path
+      required: true
+      description: Unique identifier for a coverage report
+      schema:
+        type: string
+        format: uuid
+      example: "01234567-89ab-cdef-0123-456789abcdef"
+
+  schemas:
+    # Common Schemas
+    ProblemDetails:
+      type: object
+      description: RFC 7807 Problem Details for HTTP APIs
+      required:
+        - type
+        - title
+        - status
+      properties:
+        type:
+          type: string
+          format: uri
+          description: A URI reference that identifies the problem type
+          example: "https://pandafuzz.ethpandaops.io/problems/job-already-running"
+        title:
+          type: string
+          description: A short, human-readable summary of the problem type
+          example: "Job Already Running"
+        status:
+          type: integer
+          description: The HTTP status code
+          example: 409
+        detail:
+          type: string
+          description: A human-readable explanation specific to this occurrence
+          example: "The job 01234567-89ab-cdef-0123-456789abcdef is already in running state"
+        instance:
+          type: string
+          format: uri
+          description: A URI reference that identifies the specific occurrence
+          example: "/api/v1/jobs/01234567-89ab-cdef-0123-456789abcdef"
+        timestamp:
+          type: string
+          format: date-time
+          description: When the error occurred
+          example: "2024-01-15T10:30:00Z"
+        trace_id:
+          type: string
+          description: Request trace identifier for debugging
+          example: "trace-12345-abcde"
+
+    Pagination:
+      type: object
+      required:
+        - total
+        - limit
+        - offset
+        - has_more
+      properties:
+        total:
+          type: integer
+          minimum: 0
+          description: Total number of items available
+          example: 1500
+        limit:
+          type: integer
+          minimum: 1
+          description: Maximum number of items per page
+          example: 50
+        offset:
+          type: integer
+          minimum: 0
+          description: Number of items skipped
+          example: 100
+        has_more:
+          type: boolean
+          description: Whether there are more items available
+          example: true
+        next_cursor:
+          type: string
+          nullable: true
+          description: Cursor for next page (cursor-based pagination)
+          example: "eyJpZCI6IjE1MCIsInRpbWVzdGFtcCI6IjIwMjQtMDEtMTVUMTA6MzA6MDBaIn0="
+        prev_cursor:
+          type: string
+          nullable: true
+          description: Cursor for previous page (cursor-based pagination)
+          example: "eyJpZCI6IjUwIiwidGltZXN0YW1wIjoiMjAyNC0wMS0xNVQwOTozMDowMFoifQ=="
+
+    Metadata:
+      type: object
+      additionalProperties: true
+      description: Key-value metadata for extensibility
+      example:
+        region: "us-west-2"
+        environment: "production"
+        team: "security"
+        priority: "high"
+
+    # Health and Status Schemas
+    HealthStatus:
+      type: object
+      required:
+        - status
+        - timestamp
+        - version
+        - uptime
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+          description: Overall system health status
+          example: "healthy"
+        timestamp:
+          type: string
+          format: date-time
+          description: When the health check was performed
+          example: "2024-01-15T10:30:00Z"
+        version:
+          type: string
+          description: Application version
+          example: "1.0.0"
+        uptime:
+          type: string
+          format: duration
+          description: System uptime
+          example: "PT72H30M15S"
+        checks:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              status:
+                type: string
+                enum: [healthy, degraded, unhealthy]
+              message:
+                type: string
+              latency_ms:
+                type: integer
+                minimum: 0
+              last_check:
+                type: string
+                format: date-time
+          description: Individual health check results
+          example:
+            database:
+              status: "healthy"
+              message: "Connection pool healthy"
+              latency_ms: 2
+              last_check: "2024-01-15T10:30:00Z"
+            storage:
+              status: "healthy"
+              message: "Storage accessible"
+              latency_ms: 15
+              last_check: "2024-01-15T10:30:00Z"
+
+    ReadinessStatus:
+      type: object
+      required:
+        - ready
+        - timestamp
+      properties:
+        ready:
+          type: boolean
+          description: Whether the system is ready to accept requests
+          example: true
+        timestamp:
+          type: string
+          format: date-time
+          description: When the readiness check was performed
+          example: "2024-01-15T10:30:00Z"
+        message:
+          type: string
+          description: Additional information about readiness status
+          example: "All systems operational"
+
+    # Bot Schemas
+    BotStatus:
+      type: string
+      enum: [idle, busy, offline, error, maintenance]
+      description: Current status of a bot agent
+      example: "idle"
+
+    Bot:
+      type: object
+      required:
+        - id
+        - name
+        - hostname
+        - status
+        - capabilities
+        - last_heartbeat
+        - is_online
+        - registered_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the bot
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Human-readable name for the bot
+          example: "fuzzer-bot-01"
+        hostname:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Hostname where the bot is running
+          example: "worker-001.internal"
+        status:
+          $ref: '#/components/schemas/BotStatus'
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [fuzzing, analysis, minimization, reproduction, coverage]
+          minItems: 1
+          uniqueItems: true
+          description: Capabilities supported by this bot
+          example: ["fuzzing", "analysis"]
+        last_heartbeat:
+          type: string
+          format: date-time
+          description: Timestamp of last heartbeat received
+          example: "2024-01-15T10:30:00Z"
+        is_online:
+          type: boolean
+          description: Whether the bot is currently online
+          example: true
+        current_job_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: ID of currently assigned job, if any
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        registered_at:
+          type: string
+          format: date-time
+          description: When the bot was first registered
+          example: "2024-01-15T08:00:00Z"
+        api_endpoint:
+          type: string
+          format: uri
+          description: API endpoint for communicating with the bot
+          example: "http://worker-001.internal:8081"
+        resource_usage:
+          type: object
+          properties:
+            cpu_percent:
+              type: number
+              minimum: 0
+              maximum: 100
+              description: CPU usage percentage
+              example: 45.5
+            memory_bytes:
+              type: integer
+              minimum: 0
+              description: Memory usage in bytes
+              example: 2147483648
+            disk_usage_bytes:
+              type: integer
+              minimum: 0
+              description: Disk usage in bytes
+              example: 10737418240
+          description: Current resource usage statistics
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    BotCreateRequest:
+      type: object
+      required:
+        - name
+        - hostname
+        - capabilities
+        - api_endpoint
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Human-readable name for the bot
+          example: "fuzzer-bot-02"
+        hostname:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Hostname where the bot is running
+          example: "worker-002.internal"
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [fuzzing, analysis, minimization, reproduction, coverage]
+          minItems: 1
+          uniqueItems: true
+          description: Capabilities supported by this bot
+          example: ["fuzzing", "analysis"]
+        api_endpoint:
+          type: string
+          format: uri
+          description: API endpoint for communicating with the bot
+          example: "http://worker-002.internal:8081"
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    BotUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Human-readable name for the bot
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [fuzzing, analysis, minimization, reproduction, coverage]
+          minItems: 1
+          uniqueItems: true
+          description: Capabilities supported by this bot
+        api_endpoint:
+          type: string
+          format: uri
+          description: API endpoint for communicating with the bot
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    BotHeartbeatRequest:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          $ref: '#/components/schemas/BotStatus'
+        current_job_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: ID of currently assigned job, if any
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        resource_usage:
+          type: object
+          properties:
+            cpu_percent:
+              type: number
+              minimum: 0
+              maximum: 100
+              description: CPU usage percentage
+            memory_bytes:
+              type: integer
+              minimum: 0
+              description: Memory usage in bytes
+            disk_usage_bytes:
+              type: integer
+              minimum: 0
+              description: Disk usage in bytes
+          description: Current resource usage statistics
+        message:
+          type: string
+          maxLength: 500
+          description: Optional status message
+          example: "Processing job successfully"
+
+    BotHeartbeatResponse:
+      type: object
+      required:
+        - acknowledged
+        - next_heartbeat_interval_seconds
+      properties:
+        acknowledged:
+          type: boolean
+          description: Whether the heartbeat was acknowledged
+          example: true
+        next_heartbeat_interval_seconds:
+          type: integer
+          minimum: 5
+          maximum: 300
+          description: Interval for next heartbeat in seconds
+          example: 30
+        assigned_job_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: ID of newly assigned job, if any
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        commands:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [stop_job, update_config, restart, maintenance]
+              parameters:
+                type: object
+                additionalProperties: true
+          description: Commands for the bot to execute
+        message:
+          type: string
+          description: Optional message from the master
+          example: "New job assigned"
+
+    BotListResponse:
+      type: object
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Bot'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    # Job Schemas
+    JobStatus:
+      type: string
+      enum: [pending, assigned, running, completed, failed, cancelled, timeout]
+      description: Current status of a job
+      example: "running"
+
+    FuzzerType:
+      type: string
+      enum: [aflplusplus, libfuzzer, honggfuzz]
+      description: Type of fuzzer to use
+      example: "libfuzzer"
+
+    Job:
+      type: object
+      required:
+        - id
+        - name
+        - status
+        - fuzzer
+        - target_binary
+        - created_at
+        - timeout_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the job
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Human-readable name for the job
+          example: "libfuzzer-http-parser-test"
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        fuzzer:
+          $ref: '#/components/schemas/FuzzerType'
+        target_binary:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Path to the target binary to fuzz
+          example: "/usr/bin/http-parser"
+        campaign_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: ID of the campaign this job belongs to
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        assigned_bot_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: ID of the bot assigned to this job
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        created_at:
+          type: string
+          format: date-time
+          description: When the job was created
+          example: "2024-01-15T10:00:00Z"
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the job started execution
+          example: "2024-01-15T10:05:00Z"
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the job completed
+          example: "2024-01-15T11:00:00Z"
+        timeout_at:
+          type: string
+          format: date-time
+          description: When the job will timeout
+          example: "2024-01-15T14:00:00Z"
+        timeout_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+          description: Job timeout in seconds
+          example: 3600
+        config:
+          type: object
+          additionalProperties: true
+          description: Fuzzer-specific configuration
+          example:
+            max_total_time: 3600
+            max_len: 1024
+            use_value_profile: true
+        enable_coverage:
+          type: boolean
+          description: Whether to collect coverage information
+          example: true
+        coverage_format:
+          $ref: '#/components/schemas/CoverageFormat'
+        priority:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: Job priority (1=lowest, 10=highest)
+          example: 5
+        progress:
+          type: object
+          properties:
+            percent_complete:
+              type: number
+              minimum: 0
+              maximum: 100
+              description: Percentage completion
+            executions:
+              type: integer
+              minimum: 0
+              description: Number of executions performed
+            crashes_found:
+              type: integer
+              minimum: 0
+              description: Number of crashes found
+            coverage_edges:
+              type: integer
+              minimum: 0
+              description: Number of coverage edges discovered
+          description: Current job progress
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    JobCreateRequest:
+      type: object
+      required:
+        - name
+        - fuzzer
+        - target_binary
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Human-readable name for the job
+          example: "libfuzzer-http-parser-test"
+        fuzzer:
+          $ref: '#/components/schemas/FuzzerType'
+        target_binary:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Path to the target binary to fuzz
+          example: "/usr/bin/http-parser"
+        campaign_id:
+          type: string
+          format: uuid
+          description: ID of the campaign this job belongs to
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        timeout_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+          description: Job timeout in seconds
+          example: 3600
+        config:
+          type: object
+          additionalProperties: true
+          description: Fuzzer-specific configuration
+          example:
+            max_total_time: 3600
+            max_len: 1024
+            use_value_profile: true
+        enable_coverage:
+          type: boolean
+          default: false
+          description: Whether to collect coverage information
+        coverage_format:
+          $ref: '#/components/schemas/CoverageFormat'
+        priority:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 5
+          description: Job priority (1=lowest, 10=highest)
+        seed_corpus:
+          type: array
+          items:
+            type: string
+          description: Initial seed corpus file paths
+          example: ["/seeds/input1.txt", "/seeds/input2.bin"]
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    JobUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Human-readable name for the job
+        timeout_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+          description: Job timeout in seconds
+        priority:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: Job priority (1=lowest, 10=highest)
+        config:
+          type: object
+          additionalProperties: true
+          description: Fuzzer-specific configuration
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    JobListResponse:
+      type: object
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Job'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    JobLogsResponse:
+      type: object
+      required:
+        - job_id
+        - logs
+        - timestamp
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          description: ID of the job these logs belong to
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        logs:
+          type: array
+          items:
+            type: object
+            required:
+              - timestamp
+              - level
+              - message
+            properties:
+              timestamp:
+                type: string
+                format: date-time
+                description: When the log entry was created
+              level:
+                type: string
+                enum: [debug, info, warn, error, fatal]
+                description: Log level
+              message:
+                type: string
+                description: Log message content
+              source:
+                type: string
+                description: Source component that generated the log
+              metadata:
+                type: object
+                additionalProperties: true
+                description: Additional log metadata
+        timestamp:
+          type: string
+          format: date-time
+          description: When the logs were retrieved
+          example: "2024-01-15T10:30:00Z"
+        has_more:
+          type: boolean
+          description: Whether there are more logs available
+          example: true
+
+    # Campaign Schemas
+    CampaignStatus:
+      type: string
+      enum: [draft, active, paused, completed, cancelled, archived]
+      description: Current status of a campaign
+      example: "active"
+
+    Campaign:
+      type: object
+      required:
+        - id
+        - name
+        - status
+        - target_binary
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the campaign
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Human-readable name for the campaign
+          example: "HTTP Parser Security Test"
+        description:
+          type: string
+          maxLength: 1000
+          description: Detailed description of the campaign
+          example: "Comprehensive security testing of HTTP parser implementation"
+        status:
+          $ref: '#/components/schemas/CampaignStatus'
+        target_binary:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Path to the target binary
+          example: "/usr/bin/http-parser"
+        target_hash:
+          type: string
+          description: SHA256 hash of the target binary
+          example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        created_at:
+          type: string
+          format: date-time
+          description: When the campaign was created
+          example: "2024-01-15T08:00:00Z"
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the campaign was started
+          example: "2024-01-15T08:30:00Z"
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the campaign completed
+          example: null
+        max_duration_seconds:
+          type: integer
+          minimum: 3600
+          maximum: 2592000
+          description: Maximum campaign duration in seconds (1 hour to 30 days)
+          example: 86400
+        max_jobs:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          description: Maximum number of concurrent jobs
+          example: 10
+        job_template:
+          type: object
+          properties:
+            fuzzer:
+              $ref: '#/components/schemas/FuzzerType'
+            timeout_seconds:
+              type: integer
+              minimum: 60
+              maximum: 86400
+            config:
+              type: object
+              additionalProperties: true
+            enable_coverage:
+              type: boolean
+            coverage_format:
+              $ref: '#/components/schemas/CoverageFormat'
+          description: Template for jobs created in this campaign
+        auto_restart:
+          type: boolean
+          description: Whether to automatically restart failed jobs
+          example: true
+        shared_corpus:
+          type: boolean
+          description: Whether to share corpus between jobs in this campaign
+          example: true
+        tags:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 50
+          uniqueItems: true
+          description: Tags for categorizing and filtering campaigns
+          example: ["security", "parser", "http"]
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    CampaignCreateRequest:
+      type: object
+      required:
+        - name
+        - target_binary
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Human-readable name for the campaign
+          example: "HTTP Parser Security Test"
+        description:
+          type: string
+          maxLength: 1000
+          description: Detailed description of the campaign
+          example: "Comprehensive security testing of HTTP parser implementation"
+        target_binary:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Path to the target binary
+          example: "/usr/bin/http-parser"
+        max_duration_seconds:
+          type: integer
+          minimum: 3600
+          maximum: 2592000
+          default: 86400
+          description: Maximum campaign duration in seconds
+        max_jobs:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 5
+          description: Maximum number of concurrent jobs
+        job_template:
+          type: object
+          properties:
+            fuzzer:
+              $ref: '#/components/schemas/FuzzerType'
+            timeout_seconds:
+              type: integer
+              minimum: 60
+              maximum: 86400
+              default: 3600
+            config:
+              type: object
+              additionalProperties: true
+            enable_coverage:
+              type: boolean
+              default: true
+            coverage_format:
+              $ref: '#/components/schemas/CoverageFormat'
+          description: Template for jobs created in this campaign
+        auto_restart:
+          type: boolean
+          default: true
+          description: Whether to automatically restart failed jobs
+        shared_corpus:
+          type: boolean
+          default: true
+          description: Whether to share corpus between jobs in this campaign
+        tags:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 50
+          uniqueItems: true
+          description: Tags for categorizing and filtering campaigns
+          example: ["security", "parser", "http"]
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    CampaignUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Human-readable name for the campaign
+        description:
+          type: string
+          maxLength: 1000
+          description: Detailed description of the campaign
+        max_duration_seconds:
+          type: integer
+          minimum: 3600
+          maximum: 2592000
+          description: Maximum campaign duration in seconds
+        max_jobs:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          description: Maximum number of concurrent jobs
+        auto_restart:
+          type: boolean
+          description: Whether to automatically restart failed jobs
+        shared_corpus:
+          type: boolean
+          description: Whether to share corpus between jobs in this campaign
+        tags:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 50
+          uniqueItems: true
+          description: Tags for categorizing and filtering campaigns
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    CampaignListResponse:
+      type: object
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Campaign'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    CampaignStats:
+      type: object
+      required:
+        - campaign_id
+        - total_jobs
+        - active_jobs
+        - completed_jobs
+        - failed_jobs
+        - total_crashes
+        - unique_crashes
+        - corpus_size
+        - total_coverage_edges
+        - execution_time_seconds
+        - last_updated
+      properties:
+        campaign_id:
+          type: string
+          format: uuid
+          description: ID of the campaign
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        total_jobs:
+          type: integer
+          minimum: 0
+          description: Total number of jobs in the campaign
+          example: 25
+        active_jobs:
+          type: integer
+          minimum: 0
+          description: Number of currently running jobs
+          example: 3
+        completed_jobs:
+          type: integer
+          minimum: 0
+          description: Number of completed jobs
+          example: 20
+        failed_jobs:
+          type: integer
+          minimum: 0
+          description: Number of failed jobs
+          example: 2
+        total_crashes:
+          type: integer
+          minimum: 0
+          description: Total number of crashes found
+          example: 15
+        unique_crashes:
+          type: integer
+          minimum: 0
+          description: Number of unique crashes
+          example: 8
+        corpus_size:
+          type: integer
+          minimum: 0
+          description: Total number of corpus entries
+          example: 1500
+        corpus_size_bytes:
+          type: integer
+          minimum: 0
+          description: Total corpus size in bytes
+          example: 52428800
+        total_coverage_edges:
+          type: integer
+          minimum: 0
+          description: Total coverage edges discovered
+          example: 125000
+        execution_time_seconds:
+          type: integer
+          minimum: 0
+          description: Total execution time across all jobs
+          example: 72000
+        last_updated:
+          type: string
+          format: date-time
+          description: When the statistics were last updated
+          example: "2024-01-15T10:30:00Z"
+        performance_metrics:
+          type: object
+          properties:
+            avg_executions_per_second:
+              type: number
+              minimum: 0
+              description: Average executions per second
+            coverage_growth_rate:
+              type: number
+              description: Rate of coverage growth per hour
+            crash_discovery_rate:
+              type: number
+              description: Rate of crash discovery per hour
+          description: Performance and efficiency metrics
+
+    # Corpus Schemas
+    CorpusEntry:
+      type: object
+      required:
+        - id
+        - filename
+        - size_bytes
+        - hash
+        - campaign_id
+        - job_id
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the corpus entry
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        filename:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Original filename of the corpus file
+          example: "crash_input_001.bin"
+        size_bytes:
+          type: integer
+          minimum: 0
+          description: Size of the corpus file in bytes
+          example: 1024
+        hash:
+          type: string
+          description: SHA256 hash of the corpus file content
+          example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        campaign_id:
+          type: string
+          format: uuid
+          description: ID of the campaign this corpus belongs to
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        job_id:
+          type: string
+          format: uuid
+          description: ID of the job that generated this corpus
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        bot_id:
+          type: string
+          format: uuid
+          description: ID of the bot that generated this corpus
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        created_at:
+          type: string
+          format: date-time
+          description: When the corpus entry was created
+          example: "2024-01-15T10:30:00Z"
+        coverage_info:
+          type: object
+          properties:
+            edges_covered:
+              type: integer
+              minimum: 0
+              description: Number of coverage edges this input covers
+            new_edges:
+              type: integer
+              minimum: 0
+              description: Number of new edges discovered by this input
+            blocks_covered:
+              type: integer
+              minimum: 0
+              description: Number of basic blocks covered
+          description: Coverage information for this corpus entry
+        generation_info:
+          type: object
+          properties:
+            parent_hash:
+              type: string
+              description: Hash of the parent corpus entry if mutated
+            mutation_type:
+              type: string
+              enum: [seed, mutation, crossover, manual]
+              description: How this corpus entry was generated
+            generation:
+              type: integer
+              minimum: 0
+              description: Generation number in the fuzzing process
+          description: Information about how this corpus was generated
+        is_seed:
+          type: boolean
+          description: Whether this is an initial seed corpus entry
+          example: false
+        is_minimized:
+          type: boolean
+          description: Whether this corpus has been minimized
+          example: false
+        tags:
+          type: array
+          items:
+            type: string
+          uniqueItems: true
+          description: Tags associated with this corpus entry
+          example: ["interesting", "edge-case"]
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    CorpusListResponse:
+      type: object
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/CorpusEntry'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    CorpusUploadResponse:
+      type: object
+      required:
+        - uploaded_count
+        - duplicate_count
+        - total_size_bytes
+        - upload_id
+      properties:
+        uploaded_count:
+          type: integer
+          minimum: 0
+          description: Number of files successfully uploaded
+          example: 95
+        duplicate_count:
+          type: integer
+          minimum: 0
+          description: Number of duplicate files skipped
+          example: 5
+        error_count:
+          type: integer
+          minimum: 0
+          description: Number of files that failed to upload
+          example: 0
+        total_size_bytes:
+          type: integer
+          minimum: 0
+          description: Total size of uploaded files in bytes
+          example: 2048576
+        upload_id:
+          type: string
+          format: uuid
+          description: Unique identifier for this upload batch
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              filename:
+                type: string
+              error:
+                type: string
+              code:
+                type: string
+          description: Details of any upload errors
+        processing_time_seconds:
+          type: number
+          minimum: 0
+          description: Time taken to process the upload
+          example: 2.5
+
+    CorpusSyncRequest:
+      type: object
+      required:
+        - source_campaign_id
+        - target_campaign_id
+      properties:
+        source_campaign_id:
+          type: string
+          format: uuid
+          description: Campaign to sync corpus from
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        target_campaign_id:
+          type: string
+          format: uuid
+          description: Campaign to sync corpus to
+          example: "fedcba98-7654-3210-fedc-ba9876543210"
+        sync_strategy:
+          type: string
+          enum: [all, coverage_based, size_based, time_based, selective]
+          default: coverage_based
+          description: Strategy for selecting corpus to sync
+        filters:
+          type: object
+          properties:
+            min_coverage:
+              type: integer
+              minimum: 0
+              description: Minimum coverage edges required
+            max_size_bytes:
+              type: integer
+              minimum: 1
+              description: Maximum file size to sync
+            created_after:
+              type: string
+              format: date-time
+              description: Only sync files created after this time
+            tags:
+              type: array
+              items:
+                type: string
+              description: Only sync files with these tags
+          description: Filters for corpus selection
+        max_files:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: Maximum number of files to sync
+          example: 500
+        overwrite_duplicates:
+          type: boolean
+          default: false
+          description: Whether to overwrite existing files with same hash
+
+    CorpusSyncResponse:
+      type: object
+      required:
+        - sync_id
+        - synced_files
+        - total_size_bytes
+        - duration_seconds
+        - strategy_used
+      properties:
+        sync_id:
+          type: string
+          format: uuid
+          description: Unique identifier for this sync operation
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        synced_files:
+          type: integer
+          minimum: 0
+          description: Number of files successfully synced
+          example: 150
+        skipped_files:
+          type: integer
+          minimum: 0
+          description: Number of files skipped (duplicates, etc.)
+          example: 25
+        total_size_bytes:
+          type: integer
+          minimum: 0
+          description: Total size of synced files in bytes
+          example: 3145728
+        duration_seconds:
+          type: number
+          minimum: 0
+          description: Time taken for the sync operation
+          example: 45.2
+        strategy_used:
+          type: string
+          description: Sync strategy that was applied
+          example: "coverage_based"
+        summary:
+          type: object
+          properties:
+            source_total_files:
+              type: integer
+            target_files_before:
+              type: integer
+            target_files_after:
+              type: integer
+            coverage_improvement:
+              type: number
+              description: Percentage improvement in coverage
+          description: Summary statistics of the sync operation
+
+    CorpusSelectionRequest:
+      type: object
+      required:
+        - campaign_id
+        - selection_strategy
+      properties:
+        campaign_id:
+          type: string
+          format: uuid
+          description: Campaign to select corpus from
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        selection_strategy:
+          type: string
+          enum: [random, coverage_maximizing, size_minimizing, diversity_maximizing, time_based]
+          description: Strategy for corpus selection
+          example: "coverage_maximizing"
+        max_entries:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: Maximum number of entries to select
+          example: 100
+        criteria:
+          type: object
+          properties:
+            min_coverage:
+              type: integer
+              minimum: 0
+            max_size_bytes:
+              type: integer
+              minimum: 1
+            prefer_small_files:
+              type: boolean
+            include_edge_cases:
+              type: boolean
+            min_generation:
+              type: integer
+              minimum: 0
+          description: Selection criteria and preferences
+        seed_corpus_weight:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Weight to give to seed corpus entries (0-1)
+          example: 0.2
+
+    CorpusSelectionResponse:
+      type: object
+      required:
+        - selection_id
+        - selected_entries
+        - total_coverage
+        - selection_time_seconds
+      properties:
+        selection_id:
+          type: string
+          format: uuid
+          description: Unique identifier for this selection
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        selected_entries:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: IDs of selected corpus entries
+        total_coverage:
+          type: integer
+          minimum: 0
+          description: Total coverage edges of selected corpus
+          example: 15000
+        total_size_bytes:
+          type: integer
+          minimum: 0
+          description: Total size of selected corpus in bytes
+          example: 1048576
+        selection_time_seconds:
+          type: number
+          minimum: 0
+          description: Time taken for selection
+          example: 1.5
+        strategy_used:
+          type: string
+          description: Selection strategy that was applied
+        quality_metrics:
+          type: object
+          properties:
+            coverage_density:
+              type: number
+              description: Coverage per byte ratio
+            diversity_score:
+              type: number
+              description: Diversity score of selected corpus
+            redundancy_score:
+              type: number
+              description: Redundancy score (lower is better)
+          description: Quality metrics of the selection
+
+    # Crash Schemas
+    CrashType:
+      type: string
+      enum: [segfault, abort, timeout, assertion, heap_overflow, stack_overflow, use_after_free, double_free, memory_leak, other]
+      description: Type of crash detected
+      example: "segfault"
+
+    CrashSeverity:
+      type: string
+      enum: [low, medium, high, critical]
+      description: Severity level of the crash
+      example: "high"
+
+    Crash:
+      type: object
+      required:
+        - id
+        - hash
+        - type
+        - severity
+        - campaign_id
+        - job_id
+        - bot_id
+        - discovered_at
+        - input_size_bytes
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the crash
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        hash:
+          type: string
+          description: SHA256 hash of the crash-inducing input
+          example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        type:
+          $ref: '#/components/schemas/CrashType'
+        severity:
+          $ref: '#/components/schemas/CrashSeverity'
+        campaign_id:
+          type: string
+          format: uuid
+          description: ID of the campaign where crash was discovered
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        job_id:
+          type: string
+          format: uuid
+          description: ID of the job that discovered the crash
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        bot_id:
+          type: string
+          format: uuid
+          description: ID of the bot that discovered the crash
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        discovered_at:
+          type: string
+          format: date-time
+          description: When the crash was discovered
+          example: "2024-01-15T10:30:00Z"
+        input_size_bytes:
+          type: integer
+          minimum: 0
+          description: Size of the crash-inducing input in bytes
+          example: 512
+        signal:
+          type: integer
+          description: Signal number that caused the crash
+          example: 11
+        exit_code:
+          type: integer
+          description: Exit code of the crashed process
+          example: -11
+        stack_trace:
+          type: string
+          description: Stack trace of the crash
+          example: |
+            #0  0x00007f8b8c0a5b7f in strlen () from /lib/x86_64-linux-gnu/libc.so.6
+            #1  0x0000555555555169 in main (argc=2, argv=0x7fff12345678) at test.c:10
+        crash_info:
+          type: object
+          properties:
+            address:
+              type: string
+              description: Memory address where crash occurred
+            instruction:
+              type: string
+              description: Instruction that caused the crash
+            registers:
+              type: object
+              additionalProperties:
+                type: string
+              description: CPU register values at crash time
+            memory_maps:
+              type: array
+              items:
+                type: string
+              description: Memory mappings at crash time
+          description: Detailed crash analysis information
+        reproduction_info:
+          type: object
+          properties:
+            reproducible:
+              type: boolean
+              description: Whether the crash is reproducible
+            reproduction_rate:
+              type: number
+              minimum: 0
+              maximum: 1
+              description: Rate of successful reproductions (0-1)
+            last_reproduction_attempt:
+              type: string
+              format: date-time
+              description: When reproduction was last attempted
+            environment:
+              type: object
+              additionalProperties:
+                type: string
+              description: Environment conditions for reproduction
+          description: Information about crash reproduction
+        is_unique:
+          type: boolean
+          description: Whether this crash is unique (not a duplicate)
+          example: true
+        duplicate_of:
+          type: string
+          format: uuid
+          nullable: true
+          description: ID of the crash this is a duplicate of
+          example: null
+        group_id:
+          type: string
+          nullable: true
+          description: Group identifier for similar crashes
+          example: "crash-group-001"
+        minimized_input_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: ID of the minimized crash input, if available
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        triaged:
+          type: boolean
+          description: Whether this crash has been triaged
+          example: false
+        priority:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: Triage priority (1=lowest, 10=highest)
+          example: 7
+        tags:
+          type: array
+          items:
+            type: string
+          uniqueItems: true
+          description: Tags for categorizing the crash
+          example: ["memory-corruption", "exploitable"]
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    CrashListResponse:
+      type: object
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Crash'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    CrashDeduplicationResponse:
+      type: object
+      required:
+        - crash_id
+        - is_unique
+        - algorithm_used
+        - processing_time_seconds
+      properties:
+        crash_id:
+          type: string
+          format: uuid
+          description: ID of the analyzed crash
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        is_unique:
+          type: boolean
+          description: Whether the crash is unique
+          example: false
+        duplicate_of:
+          type: string
+          format: uuid
+          nullable: true
+          description: ID of the crash this is a duplicate of
+          example: "fedcba98-7654-3210-fedc-ba9876543210"
+        similarity_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Similarity score to the duplicate (0-1)
+          example: 0.95
+        algorithm_used:
+          type: string
+          description: Deduplication algorithm used
+          example: "stack_trace"
+        group_id:
+          type: string
+          nullable: true
+          description: Group identifier assigned
+          example: "crash-group-001"
+        similar_crashes:
+          type: array
+          items:
+            type: object
+            properties:
+              crash_id:
+                type: string
+                format: uuid
+              similarity_score:
+                type: number
+                minimum: 0
+                maximum: 1
+          description: List of similar crashes found
+        processing_time_seconds:
+          type: number
+          minimum: 0
+          description: Time taken for deduplication analysis
+          example: 0.5
+
+    # Coverage Schemas
+    CoverageFormat:
+      type: string
+      enum: [json, html, lcov, cobertura, xml]
+      description: Format for coverage reports
+      example: "json"
+
+    CoverageReport:
+      type: object
+      required:
+        - id
+        - job_id
+        - format
+        - size_bytes
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the coverage report
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        job_id:
+          type: string
+          format: uuid
+          description: ID of the job that generated this report
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        format:
+          $ref: '#/components/schemas/CoverageFormat'
+        size_bytes:
+          type: integer
+          minimum: 0
+          description: Size of the coverage report in bytes
+          example: 1048576
+        created_at:
+          type: string
+          format: date-time
+          description: When the coverage report was created
+          example: "2024-01-15T10:30:00Z"
+        checksum:
+          type: string
+          description: SHA256 checksum of the report file
+          example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        coverage_metrics:
+          type: object
+          properties:
+            line_coverage_percent:
+              type: number
+              minimum: 0
+              maximum: 100
+              description: Percentage of lines covered
+            function_coverage_percent:
+              type: number
+              minimum: 0
+              maximum: 100
+              description: Percentage of functions covered
+            branch_coverage_percent:
+              type: number
+              minimum: 0
+              maximum: 100
+              description: Percentage of branches covered
+            total_lines:
+              type: integer
+              minimum: 0
+            covered_lines:
+              type: integer
+              minimum: 0
+            total_functions:
+              type: integer
+              minimum: 0
+            covered_functions:
+              type: integer
+              minimum: 0
+            total_branches:
+              type: integer
+              minimum: 0
+            covered_branches:
+              type: integer
+              minimum: 0
+          description: Coverage metrics summary
+        file_path:
+          type: string
+          description: Path to the coverage report file in storage
+          example: "/coverage/job-123/report.html"
+        download_url:
+          type: string
+          format: uri
+          description: URL to download the coverage report
+          example: "/api/v1/jobs/01234567-89ab-cdef-0123-456789abcdef/coverage/01234567-89ab-cdef-0123-456789abcdef"
+
+    CoverageReportListResponse:
+      type: object
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/CoverageReport'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    # Artifact Schemas
+    Artifact:
+      type: object
+      required:
+        - id
+        - type
+        - filename
+        - size_bytes
+        - hash
+        - job_id
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the artifact
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        type:
+          type: string
+          enum: [crash, corpus, coverage, log, binary, config]
+          description: Type of artifact
+          example: "crash"
+        filename:
+          type: string
+          description: Original filename of the artifact
+          example: "crash_001.bin"
+        size_bytes:
+          type: integer
+          minimum: 0
+          description: Size of the artifact in bytes
+          example: 1024
+        hash:
+          type: string
+          description: SHA256 hash of the artifact content
+          example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        job_id:
+          type: string
+          format: uuid
+          description: ID of the job that generated this artifact
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        created_at:
+          type: string
+          format: date-time
+          description: When the artifact was created
+          example: "2024-01-15T10:30:00Z"
+        description:
+          type: string
+          description: Human-readable description of the artifact
+          example: "Crash input that triggers segmentation fault"
+        content_type:
+          type: string
+          description: MIME type of the artifact
+          example: "application/octet-stream"
+        download_url:
+          type: string
+          format: uri
+          description: URL to download the artifact
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    ArtifactListResponse:
+      type: object
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Artifact'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    # Analytics Schemas
+    AnalyticsResponse:
+      type: object
+      required:
+        - time_range
+        - generated_at
+        - system_overview
+      properties:
+        time_range:
+          type: object
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+            duration:
+              type: string
+              format: duration
+          description: Time range for the analytics data
+        generated_at:
+          type: string
+          format: date-time
+          description: When the analytics were generated
+        system_overview:
+          type: object
+          properties:
+            total_campaigns:
+              type: integer
+            active_campaigns:
+              type: integer
+            total_jobs:
+              type: integer
+            active_jobs:
+              type: integer
+            total_bots:
+              type: integer
+            online_bots:
+              type: integer
+            total_crashes:
+              type: integer
+            unique_crashes:
+              type: integer
+            total_corpus_entries:
+              type: integer
+            total_coverage_edges:
+              type: integer
+          description: High-level system statistics
+        performance_metrics:
+          type: object
+          properties:
+            avg_job_completion_time_seconds:
+              type: number
+            avg_executions_per_second:
+              type: number
+            avg_coverage_per_hour:
+              type: number
+            crash_discovery_rate_per_hour:
+              type: number
+            system_efficiency_score:
+              type: number
+              minimum: 0
+              maximum: 1
+          description: Performance and efficiency metrics
+        resource_usage:
+          type: object
+          properties:
+            cpu_utilization_percent:
+              type: number
+            memory_usage_bytes:
+              type: integer
+            storage_usage_bytes:
+              type: integer
+            network_throughput_bps:
+              type: integer
+          description: Resource utilization statistics
+        trends:
+          type: object
+          properties:
+            job_completion_trend:
+              type: array
+              items:
+                type: object
+                properties:
+                  timestamp:
+                    type: string
+                    format: date-time
+                  completed_jobs:
+                    type: integer
+            coverage_growth_trend:
+              type: array
+              items:
+                type: object
+                properties:
+                  timestamp:
+                    type: string
+                    format: date-time
+                  total_coverage:
+                    type: integer
+            crash_discovery_trend:
+              type: array
+              items:
+                type: object
+                properties:
+                  timestamp:
+                    type: string
+                    format: date-time
+                  new_crashes:
+                    type: integer
+          description: Historical trend data
+
+    MetricsResponse:
+      type: object
+      required:
+        - timestamp
+        - metrics
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          description: When the metrics were collected
+        metrics:
+          type: object
+          properties:
+            bots:
+              type: object
+              properties:
+                total:
+                  type: integer
+                online:
+                  type: integer
+                busy:
+                  type: integer
+                idle:
+                  type: integer
+                error:
+                  type: integer
+            jobs:
+              type: object
+              properties:
+                total:
+                  type: integer
+                pending:
+                  type: integer
+                running:
+                  type: integer
+                completed:
+                  type: integer
+                failed:
+                  type: integer
+            campaigns:
+              type: object
+              properties:
+                total:
+                  type: integer
+                active:
+                  type: integer
+                paused:
+                  type: integer
+                completed:
+                  type: integer
+            crashes:
+              type: object
+              properties:
+                total:
+                  type: integer
+                unique:
+                  type: integer
+                today:
+                  type: integer
+                critical:
+                  type: integer
+            coverage:
+              type: object
+              properties:
+                total_edges:
+                  type: integer
+                edges_per_second:
+                  type: number
+                growth_rate:
+                  type: number
+            system:
+              type: object
+              properties:
+                uptime_seconds:
+                  type: integer
+                cpu_usage_percent:
+                  type: number
+                memory_usage_bytes:
+                  type: integer
+                disk_usage_bytes:
+                  type: integer
+                request_rate_per_second:
+                  type: number
+                error_rate_per_second:
+                  type: number
+          description: Current system metrics
+
+    CoverageTrendsResponse:
+      type: object
+      required:
+        - time_range
+        - granularity
+        - data_points
+      properties:
+        time_range:
+          type: object
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+        granularity:
+          type: string
+          enum: [minute, hour, day]
+        campaign_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Campaign ID if filtered by campaign
+        data_points:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: string
+                format: date-time
+              total_edges:
+                type: integer
+              new_edges:
+                type: integer
+              cumulative_edges:
+                type: integer
+              coverage_density:
+                type: number
+                description: Coverage per execution
+              execution_count:
+                type: integer
+        summary:
+          type: object
+          properties:
+            total_growth:
+              type: integer
+              description: Total new edges discovered in time range
+            growth_rate:
+              type: number
+              description: Average edges per hour
+            peak_discovery_time:
+              type: string
+              format: date-time
+              description: Time of highest edge discovery rate
+            efficiency_score:
+              type: number
+              minimum: 0
+              maximum: 1
+              description: Coverage efficiency score
+
+    PerformanceStatsResponse:
+      type: object
+      required:
+        - time_range
+        - component_stats
+      properties:
+        time_range:
+          type: object
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+        component_stats:
+          type: object
+          properties:
+            bots:
+              type: object
+              properties:
+                avg_utilization_percent:
+                  type: number
+                avg_job_completion_time_seconds:
+                  type: number
+                failure_rate_percent:
+                  type: number
+                throughput_jobs_per_hour:
+                  type: number
+            jobs:
+              type: object
+              properties:
+                avg_queue_time_seconds:
+                  type: number
+                avg_execution_time_seconds:
+                  type: number
+                success_rate_percent:
+                  type: number
+                timeout_rate_percent:
+                  type: number
+            storage:
+              type: object
+              properties:
+                avg_read_latency_ms:
+                  type: number
+                avg_write_latency_ms:
+                  type: number
+                throughput_mbps:
+                  type: number
+                error_rate_percent:
+                  type: number
+            database:
+              type: object
+              properties:
+                avg_query_time_ms:
+                  type: number
+                connection_pool_utilization_percent:
+                  type: number
+                deadlock_count:
+                  type: integer
+                slow_query_count:
+                  type: integer
+        bottlenecks:
+          type: array
+          items:
+            type: object
+            properties:
+              component:
+                type: string
+              issue:
+                type: string
+              severity:
+                type: string
+                enum: [low, medium, high, critical]
+              impact:
+                type: string
+              recommendation:
+                type: string
+        optimization_suggestions:
+          type: array
+          items:
+            type: object
+            properties:
+              category:
+                type: string
+              suggestion:
+                type: string
+              estimated_improvement_percent:
+                type: number
+              effort_level:
+                type: string
+                enum: [low, medium, high]
+
+    # Batch Schemas
+    BatchRequest:
+      type: object
+      required:
+        - operations
+      properties:
+        operations:
+          type: array
+          items:
+            type: object
+            required:
+              - operation
+              - data
+            properties:
+              operation:
+                type: string
+                enum: [create_job, create_campaign, upload_corpus, create_bot, delete_job, delete_campaign]
+                description: Type of operation to perform
+              data:
+                type: object
+                description: Operation-specific data payload
+              operation_id:
+                type: string
+                description: Optional client-provided operation ID for tracking
+          minItems: 1
+          maxItems: 100
+          description: List of operations to execute
+        options:
+          type: object
+          properties:
+            atomic:
+              type: boolean
+              default: false
+              description: Whether all operations must succeed or all fail
+            fail_fast:
+              type: boolean
+              default: true
+              description: Whether to stop on first failure
+            timeout_seconds:
+              type: integer
+              minimum: 60
+              maximum: 3600
+              default: 300
+              description: Total timeout for batch execution
+          description: Batch execution options
+
+    BatchResponse:
+      type: object
+      required:
+        - batch_id
+        - total_operations
+        - successful_operations
+        - failed_operations
+        - execution_time_seconds
+        - results
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+          description: Unique identifier for this batch execution
+        total_operations:
+          type: integer
+          minimum: 0
+          description: Total number of operations in the batch
+        successful_operations:
+          type: integer
+          minimum: 0
+          description: Number of operations that succeeded
+        failed_operations:
+          type: integer
+          minimum: 0
+          description: Number of operations that failed
+        execution_time_seconds:
+          type: number
+          minimum: 0
+          description: Total time taken to execute the batch
+        results:
+          type: array
+          items:
+            type: object
+            required:
+              - operation_index
+              - operation
+              - status
+            properties:
+              operation_index:
+                type: integer
+                minimum: 0
+                description: Index of the operation in the original request
+              operation:
+                type: string
+                description: Type of operation that was executed
+              operation_id:
+                type: string
+                description: Client-provided operation ID if specified
+              status:
+                type: string
+                enum: [success, failed, skipped]
+                description: Status of the operation
+              result:
+                type: object
+                description: Operation result data (for successful operations)
+              error:
+                $ref: '#/components/schemas/ProblemDetails'
+              execution_time_seconds:
+                type: number
+                minimum: 0
+                description: Time taken for this operation
+          description: Results for each operation in the batch
+        partial_success:
+          type: boolean
+          description: Whether the batch had partial success (some ops succeeded, some failed)
+
+  responses:
+    # Standard HTTP Responses
+    BadRequest:
+      description: Bad Request - Invalid request parameters or payload
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "https://pandafuzz.ethpandaops.io/problems/bad-request"
+            title: "Bad Request"
+            status: 400
+            detail: "The 'fuzzer' field must be one of: aflplusplus, libfuzzer, honggfuzz"
+            instance: "/api/v1/jobs"
+            timestamp: "2024-01-15T10:30:00Z"
+
+    Unauthorized:
+      description: Unauthorized - Authentication required or invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "https://pandafuzz.ethpandaops.io/problems/unauthorized"
+            title: "Unauthorized"
+            status: 401
+            detail: "Authentication required. Please provide a valid JWT token or API key"
+            instance: "/api/v1/jobs"
+            timestamp: "2024-01-15T10:30:00Z"
+
+    Forbidden:
+      description: Forbidden - Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "https://pandafuzz.ethpandaops.io/problems/forbidden"
+            title: "Forbidden"
+            status: 403
+            detail: "Insufficient permissions to access this resource"
+            instance: "/api/v1/campaigns/01234567-89ab-cdef-0123-456789abcdef"
+            timestamp: "2024-01-15T10:30:00Z"
+
+    NotFound:
+      description: Not Found - Resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "https://pandafuzz.ethpandaops.io/problems/not-found"
+            title: "Not Found"
+            status: 404
+            detail: "Job with ID '01234567-89ab-cdef-0123-456789abcdef' not found"
+            instance: "/api/v1/jobs/01234567-89ab-cdef-0123-456789abcdef"
+            timestamp: "2024-01-15T10:30:00Z"
+
+    Conflict:
+      description: Conflict - Resource already exists or state conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "https://pandafuzz.ethpandaops.io/problems/conflict"
+            title: "Conflict"
+            status: 409
+            detail: "Bot with hostname 'worker-001.internal' already exists"
+            instance: "/api/v1/bots"
+            timestamp: "2024-01-15T10:30:00Z"
+
+    PayloadTooLarge:
+      description: Payload Too Large - Request payload exceeds size limits
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "https://pandafuzz.ethpandaops.io/problems/payload-too-large"
+            title: "Payload Too Large"
+            status: 413
+            detail: "Upload size exceeds maximum limit of 100MB"
+            instance: "/api/v1/corpus"
+            timestamp: "2024-01-15T10:30:00Z"
+
+    UnprocessableEntity:
+      description: Unprocessable Entity - Request is well-formed but contains semantic errors
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "https://pandafuzz.ethpandaops.io/problems/unprocessable-entity"
+            title: "Unprocessable Entity"
+            status: 422
+            detail: "Campaign duration cannot exceed 30 days"
+            instance: "/api/v1/campaigns"
+            timestamp: "2024-01-15T10:30:00Z"
+
+    InternalServerError:
+      description: Internal Server Error - Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "https://pandafuzz.ethpandaops.io/problems/internal-server-error"
+            title: "Internal Server Error"
+            status: 500
+            detail: "An unexpected error occurred while processing your request"
+            instance: "/api/v1/jobs"
+            timestamp: "2024-01-15T10:30:00Z"
+            trace_id: "trace-12345-abcde"
+
+    ServiceUnavailable:
+      description: Service Unavailable - Service is temporarily unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: "https://pandafuzz.ethpandaops.io/problems/service-unavailable"
+            title: "Service Unavailable"
+            status: 503
+            detail: "Service is currently undergoing maintenance"
+            instance: "/api/v1/health"
+            timestamp: "2024-01-15T10:30:00Z"
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Number of seconds to wait before retrying

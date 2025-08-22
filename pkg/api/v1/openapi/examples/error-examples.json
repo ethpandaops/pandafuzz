@@ -1,0 +1,314 @@
+{
+  "validation_error": {
+    "summary": "Validation error with field details",
+    "description": "RFC 7807 compliant error response for request validation failures",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/validation-error",
+      "title": "Request Validation Failed",
+      "status": 400,
+      "detail": "The request body contains invalid or missing required fields",
+      "instance": "/api/v1/jobs",
+      "errors": [
+        {
+          "field": "fuzzer_type",
+          "code": "INVALID_ENUM",
+          "message": "Must be one of: afl++, libfuzzer, honggfuzz"
+        },
+        {
+          "field": "config.duration",
+          "code": "INVALID_FORMAT",
+          "message": "Duration must be in Go format (e.g., '1h30m', '45s')"
+        },
+        {
+          "field": "target_binary",
+          "code": "REQUIRED_FIELD",
+          "message": "Target binary path is required"
+        }
+      ]
+    }
+  },
+
+  "unauthorized_error": {
+    "summary": "Authentication required",
+    "description": "Error when accessing protected endpoint without valid authentication",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/authentication-required",
+      "title": "Authentication Required",
+      "status": 401,
+      "detail": "Valid authentication credentials are required to access this resource",
+      "instance": "/api/v1/campaigns/550e8400-e29b-41d4-a716-446655440002"
+    }
+  },
+
+  "forbidden_error": {
+    "summary": "Insufficient permissions",
+    "description": "Error when user lacks required permissions for the operation",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/insufficient-permissions",
+      "title": "Insufficient Permissions",
+      "status": 403,
+      "detail": "You do not have permission to perform this operation on the specified resource",
+      "instance": "/api/v1/campaigns/550e8400-e29b-41d4-a716-446655440002",
+      "errors": [
+        {
+          "field": "operation",
+          "code": "PERMISSION_DENIED",
+          "message": "Operation 'delete' requires 'admin' role or resource ownership"
+        }
+      ]
+    }
+  },
+
+  "not_found_error": {
+    "summary": "Resource not found",
+    "description": "Error when requested resource does not exist",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/resource-not-found",
+      "title": "Resource Not Found",
+      "status": 404,
+      "detail": "The requested resource could not be found",
+      "instance": "/api/v1/jobs/550e8400-e29b-41d4-a716-446655440999"
+    }
+  },
+
+  "conflict_error": {
+    "summary": "Resource conflict",
+    "description": "Error when operation conflicts with current resource state",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/resource-conflict",
+      "title": "Resource Conflict",
+      "status": 409,
+      "detail": "The operation cannot be completed due to a conflict with the current state of the resource",
+      "instance": "/api/v1/jobs/550e8400-e29b-41d4-a716-446655440001",
+      "errors": [
+        {
+          "field": "status",
+          "code": "INVALID_STATE_TRANSITION",
+          "message": "Cannot cancel job in 'completed' status"
+        }
+      ]
+    }
+  },
+
+  "rate_limit_error": {
+    "summary": "Rate limit exceeded",
+    "description": "Error when client exceeds API rate limits",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/rate-limit-exceeded",
+      "title": "Rate Limit Exceeded",
+      "status": 429,
+      "detail": "Request rate limit exceeded. Please reduce request frequency",
+      "instance": "/api/v1/jobs",
+      "errors": [
+        {
+          "field": "rate_limit",
+          "code": "RATE_LIMIT_EXCEEDED",
+          "message": "Maximum 100 requests per minute exceeded. Current rate: 150/min"
+        }
+      ]
+    }
+  },
+
+  "payload_too_large_error": {
+    "summary": "Request payload too large",
+    "description": "Error when request body exceeds size limits",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/payload-too-large",
+      "title": "Request Payload Too Large",
+      "status": 413,
+      "detail": "The request payload exceeds the maximum allowed size",
+      "instance": "/api/v1/corpus",
+      "errors": [
+        {
+          "field": "payload_size",
+          "code": "PAYLOAD_TOO_LARGE",
+          "message": "Payload size 52MB exceeds maximum allowed size of 50MB"
+        }
+      ]
+    }
+  },
+
+  "unprocessable_entity_error": {
+    "summary": "Semantically invalid request",
+    "description": "Error when request is syntactically valid but semantically incorrect",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/unprocessable-entity",
+      "title": "Unprocessable Entity",
+      "status": 422,
+      "detail": "The request is syntactically correct but contains semantic errors",
+      "instance": "/api/v1/campaigns",
+      "errors": [
+        {
+          "field": "fuzzer_configs",
+          "code": "SEMANTIC_ERROR",
+          "message": "Total fuzzer weight exceeds 1.0 (current: 1.3)"
+        },
+        {
+          "field": "scheduling.max_concurrent_jobs",
+          "code": "RESOURCE_CONSTRAINT",
+          "message": "Requested concurrent jobs (50) exceeds available bot capacity (20)"
+        }
+      ]
+    }
+  },
+
+  "internal_server_error": {
+    "summary": "Internal server error",
+    "description": "Generic server error with tracking information",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/internal-server-error",
+      "title": "Internal Server Error",
+      "status": 500,
+      "detail": "An unexpected error occurred while processing your request",
+      "instance": "/api/v1/jobs/550e8400-e29b-41d4-a716-446655440001/logs"
+    }
+  },
+
+  "service_unavailable_error": {
+    "summary": "Service temporarily unavailable",
+    "description": "Error when service is under maintenance or overloaded",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/service-unavailable",
+      "title": "Service Temporarily Unavailable",
+      "status": 503,
+      "detail": "The service is temporarily unavailable due to maintenance. Please try again later",
+      "instance": "/api/v1/system/health",
+      "errors": [
+        {
+          "field": "service_status",
+          "code": "MAINTENANCE_MODE",
+          "message": "System is in maintenance mode. Expected completion: 2023-12-01T16:00:00Z"
+        }
+      ]
+    }
+  },
+
+  "database_connection_error": {
+    "summary": "Database connectivity issue",
+    "description": "Error when database operations fail",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/database-error",
+      "title": "Database Connection Error",
+      "status": 503,
+      "detail": "Unable to connect to the database. Operations are temporarily unavailable",
+      "instance": "/api/v1/jobs",
+      "errors": [
+        {
+          "field": "database",
+          "code": "CONNECTION_FAILED",
+          "message": "Database connection pool exhausted. Retry after 30 seconds"
+        }
+      ]
+    }
+  },
+
+  "bot_timeout_error": {
+    "summary": "Bot communication timeout",
+    "description": "Error when bot fails to respond within timeout period",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/bot-timeout",
+      "title": "Bot Communication Timeout",
+      "status": 408,
+      "detail": "The assigned bot failed to respond within the expected timeout period",
+      "instance": "/api/v1/bots/550e8400-e29b-41d4-a716-446655440000/heartbeat",
+      "errors": [
+        {
+          "field": "bot_id",
+          "code": "COMMUNICATION_TIMEOUT",
+          "message": "Bot 550e8400-e29b-41d4-a716-446655440000 has not sent heartbeat for 5 minutes"
+        }
+      ]
+    }
+  },
+
+  "resource_exhaustion_error": {
+    "summary": "Insufficient system resources",
+    "description": "Error when system lacks resources to fulfill request",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/resource-exhaustion",
+      "title": "Insufficient System Resources",
+      "status": 507,
+      "detail": "The system lacks sufficient resources to complete the requested operation",
+      "instance": "/api/v1/jobs",
+      "errors": [
+        {
+          "field": "resources",
+          "code": "INSUFFICIENT_MEMORY",
+          "message": "Requested memory (8GB) exceeds available system memory (2GB)"
+        },
+        {
+          "field": "resources",
+          "code": "NO_AVAILABLE_BOTS",
+          "message": "No bots available with required capabilities: [libfuzzer, coverage]"
+        }
+      ]
+    }
+  },
+
+  "configuration_error": {
+    "summary": "Invalid system configuration",
+    "description": "Error due to misconfigured system settings",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/configuration-error",
+      "title": "System Configuration Error",
+      "status": 500,
+      "detail": "The system configuration is invalid or incomplete",
+      "instance": "/api/v1/campaigns",
+      "errors": [
+        {
+          "field": "storage_backend",
+          "code": "INVALID_CONFIGURATION",
+          "message": "Storage backend configuration is missing required S3 credentials"
+        }
+      ]
+    }
+  },
+
+  "batch_partial_failure": {
+    "summary": "Batch operation with partial failures",
+    "description": "Some items in batch operation succeeded while others failed",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/batch-partial-failure",
+      "title": "Batch Operation Partially Failed",
+      "status": 207,
+      "detail": "The batch operation completed with some failures",
+      "instance": "/api/v1/results/batch",
+      "errors": [
+        {
+          "field": "batch_item_5",
+          "code": "DUPLICATE_CRASH",
+          "message": "Crash with same signature already exists"
+        },
+        {
+          "field": "batch_item_12",
+          "code": "INVALID_COVERAGE_DATA",
+          "message": "Coverage data format is invalid or corrupted"
+        }
+      ]
+    }
+  },
+
+  "fuzzer_engine_error": {
+    "summary": "Fuzzer engine failure",
+    "description": "Error specific to fuzzer engine operation",
+    "value": {
+      "type": "https://pandafuzz.example.com/problems/fuzzer-engine-error",
+      "title": "Fuzzer Engine Error",
+      "status": 422,
+      "detail": "The specified fuzzer engine encountered an error during initialization or execution",
+      "instance": "/api/v1/jobs/550e8400-e29b-41d4-a716-446655440001",
+      "errors": [
+        {
+          "field": "fuzzer_type",
+          "code": "ENGINE_INITIALIZATION_FAILED",
+          "message": "AFL++ failed to initialize: target binary is not instrumented"
+        },
+        {
+          "field": "config.fuzzer_args",
+          "code": "INVALID_ARGUMENT",
+          "message": "AFL++ argument '-X' is not supported in this version"
+        }
+      ]
+    }
+  }
+}

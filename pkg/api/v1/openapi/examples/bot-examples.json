@@ -1,0 +1,249 @@
+{
+  "bot_registration_request": {
+    "summary": "Register a new fuzzing bot",
+    "description": "Example request to register a bot with AFL++ and LibFuzzer capabilities",
+    "value": {
+      "name": "fuzzer-bot-prod-01",
+      "hostname": "bot-worker-01.prod.example.com",
+      "capabilities": [
+        "afl++",
+        "libfuzzer", 
+        "coverage",
+        "minimization",
+        "reproduction"
+      ],
+      "resources": {
+        "cpu_cores": 16,
+        "cpu_usage_percent": 5.2,
+        "memory_total": 34359738368,
+        "memory_available": 32212254720,
+        "disk_total": 2199023255552,
+        "disk_available": 1649267441664,
+        "max_concurrent_jobs": 4,
+        "current_jobs": 0,
+        "network_interfaces": [
+          {
+            "name": "eth0",
+            "ip_address": "10.0.1.15",
+            "bandwidth_mbps": 1000
+          }
+        ]
+      },
+      "api_endpoint": "http://10.0.1.15:8081/api/v1",
+      "tags": [
+        "production",
+        "high-memory",
+        "dedicated"
+      ],
+      "metadata": {
+        "os": "ubuntu-22.04",
+        "arch": "amd64",
+        "docker_version": "24.0.7",
+        "kernel": "5.15.0-89-generic",
+        "datacenter": "us-east-1"
+      }
+    }
+  },
+
+  "bot_registration_response": {
+    "summary": "Successful bot registration",
+    "description": "Response after successful bot registration with assigned ID and configuration",
+    "value": {
+      "bot_id": "550e8400-e29b-41d4-a716-446655440000",
+      "status": "registered",
+      "heartbeat_interval": "30s",
+      "timeout_duration": "2m",
+      "assigned_at": "2023-12-01T10:00:00Z",
+      "master_endpoint": "http://master.example.com:8080/api/v1"
+    }
+  },
+
+  "bot_heartbeat_request": {
+    "summary": "Bot heartbeat with job progress",
+    "description": "Heartbeat from bot currently executing a fuzzing job",
+    "value": {
+      "status": "busy",
+      "timestamp": "2023-12-01T14:45:30Z",
+      "current_job_id": "550e8400-e29b-41d4-a716-446655440001",
+      "resources": {
+        "cpu_cores": 16,
+        "cpu_usage_percent": 78.5,
+        "memory_total": 34359738368,
+        "memory_available": 25769803776,
+        "disk_total": 2199023255552,
+        "disk_available": 1539267441664,
+        "max_concurrent_jobs": 4,
+        "current_jobs": 2
+      },
+      "job_progress": {
+        "progress_percent": 65.5,
+        "executions_per_second": 1250.75,
+        "total_executions": 2500000,
+        "crashes_found": 8,
+        "coverage_edges": 15420
+      },
+      "errors": [
+        {
+          "message": "High memory usage detected",
+          "timestamp": "2023-12-01T14:40:00Z",
+          "severity": "warning"
+        }
+      ]
+    }
+  },
+
+  "bot_heartbeat_response": {
+    "summary": "Master acknowledgment of heartbeat",
+    "description": "Master's response with next heartbeat time and any commands",
+    "value": {
+      "acknowledged": true,
+      "next_heartbeat_at": "2023-12-01T15:15:30Z",
+      "commands": [
+        {
+          "type": "job_assign",
+          "payload": {
+            "job_id": "550e8400-e29b-41d4-a716-446655440005",
+            "priority": 7
+          }
+        }
+      ],
+      "configuration_updates": {
+        "log_level": "info",
+        "max_concurrent_jobs": 3
+      }
+    }
+  },
+
+  "bot_list_response": {
+    "summary": "Paginated list of registered bots",
+    "description": "Response showing multiple bots with different statuses and capabilities",
+    "value": {
+      "bots": [
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440000",
+          "name": "fuzzer-bot-prod-01",
+          "hostname": "bot-worker-01.prod.example.com",
+          "status": "busy",
+          "capabilities": ["afl++", "libfuzzer", "coverage"],
+          "resources": {
+            "cpu_cores": 16,
+            "cpu_usage_percent": 78.5,
+            "memory_total": 34359738368,
+            "memory_available": 25769803776,
+            "disk_total": 2199023255552,
+            "disk_available": 1539267441664,
+            "max_concurrent_jobs": 4,
+            "current_jobs": 2
+          },
+          "api_endpoint": "http://10.0.1.15:8081/api/v1",
+          "current_job_id": "550e8400-e29b-41d4-a716-446655440001",
+          "last_heartbeat": "2023-12-01T14:45:30Z",
+          "registered_at": "2023-12-01T10:00:00Z",
+          "timeout_at": "2023-12-01T14:47:30Z",
+          "failure_count": 0,
+          "tags": ["production", "high-memory"],
+          "metadata": {
+            "os": "ubuntu-22.04",
+            "arch": "amd64"
+          }
+        },
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440010",
+          "name": "fuzzer-bot-dev-02",
+          "hostname": "bot-worker-02.dev.example.com",
+          "status": "idle",
+          "capabilities": ["honggfuzz", "minimization"],
+          "resources": {
+            "cpu_cores": 8,
+            "cpu_usage_percent": 12.3,
+            "memory_total": 17179869184,
+            "memory_available": 15032385536,
+            "disk_total": 1099511627776,
+            "disk_available": 879609302221,
+            "max_concurrent_jobs": 2,
+            "current_jobs": 0
+          },
+          "api_endpoint": "http://10.0.2.20:8081/api/v1",
+          "current_job_id": null,
+          "last_heartbeat": "2023-12-01T14:44:45Z",
+          "registered_at": "2023-12-01T09:30:00Z",
+          "timeout_at": "2023-12-01T14:46:45Z",
+          "failure_count": 0,
+          "tags": ["development", "testing"],
+          "metadata": {
+            "os": "ubuntu-20.04",
+            "arch": "amd64"
+          }
+        }
+      ],
+      "pagination": {
+        "limit": 50,
+        "offset": 0,
+        "total": 25,
+        "has_more": false
+      }
+    }
+  },
+
+  "bot_metrics_response": {
+    "summary": "Detailed bot performance metrics",
+    "description": "Comprehensive metrics for bot performance analysis",
+    "value": {
+      "bot_id": "550e8400-e29b-41d4-a716-446655440000",
+      "collected_at": "2023-12-01T14:45:30Z",
+      "resource_usage": {
+        "cpu_percent": 78.5,
+        "memory_used_bytes": 8589934592,
+        "disk_io_read_bytes": 1073741824,
+        "disk_io_write_bytes": 2147483648,
+        "network_rx_bytes": 52428800,
+        "network_tx_bytes": 104857600
+      },
+      "job_statistics": {
+        "total_jobs_executed": 127,
+        "jobs_completed_successfully": 115,
+        "jobs_failed": 8,
+        "jobs_timed_out": 4,
+        "average_job_duration_seconds": 3600.5,
+        "total_crashes_found": 245,
+        "total_coverage_edges": 187500
+      },
+      "uptime": "5h15m30s",
+      "health_score": 95.5
+    }
+  },
+
+  "bot_offline_example": {
+    "summary": "Offline bot status",
+    "description": "Example of a bot that has gone offline",
+    "value": {
+      "id": "550e8400-e29b-41d4-a716-446655440020",
+      "name": "fuzzer-bot-staging-03",
+      "hostname": "bot-worker-03.staging.example.com",
+      "status": "offline",
+      "capabilities": ["afl++", "coverage"],
+      "resources": {
+        "cpu_cores": 8,
+        "cpu_usage_percent": 0,
+        "memory_total": 17179869184,
+        "memory_available": 17179869184,
+        "disk_total": 1099511627776,
+        "disk_available": 989526789632,
+        "max_concurrent_jobs": 2,
+        "current_jobs": 0
+      },
+      "api_endpoint": "http://10.0.3.25:8081/api/v1",
+      "current_job_id": null,
+      "last_heartbeat": "2023-12-01T13:30:15Z",
+      "registered_at": "2023-12-01T08:00:00Z",
+      "timeout_at": "2023-12-01T13:32:15Z",
+      "failure_count": 3,
+      "tags": ["staging", "unreliable"],
+      "metadata": {
+        "os": "ubuntu-22.04",
+        "arch": "amd64",
+        "last_error": "Connection timeout"
+      }
+    }
+  }
+}

@@ -1,0 +1,941 @@
+# Analytics schemas for PandaFuzz API v1
+# Coverage reports, performance metrics, and trend analysis
+
+CoverageReport:
+  type: object
+  description: Comprehensive code coverage report from fuzzing execution
+  required:
+    - id
+    - job_id
+    - format
+    - collected_at
+    - line_coverage
+    - function_coverage
+    - branch_coverage
+    - file_path
+    - checksum
+  properties:
+    id:
+      type: string
+      format: uuid
+      description: Unique coverage report identifier
+      example: "550e8400-e29b-41d4-a716-446655440010"
+    job_id:
+      type: string
+      format: uuid
+      description: Job that generated this report
+      example: "550e8400-e29b-41d4-a716-446655440001"
+    campaign_id:
+      type: string
+      format: uuid
+      nullable: true
+      description: Associated campaign ID
+      example: "550e8400-e29b-41d4-a716-446655440002"
+    bot_id:
+      type: string
+      format: uuid
+      nullable: true
+      description: Bot that generated this report
+      example: "550e8400-e29b-41d4-a716-446655440000"
+    format:
+      type: string
+      enum: [json, html, lcov, cobertura, xml, binary]
+      description: Coverage report format
+      example: "json"
+    collected_at:
+      type: string
+      format: date-time
+      description: When coverage data was collected
+      example: "2023-12-01T12:00:00Z"
+    execution_phase:
+      type: string
+      enum: [initial, periodic, final, on_demand]
+      description: When during execution this was collected
+      example: "final"
+    line_coverage:
+      $ref: '#/CoverageMetrics'
+    function_coverage:
+      $ref: '#/CoverageMetrics'
+    branch_coverage:
+      $ref: '#/CoverageMetrics'
+    instruction_coverage:
+      $ref: '#/CoverageMetrics'
+    file_path:
+      type: string
+      maxLength: 500
+      description: Path to the coverage report file
+      example: "/data/coverage/job_550e8400/coverage.json"
+    file_size:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Size of the coverage report file in bytes
+      example: 2097152
+    checksum:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: SHA256 checksum of the report file
+      example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    source_files:
+      type: array
+      description: Per-file coverage breakdown
+      items:
+        $ref: '#/SourceFileCoverage'
+      maxItems: 10000
+    summary:
+      $ref: '#/CoverageSummary'
+    comparison:
+      $ref: '#/CoverageComparison'
+    metadata:
+      type: object
+      description: Additional report metadata
+      additionalProperties:
+        type: string
+      maxProperties: 30
+      example:
+        compiler: "gcc-11"
+        optimization: "-O2"
+        sanitizers: "asan,ubsan"
+
+CoverageMetrics:
+  type: object
+  description: Coverage metrics for a specific measurement type
+  required:
+    - total
+    - covered
+    - percentage
+  properties:
+    total:
+      type: integer
+      minimum: 0
+      description: Total number of items (lines/functions/branches)
+      example: 10000
+    covered:
+      type: integer
+      minimum: 0
+      description: Number of covered items
+      example: 7500
+    percentage:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 100
+      description: Coverage percentage
+      example: 75.0
+    new_covered:
+      type: integer
+      minimum: 0
+      description: Newly covered items since last report
+      example: 150
+    regions:
+      type: array
+      description: Specific coverage regions
+      items:
+        type: object
+        properties:
+          start_line:
+            type: integer
+            minimum: 1
+          end_line:
+            type: integer
+            minimum: 1
+          start_column:
+            type: integer
+            minimum: 1
+          end_column:
+            type: integer
+            minimum: 1
+          hit_count:
+            type: integer
+            minimum: 0
+      maxItems: 100000
+
+SourceFileCoverage:
+  type: object
+  description: Coverage information for a single source file
+  required:
+    - file_path
+    - line_coverage
+    - function_coverage
+  properties:
+    file_path:
+      type: string
+      maxLength: 1000
+      description: Relative path to the source file
+      example: "src/parser/http_parser.c"
+    absolute_path:
+      type: string
+      maxLength: 1000
+      description: Absolute path to the source file
+      example: "/opt/src/parser/http_parser.c"
+    file_hash:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: SHA256 hash of the source file
+      example: "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
+    line_coverage:
+      $ref: '#/CoverageMetrics'
+    function_coverage:
+      $ref: '#/CoverageMetrics'
+    branch_coverage:
+      $ref: '#/CoverageMetrics'
+    complexity_score:
+      type: number
+      format: float
+      minimum: 0
+      description: Cyclomatic complexity score
+      example: 15.5
+    functions:
+      type: array
+      description: Per-function coverage details
+      items:
+        type: object
+        properties:
+          name:
+            type: string
+            maxLength: 200
+          start_line:
+            type: integer
+            minimum: 1
+          end_line:
+            type: integer
+            minimum: 1
+          hit_count:
+            type: integer
+            minimum: 0
+          coverage_percentage:
+            type: number
+            format: float
+            minimum: 0
+            maximum: 100
+      maxItems: 10000
+
+CoverageSummary:
+  type: object
+  description: High-level coverage summary and insights
+  required:
+    - overall_percentage
+    - hotspots_count
+    - uncovered_critical_paths
+  properties:
+    overall_percentage:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 100
+      description: Overall weighted coverage percentage
+      example: 78.5
+    hotspots_count:
+      type: integer
+      minimum: 0
+      description: Number of frequently executed code hotspots
+      example: 25
+    uncovered_critical_paths:
+      type: integer
+      minimum: 0
+      description: Number of uncovered critical execution paths
+      example: 8
+    complexity_weighted_coverage:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 100
+      description: Coverage weighted by code complexity
+      example: 82.3
+    risk_score:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 10
+      description: Risk score based on uncovered critical code
+      example: 3.7
+    improvement_opportunities:
+      type: array
+      description: Suggested areas for coverage improvement
+      items:
+        type: object
+        properties:
+          file_path:
+            type: string
+          function_name:
+            type: string
+          priority:
+            type: string
+            enum: [low, medium, high, critical]
+          reason:
+            type: string
+          potential_impact:
+            type: number
+            format: float
+      maxItems: 100
+
+CoverageComparison:
+  type: object
+  description: Comparison with previous coverage reports
+  properties:
+    baseline_report_id:
+      type: string
+      format: uuid
+      description: ID of the baseline report for comparison
+      example: "550e8400-e29b-41d4-a716-446655440011"
+    line_coverage_delta:
+      type: number
+      format: float
+      description: Change in line coverage percentage
+      example: 2.5
+    function_coverage_delta:
+      type: number
+      format: float
+      description: Change in function coverage percentage
+      example: 1.8
+    branch_coverage_delta:
+      type: number
+      format: float
+      description: Change in branch coverage percentage
+      example: 3.2
+    new_files_covered:
+      type: integer
+      minimum: 0
+      description: Number of newly covered files
+      example: 3
+    regression_count:
+      type: integer
+      minimum: 0
+      description: Number of coverage regressions
+      example: 1
+    improvement_areas:
+      type: array
+      description: Areas with improved coverage
+      items:
+        type: string
+      maxItems: 100
+    regression_areas:
+      type: array
+      description: Areas with reduced coverage
+      items:
+        type: string
+      maxItems: 100
+
+PerformanceMetrics:
+  type: object
+  description: Performance metrics from fuzzing execution
+  required:
+    - id
+    - job_id
+    - collected_at
+    - execution_rate
+    - memory_usage
+    - cpu_usage
+  properties:
+    id:
+      type: string
+      format: uuid
+      description: Unique metrics identifier
+      example: "550e8400-e29b-41d4-a716-446655440012"
+    job_id:
+      type: string
+      format: uuid
+      description: Associated job ID
+      example: "550e8400-e29b-41d4-a716-446655440001"
+    bot_id:
+      type: string
+      format: uuid
+      nullable: true
+      description: Bot that reported these metrics
+      example: "550e8400-e29b-41d4-a716-446655440000"
+    collected_at:
+      type: string
+      format: date-time
+      description: When metrics were collected
+      example: "2023-12-01T12:15:30Z"
+    collection_interval:
+      $ref: 'common.yaml#/Duration'
+      description: Interval over which metrics were collected
+      example: "5m"
+    execution_rate:
+      $ref: '#/ExecutionMetrics'
+    memory_usage:
+      $ref: '#/MemoryMetrics'
+    cpu_usage:
+      $ref: '#/CpuMetrics'
+    disk_io:
+      $ref: '#/DiskIOMetrics'
+    network_io:
+      $ref: '#/NetworkIOMetrics'
+    fuzzer_specific:
+      type: object
+      description: Fuzzer-specific performance metrics
+      additionalProperties: true
+      example:
+        afl_stability: 98.5
+        afl_coverage_map_density: 15.2
+        libfuzzer_feature_coverage: 85.7
+    system_load:
+      type: object
+      description: System load metrics
+      properties:
+        load_average_1m:
+          type: number
+          format: float
+          minimum: 0
+        load_average_5m:
+          type: number
+          format: float
+          minimum: 0
+        load_average_15m:
+          type: number
+          format: float
+          minimum: 0
+        context_switches_per_sec:
+          type: number
+          format: float
+          minimum: 0
+
+ExecutionMetrics:
+  type: object
+  description: Execution rate and throughput metrics
+  required:
+    - executions_per_second
+    - total_executions
+    - average_execution_time_us
+  properties:
+    executions_per_second:
+      type: number
+      format: float
+      minimum: 0
+      description: Current execution rate
+      example: 1250.75
+    total_executions:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total executions since start
+      example: 2500000
+    average_execution_time_us:
+      type: number
+      format: float
+      minimum: 0
+      description: Average execution time in microseconds
+      example: 800.5
+    peak_execution_rate:
+      type: number
+      format: float
+      minimum: 0
+      description: Peak execution rate achieved
+      example: 1500.25
+    slowest_execution_us:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Slowest single execution in microseconds
+      example: 50000
+    fastest_execution_us:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Fastest single execution in microseconds
+      example: 100
+    timeout_count:
+      type: integer
+      minimum: 0
+      description: Number of executions that timed out
+      example: 25
+    crash_count:
+      type: integer
+      minimum: 0
+      description: Number of executions that crashed
+      example: 8
+    hang_count:
+      type: integer
+      minimum: 0
+      description: Number of executions that hung
+      example: 3
+
+MemoryMetrics:
+  type: object
+  description: Memory usage metrics
+  required:
+    - current_usage_bytes
+    - peak_usage_bytes
+    - allocated_bytes
+    - freed_bytes
+  properties:
+    current_usage_bytes:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Current memory usage in bytes
+      example: 536870912
+    peak_usage_bytes:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Peak memory usage in bytes
+      example: 1073741824
+    allocated_bytes:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total memory allocated
+      example: 8589934592
+    freed_bytes:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total memory freed
+      example: 8053063680
+    allocation_count:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Number of memory allocations
+      example: 1000000
+    free_count:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Number of memory frees
+      example: 999500
+    memory_leaks:
+      type: integer
+      minimum: 0
+      description: Detected memory leaks
+      example: 5
+    heap_fragmentation_percent:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 100
+      description: Heap fragmentation percentage
+      example: 15.5
+
+CpuMetrics:
+  type: object
+  description: CPU usage metrics
+  required:
+    - usage_percent
+    - user_time_percent
+    - system_time_percent
+  properties:
+    usage_percent:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 100
+      description: Overall CPU usage percentage
+      example: 85.5
+    user_time_percent:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 100
+      description: User space CPU time percentage
+      example: 75.2
+    system_time_percent:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 100
+      description: System CPU time percentage
+      example: 10.3
+    idle_time_percent:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 100
+      description: CPU idle time percentage
+      example: 14.5
+    cores_used:
+      type: integer
+      minimum: 0
+      description: Number of CPU cores actively used
+      example: 6
+    context_switches:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Number of context switches
+      example: 500000
+    interrupts:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Number of interrupts handled
+      example: 250000
+
+DiskIOMetrics:
+  type: object
+  description: Disk I/O performance metrics
+  required:
+    - read_bytes
+    - write_bytes
+    - read_operations
+    - write_operations
+  properties:
+    read_bytes:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total bytes read from disk
+      example: 1073741824
+    write_bytes:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total bytes written to disk
+      example: 2147483648
+    read_operations:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Number of read operations
+      example: 100000
+    write_operations:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Number of write operations
+      example: 150000
+    average_read_latency_us:
+      type: number
+      format: float
+      minimum: 0
+      description: Average read latency in microseconds
+      example: 150.5
+    average_write_latency_us:
+      type: number
+      format: float
+      minimum: 0
+      description: Average write latency in microseconds
+      example: 200.8
+    peak_read_rate_mbps:
+      type: number
+      format: float
+      minimum: 0
+      description: Peak read rate in MB/s
+      example: 250.5
+    peak_write_rate_mbps:
+      type: number
+      format: float
+      minimum: 0
+      description: Peak write rate in MB/s
+      example: 180.2
+
+NetworkIOMetrics:
+  type: object
+  description: Network I/O metrics (if applicable)
+  properties:
+    bytes_sent:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total bytes sent over network
+      example: 104857600
+    bytes_received:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total bytes received from network
+      example: 52428800
+    packets_sent:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Number of packets sent
+      example: 100000
+    packets_received:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Number of packets received
+      example: 75000
+    connection_count:
+      type: integer
+      minimum: 0
+      description: Number of active network connections
+      example: 10
+    error_count:
+      type: integer
+      minimum: 0
+      description: Number of network errors
+      example: 5
+
+TrendData:
+  type: object
+  description: Time-series trend data for analytics
+  required:
+    - metric_name
+    - data_points
+    - time_range
+  properties:
+    metric_name:
+      type: string
+      maxLength: 100
+      description: Name of the metric being tracked
+      example: "execution_rate"
+    metric_type:
+      type: string
+      enum: [gauge, counter, histogram, rate]
+      description: Type of metric
+      example: "rate"
+    data_points:
+      type: array
+      description: Time-series data points
+      items:
+        $ref: '#/DataPoint'
+      minItems: 1
+      maxItems: 10000
+    time_range:
+      $ref: 'common.yaml#/TimeRange'
+    aggregation:
+      type: string
+      enum: [raw, average, sum, min, max, percentile]
+      description: Aggregation method used
+      example: "average"
+    sampling_interval:
+      $ref: 'common.yaml#/Duration'
+      description: Time interval between data points
+      example: "1m"
+    metadata:
+      type: object
+      description: Additional trend metadata
+      additionalProperties:
+        type: string
+      maxProperties: 20
+
+DataPoint:
+  type: object
+  description: Single data point in a time series
+  required:
+    - timestamp
+    - value
+  properties:
+    timestamp:
+      type: string
+      format: date-time
+      description: Data point timestamp
+      example: "2023-12-01T12:15:30Z"
+    value:
+      type: number
+      format: float
+      description: Metric value at this timestamp
+      example: 1250.75
+    confidence:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 1
+      description: Confidence level in this measurement
+      example: 0.95
+    annotations:
+      type: array
+      description: Annotations for significant events
+      items:
+        type: string
+        maxLength: 200
+      maxItems: 10
+
+AggregatedStats:
+  type: object
+  description: Aggregated statistics across multiple jobs or campaigns
+  required:
+    - scope
+    - time_range
+    - jobs_analyzed
+    - total_executions
+    - total_crashes
+    - total_coverage
+  properties:
+    scope:
+      type: string
+      enum: [job, campaign, bot, global]
+      description: Scope of aggregation
+      example: "campaign"
+    scope_id:
+      type: string
+      format: uuid
+      nullable: true
+      description: ID of the scope entity
+      example: "550e8400-e29b-41d4-a716-446655440002"
+    time_range:
+      $ref: 'common.yaml#/TimeRange'
+    jobs_analyzed:
+      type: integer
+      minimum: 0
+      description: Number of jobs included in aggregation
+      example: 15
+    total_executions:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total executions across all jobs
+      example: 50000000
+    total_crashes:
+      type: integer
+      minimum: 0
+      description: Total crashes found
+      example: 150
+    unique_crashes:
+      type: integer
+      minimum: 0
+      description: Unique crashes found
+      example: 45
+    total_coverage:
+      type: integer
+      minimum: 0
+      description: Total unique coverage edges
+      example: 75000
+    average_execution_rate:
+      type: number
+      format: float
+      minimum: 0
+      description: Average execution rate across all jobs
+      example: 1150.5
+    peak_execution_rate:
+      type: number
+      format: float
+      minimum: 0
+      description: Peak execution rate achieved
+      example: 2500.8
+    total_cpu_time:
+      $ref: 'common.yaml#/Duration'
+      description: Total CPU time consumed
+      example: "500h30m"
+    total_memory_usage:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total memory used in bytes
+      example: 85899345920
+    efficiency_score:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 100
+      description: Overall efficiency score
+      example: 85.5
+    quality_metrics:
+      type: object
+      description: Quality assessment metrics
+      properties:
+        crash_to_execution_ratio:
+          type: number
+          format: float
+          minimum: 0
+        coverage_growth_rate:
+          type: number
+          format: float
+        stability_score:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+        diversity_index:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+
+AnalyticsQuery:
+  type: object
+  description: Query parameters for analytics data retrieval
+  properties:
+    scope:
+      type: string
+      enum: [job, campaign, bot, global]
+      default: job
+      description: Analytics scope
+    scope_ids:
+      type: array
+      description: Specific entity IDs to include
+      items:
+        type: string
+        format: uuid
+      maxItems: 100
+    time_range:
+      $ref: 'common.yaml#/TimeRange'
+    metrics:
+      type: array
+      description: Specific metrics to retrieve
+      items:
+        type: string
+        enum: [execution_rate, memory_usage, cpu_usage, coverage, crashes, performance]
+      minItems: 1
+      maxItems: 10
+    aggregation:
+      type: string
+      enum: [raw, hourly, daily, weekly]
+      default: raw
+      description: Time-based aggregation level
+    filters:
+      type: object
+      description: Additional filters
+      properties:
+        fuzzer_types:
+          type: array
+          items:
+            $ref: 'common.yaml#/FuzzerType'
+        min_execution_rate:
+          type: number
+          format: float
+        min_coverage:
+          type: integer
+        job_statuses:
+          type: array
+          items:
+            type: string
+    output_format:
+      type: string
+      enum: [json, csv, prometheus]
+      default: json
+      description: Desired output format
+
+AnalyticsResponse:
+  type: object
+  description: Response containing analytics data
+  required:
+    - query
+    - results
+    - generated_at
+  properties:
+    query:
+      $ref: '#/AnalyticsQuery'
+      description: Original query parameters
+    results:
+      type: object
+      description: Analytics results
+      properties:
+        coverage_reports:
+          type: array
+          items:
+            $ref: '#/CoverageReport'
+        performance_metrics:
+          type: array
+          items:
+            $ref: '#/PerformanceMetrics'
+        trend_data:
+          type: array
+          items:
+            $ref: '#/TrendData'
+        aggregated_stats:
+          $ref: '#/AggregatedStats'
+    generated_at:
+      type: string
+      format: date-time
+      description: When the analytics were generated
+      example: "2023-12-01T14:45:30Z"
+    cache_info:
+      type: object
+      description: Cache information
+      properties:
+        cached:
+          type: boolean
+        cache_age:
+          $ref: 'common.yaml#/Duration'
+        expires_at:
+          type: string
+          format: date-time
+    processing_time:
+      $ref: 'common.yaml#/Duration'
+      description: Time taken to process the query
+      example: "250ms"

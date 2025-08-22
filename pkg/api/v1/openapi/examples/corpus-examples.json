@@ -1,0 +1,371 @@
+{
+  "corpus_upload_request": {
+    "summary": "Upload corpus files to collection",
+    "description": "Example multipart form request to upload multiple corpus files",
+    "value": {
+      "collection_id": "550e8400-e29b-41d4-a716-446655440005",
+      "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+      "source": "manual_upload",
+      "tags": ["baseline", "http-requests", "security-tests"],
+      "deduplicate": true,
+      "overwrite_duplicates": false
+    }
+  },
+
+  "corpus_upload_response": {
+    "summary": "Successful corpus upload",
+    "description": "Response showing upload results with some duplicates and failures",
+    "value": {
+      "upload_id": "550e8400-e29b-41d4-a716-446655440009",
+      "total_files": 100,
+      "uploaded_count": 85,
+      "duplicate_count": 12,
+      "failed_count": 3,
+      "total_bytes": 52428800,
+      "processing_time": "45s",
+      "uploaded_entries": [
+        {
+          "entry_id": "550e8400-e29b-41d4-a716-446655440010",
+          "filename": "http_basic_get.txt",
+          "size": 256,
+          "sha256": "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
+        },
+        {
+          "entry_id": "550e8400-e29b-41d4-a716-446655440011",
+          "filename": "http_post_json.txt",
+          "size": 1024,
+          "sha256": "b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567a"
+        }
+      ],
+      "errors": [
+        {
+          "filename": "corrupted_file.txt",
+          "error": "invalid_file_format",
+          "details": "File appears to be corrupted or empty"
+        },
+        {
+          "filename": "too_large_file.bin",
+          "error": "file_too_large",
+          "details": "File size exceeds maximum limit of 1MB"
+        }
+      ]
+    }
+  },
+
+  "corpus_entry_detailed": {
+    "summary": "Detailed corpus entry with mutation info",
+    "description": "Example of a corpus entry generated through mutation with coverage data",
+    "value": {
+      "id": "550e8400-e29b-41d4-a716-446655440003",
+      "filename": "mutated_http_request_gen3.txt",
+      "sha256": "c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567abc",
+      "size": 2048,
+      "source": "mutation",
+      "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+      "job_id": "550e8400-e29b-41d4-a716-446655440001",
+      "bot_id": "550e8400-e29b-41d4-a716-446655440000",
+      "created_at": "2023-12-01T11:25:15Z",
+      "discovered_at": "2023-12-01T11:25:10Z",
+      "coverage_edges": 1450,
+      "new_coverage_edges": 25,
+      "execution_time_us": 3500,
+      "parent_id": "550e8400-e29b-41d4-a716-446655440012",
+      "generation": 3,
+      "mutation_info": {
+        "mutator": "afl_havoc",
+        "mutation_type": "bit_flip",
+        "mutation_offset": 42,
+        "mutation_length": 4,
+        "mutation_data": "ZGVhZGJlZWY=",
+        "fuzzer_cycle": 125000
+      },
+      "priority_score": 0.85,
+      "access_count": 150,
+      "last_accessed": "2023-12-01T14:20:30Z",
+      "is_seed": false,
+      "is_quarantined": false,
+      "quarantine_reason": null,
+      "tags": ["high-coverage", "new-path", "generation-3"],
+      "metadata": {
+        "fuzzer": "afl++",
+        "discovery_method": "havoc_mutation",
+        "interesting_score": "8.5"
+      }
+    }
+  },
+
+  "corpus_seed_entry": {
+    "summary": "Seed corpus entry",
+    "description": "Example of an initial seed file in the corpus",
+    "value": {
+      "id": "550e8400-e29b-41d4-a716-446655440015",
+      "filename": "seed_http_basic.txt",
+      "sha256": "d4e5f6789012345678901234567890abcdef1234567890abcdef1234567abcd",
+      "size": 512,
+      "source": "seed",
+      "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+      "job_id": null,
+      "bot_id": null,
+      "created_at": "2023-12-01T09:00:00Z",
+      "discovered_at": null,
+      "coverage_edges": 850,
+      "new_coverage_edges": 850,
+      "execution_time_us": 2000,
+      "parent_id": null,
+      "generation": 0,
+      "mutation_info": null,
+      "priority_score": 0.95,
+      "access_count": 500,
+      "last_accessed": "2023-12-01T14:30:45Z",
+      "is_seed": true,
+      "is_quarantined": false,
+      "quarantine_reason": null,
+      "tags": ["seed", "baseline", "http-basic"],
+      "metadata": {
+        "source_file": "/data/seeds/http_basic_requests.txt",
+        "curator": "security-team"
+      }
+    }
+  },
+
+  "corpus_collection": {
+    "summary": "Corpus collection with access controls",
+    "description": "Example of a curated corpus collection for HTTP testing",
+    "value": {
+      "id": "550e8400-e29b-41d4-a716-446655440005",
+      "name": "HTTP Request Test Corpus",
+      "description": "Curated collection of HTTP requests for comprehensive parser testing, including edge cases and malformed inputs",
+      "collection_type": "curated",
+      "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+      "owner": "security-team",
+      "entry_count": 2500,
+      "total_size": 104857600,
+      "coverage_edges": 35000,
+      "created_at": "2023-12-01T08:00:00Z",
+      "updated_at": "2023-12-01T14:30:00Z",
+      "access_policy": {
+        "visibility": "campaign_only",
+        "read_permissions": ["security-team", "dev-team"],
+        "write_permissions": ["security-team"],
+        "allow_download": true,
+        "allow_sync": true
+      },
+      "sync_config": {
+        "auto_sync": true,
+        "sync_interval": "15m",
+        "sync_targets": ["550e8400-e29b-41d4-a716-446655440020"],
+        "sync_filters": {
+          "min_coverage": 100,
+          "max_size": 65536,
+          "include_sources": ["mutation", "seed"],
+          "priority_threshold": 0.6
+        },
+        "last_sync": "2023-12-01T14:15:00Z"
+      },
+      "tags": ["http", "baseline", "security", "production-ready"],
+      "metadata": {
+        "curator": "security-team",
+        "quality_score": "9.2",
+        "last_audit": "2023-11-25T00:00:00Z"
+      }
+    }
+  },
+
+  "corpus_sync_request": {
+    "summary": "Sync corpus between campaigns",
+    "description": "Request to synchronize high-quality corpus entries between campaigns",
+    "value": {
+      "source_type": "campaign",
+      "source_id": "550e8400-e29b-41d4-a716-446655440002",
+      "target_type": "campaign",
+      "target_id": "550e8400-e29b-41d4-a716-446655440006",
+      "sync_mode": "copy",
+      "filters": {
+        "min_coverage": 500,
+        "max_size": 32768,
+        "min_generation": 0,
+        "max_generation": 10,
+        "include_sources": ["mutation", "seed"],
+        "include_tags": ["high-coverage", "new-path"],
+        "exclude_tags": ["quarantined", "low-quality"],
+        "created_after": "2023-12-01T10:00:00Z",
+        "priority_threshold": 0.7
+      },
+      "dry_run": false,
+      "bidirectional": false,
+      "conflict_resolution": "skip"
+    }
+  },
+
+  "corpus_sync_response": {
+    "summary": "Successful corpus synchronization",
+    "description": "Response showing the results of corpus sync operation",
+    "value": {
+      "sync_id": "550e8400-e29b-41d4-a716-446655440007",
+      "status": "completed",
+      "started_at": "2023-12-01T14:00:00Z",
+      "completed_at": "2023-12-01T14:05:30Z",
+      "entries_processed": 1500,
+      "entries_synced": 1200,
+      "entries_skipped": 250,
+      "entries_failed": 50,
+      "bytes_transferred": 125829120,
+      "processing_time": "5m30s",
+      "errors": [
+        "Failed to sync entry 550e8400-e29b-41d4-a716-446655440025: permission denied",
+        "Entry 550e8400-e29b-41d4-a716-446655440026 exceeds size limit"
+      ],
+      "warnings": [
+        "High memory usage during sync operation",
+        "Some entries skipped due to duplicate content"
+      ]
+    }
+  },
+
+  "corpus_list_response": {
+    "summary": "Paginated corpus list with filters",
+    "description": "Response showing corpus entries with applied filters and statistics",
+    "value": {
+      "entries": [
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440003",
+          "filename": "mutated_http_request_gen3.txt",
+          "sha256": "c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567abc",
+          "size": 2048,
+          "source": "mutation",
+          "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+          "coverage_edges": 1450,
+          "generation": 3,
+          "created_at": "2023-12-01T11:25:15Z",
+          "is_seed": false,
+          "tags": ["high-coverage", "generation-3"]
+        },
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440015",
+          "filename": "seed_http_basic.txt",
+          "sha256": "d4e5f6789012345678901234567890abcdef1234567890abcdef1234567abcd",
+          "size": 512,
+          "source": "seed",
+          "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+          "coverage_edges": 850,
+          "generation": 0,
+          "created_at": "2023-12-01T09:00:00Z",
+          "is_seed": true,
+          "tags": ["seed", "baseline"]
+        }
+      ],
+      "pagination": {
+        "limit": 50,
+        "offset": 0,
+        "total": 2500,
+        "has_more": true
+      },
+      "filters": {
+        "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+        "source": ["mutation", "seed"],
+        "min_coverage": 500,
+        "is_quarantined": false
+      },
+      "statistics": {
+        "total_entries": 2500,
+        "total_size_bytes": 104857600,
+        "unique_coverage_edges": 35000,
+        "average_size": 41943.04,
+        "source_breakdown": {
+          "seed": 50,
+          "mutation": 2200,
+          "manual_upload": 200,
+          "crash_promotion": 25,
+          "corpus_sync": 25
+        }
+      }
+    }
+  },
+
+  "quarantine_request": {
+    "summary": "Quarantine problematic corpus entries",
+    "description": "Request to quarantine corpus entries causing excessive memory usage",
+    "value": {
+      "entries": [
+        "550e8400-e29b-41d4-a716-446655440030",
+        "550e8400-e29b-41d4-a716-446655440031",
+        "550e8400-e29b-41d4-a716-446655440032"
+      ],
+      "reason": "Entries cause excessive memory usage (>4GB) leading to OOM kills in target application",
+      "severity": "high",
+      "automatic": false,
+      "duration": "7d",
+      "requester": "performance-monitor-system"
+    }
+  },
+
+  "quarantine_response": {
+    "summary": "Successful quarantine operation",
+    "description": "Response after quarantining problematic corpus entries",
+    "value": {
+      "quarantined_count": 3,
+      "failed_count": 0,
+      "quarantine_id": "550e8400-e29b-41d4-a716-446655440008",
+      "results": [
+        {
+          "entry_id": "550e8400-e29b-41d4-a716-446655440030",
+          "status": "quarantined",
+          "message": "Successfully quarantined due to memory usage concerns"
+        },
+        {
+          "entry_id": "550e8400-e29b-41d4-a716-446655440031",
+          "status": "quarantined",
+          "message": "Successfully quarantined due to memory usage concerns"
+        },
+        {
+          "entry_id": "550e8400-e29b-41d4-a716-446655440032",
+          "status": "quarantined",
+          "message": "Successfully quarantined due to memory usage concerns"
+        }
+      ],
+      "quarantine_expires_at": "2023-12-08T14:00:00Z"
+    }
+  },
+
+  "corpus_quarantined_entry": {
+    "summary": "Quarantined corpus entry",
+    "description": "Example of a corpus entry that has been quarantined",
+    "value": {
+      "id": "550e8400-e29b-41d4-a716-446655440030",
+      "filename": "large_payload_gen5.bin",
+      "sha256": "e5f6789012345678901234567890abcdef1234567890abcdef1234567abcde",
+      "size": 1048576,
+      "source": "mutation",
+      "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+      "job_id": "550e8400-e29b-41d4-a716-446655440001",
+      "bot_id": "550e8400-e29b-41d4-a716-446655440000",
+      "created_at": "2023-12-01T12:30:15Z",
+      "coverage_edges": 2500,
+      "new_coverage_edges": 5,
+      "generation": 5,
+      "priority_score": 0.3,
+      "access_count": 5,
+      "last_accessed": "2023-12-01T13:00:00Z",
+      "is_seed": false,
+      "is_quarantined": true,
+      "quarantine_reason": "Causes excessive memory usage (>4GB) leading to OOM kills in target application",
+      "tags": ["quarantined", "high-memory", "generation-5"],
+      "metadata": {
+        "quarantine_date": "2023-12-01T14:00:00Z",
+        "quarantine_expires": "2023-12-08T14:00:00Z",
+        "memory_usage_peak": "4.2GB"
+      }
+    }
+  },
+
+  "corpus_promotion_request": {
+    "summary": "Promote crash to corpus",
+    "description": "Request to promote an interesting crash input to the corpus",
+    "value": {
+      "crash_id": "550e8400-e29b-41d4-a716-446655440040",
+      "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+      "reason": "Crash input triggers unique code path in error handling, valuable for regression testing",
+      "priority": 8
+    }
+  }
+}

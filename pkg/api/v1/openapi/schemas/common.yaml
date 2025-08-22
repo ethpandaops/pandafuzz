@@ -1,0 +1,356 @@
+# Common schemas shared across the PandaFuzz API v1
+# These schemas provide reusable components for pagination, error handling, and shared types
+
+Pagination:
+  type: object
+  description: Standard pagination metadata for list responses
+  required:
+    - limit
+    - offset
+    - total
+    - has_more
+  properties:
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 100
+      description: Maximum number of items per page
+      example: 50
+    offset:
+      type: integer
+      minimum: 0
+      description: Number of items to skip
+      example: 0
+    total:
+      type: integer
+      minimum: 0
+      description: Total number of items available
+      example: 150
+    has_more:
+      type: boolean
+      description: Whether there are more items beyond this page
+      example: true
+
+Problem:
+  type: object
+  description: RFC 7807 Problem Details for HTTP APIs
+  required:
+    - type
+    - title
+    - status
+  properties:
+    type:
+      type: string
+      format: uri
+      description: A URI reference that identifies the problem type
+      example: "https://pandafuzz.example.com/problems/validation-error"
+    title:
+      type: string
+      description: A short, human-readable summary of the problem type
+      example: "Validation Error"
+    status:
+      type: integer
+      minimum: 100
+      maximum: 599
+      description: The HTTP status code for this occurrence of the problem
+      example: 400
+    detail:
+      type: string
+      description: A human-readable explanation specific to this occurrence
+      example: "The fuzzer field is required and must be one of: afl++, libfuzzer, honggfuzz"
+    instance:
+      type: string
+      format: uri
+      description: A URI reference that identifies the specific occurrence
+      example: "/api/v1/jobs/550e8400-e29b-41d4-a716-446655440001"
+    errors:
+      type: array
+      description: Detailed validation errors
+      items:
+        type: object
+        properties:
+          field:
+            type: string
+            description: The field that failed validation
+            example: "fuzzer"
+          code:
+            type: string
+            description: Error code for programmatic handling
+            example: "INVALID_ENUM"
+          message:
+            type: string
+            description: Human-readable error message
+            example: "Must be one of: afl++, libfuzzer, honggfuzz"
+
+Metadata:
+  type: object
+  description: Common metadata fields for entities
+  required:
+    - created_at
+    - updated_at
+  properties:
+    created_at:
+      type: string
+      format: date-time
+      description: ISO 8601 timestamp when the entity was created
+      example: "2023-12-01T10:30:00Z"
+    updated_at:
+      type: string
+      format: date-time
+      description: ISO 8601 timestamp when the entity was last updated
+      example: "2023-12-01T14:45:30Z"
+    version:
+      type: integer
+      minimum: 1
+      description: Version number for optimistic locking
+      example: 3
+    tags:
+      type: array
+      description: User-defined tags for categorization
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+        maxLength: 50
+      maxItems: 20
+      example: ["production", "security-test", "nightly"]
+
+BatchRequest:
+  type: object
+  description: Generic batch operation request wrapper
+  required:
+    - operation
+    - items
+  properties:
+    operation:
+      type: string
+      enum: [create, update, delete]
+      description: Type of batch operation to perform
+      example: "create"
+    items:
+      type: array
+      description: Array of items to process in the batch
+      minItems: 1
+      maxItems: 100
+      items:
+        type: object
+        description: Individual item for batch processing
+    options:
+      type: object
+      description: Optional parameters for batch processing
+      properties:
+        continue_on_error:
+          type: boolean
+          default: false
+          description: Whether to continue processing if individual items fail
+        dry_run:
+          type: boolean
+          default: false
+          description: Validate the batch without executing changes
+
+BatchResponse:
+  type: object
+  description: Response for batch operations with detailed results
+  required:
+    - operation
+    - total_items
+    - successful_items
+    - failed_items
+    - processing_time_ms
+  properties:
+    operation:
+      type: string
+      enum: [create, update, delete]
+      description: Type of batch operation that was performed
+      example: "create"
+    total_items:
+      type: integer
+      minimum: 0
+      description: Total number of items in the batch
+      example: 10
+    successful_items:
+      type: integer
+      minimum: 0
+      description: Number of items processed successfully
+      example: 8
+    failed_items:
+      type: integer
+      minimum: 0
+      description: Number of items that failed processing
+      example: 2
+    processing_time_ms:
+      type: integer
+      minimum: 0
+      description: Total processing time in milliseconds
+      example: 1250
+    results:
+      type: array
+      description: Detailed results for each item
+      items:
+        type: object
+        required:
+          - index
+          - status
+        properties:
+          index:
+            type: integer
+            minimum: 0
+            description: Index of the item in the original batch
+          status:
+            type: string
+            enum: [success, error]
+            description: Processing status for this item
+          id:
+            type: string
+            format: uuid
+            description: ID of the created/updated resource (success only)
+          error:
+            $ref: '#/Problem'
+            description: Error details (error status only)
+    warnings:
+      type: array
+      description: Non-fatal warnings from batch processing
+      items:
+        type: string
+
+SSEEvent:
+  type: object
+  description: Server-Sent Events format for real-time updates
+  required:
+    - data
+  properties:
+    id:
+      type: string
+      description: Unique identifier for this event
+      example: "event_123456"
+    event:
+      type: string
+      description: Event type for client-side filtering
+      example: "job_progress"
+    data:
+      type: string
+      description: JSON-encoded event data
+      example: '{"job_id":"550e8400-e29b-41d4-a716-446655440001","progress":75,"status":"running"}'
+    retry:
+      type: integer
+      minimum: 0
+      description: Retry interval in milliseconds for client reconnection
+      example: 5000
+
+FuzzerType:
+  type: string
+  enum: [afl++, libfuzzer, honggfuzz]
+  description: Supported fuzzer engines
+  example: "afl++"
+
+Duration:
+  type: string
+  pattern: '^(\d+h)?(\d+m)?(\d+s)?$'
+  description: Duration in Go format (e.g., "1h30m", "45s", "2h")
+  example: "1h30m"
+
+ResourceLimits:
+  type: object
+  description: Resource constraints for job execution
+  properties:
+    memory_limit:
+      type: integer
+      format: int64
+      minimum: 1048576
+      maximum: 137438953472
+      description: Memory limit in bytes (min 1MB, max 128GB)
+      example: 2147483648
+    cpu_cores:
+      type: integer
+      minimum: 1
+      maximum: 64
+      description: Number of CPU cores to allocate
+      example: 4
+    disk_space:
+      type: integer
+      format: int64
+      minimum: 1048576
+      description: Disk space limit in bytes
+      example: 10737418240
+    network_bandwidth:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Network bandwidth limit in bytes per second (0 = unlimited)
+      example: 104857600
+
+FileMetadata:
+  type: object
+  description: Metadata for uploaded or stored files
+  required:
+    - filename
+    - size
+    - checksum
+    - mime_type
+  properties:
+    filename:
+      type: string
+      maxLength: 255
+      pattern: '^[^/\\:*?"<>|]+$'
+      description: Original filename with extension
+      example: "test_binary"
+    size:
+      type: integer
+      format: int64
+      minimum: 0
+      description: File size in bytes
+      example: 1048576
+    checksum:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: SHA256 checksum of the file
+      example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    mime_type:
+      type: string
+      description: MIME type of the file
+      example: "application/octet-stream"
+    encoding:
+      type: string
+      description: File encoding if applicable
+      example: "utf-8"
+    uploaded_at:
+      type: string
+      format: date-time
+      description: Timestamp when the file was uploaded
+      example: "2023-12-01T10:30:00Z"
+
+TimeRange:
+  type: object
+  description: Time range filter for queries
+  properties:
+    start:
+      type: string
+      format: date-time
+      description: Start of the time range (inclusive)
+      example: "2023-12-01T00:00:00Z"
+    end:
+      type: string
+      format: date-time
+      description: End of the time range (exclusive)
+      example: "2023-12-02T00:00:00Z"
+
+SortOrder:
+  type: string
+  enum: [asc, desc]
+  default: desc
+  description: Sort order for list operations
+  example: "desc"
+
+StatusFilter:
+  type: object
+  description: Generic status filtering options
+  properties:
+    include:
+      type: array
+      description: Include only these statuses
+      items:
+        type: string
+    exclude:
+      type: array
+      description: Exclude these statuses
+      items:
+        type: string

@@ -1,0 +1,459 @@
+{
+  "campaign_creation_multi_fuzzer": {
+    "summary": "Create comprehensive campaign with multiple fuzzers",
+    "description": "Example request to create a campaign using AFL++, LibFuzzer, and Honggfuzz",
+    "value": {
+      "name": "HTTP Parser Security Assessment v2.1.0",
+      "description": "Comprehensive security assessment of HTTP parsing library version 2.1.0 using multiple fuzzing engines with corpus sharing and crash analysis",
+      "target_config": {
+        "binary_path": "/opt/targets/http_parser_v2.1.0",
+        "binary_checksum": "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
+        "binary_version": "2.1.0",
+        "command_line_template": "{binary} --input {input_file} --output /dev/null",
+        "environment_setup": [
+          "export ASAN_OPTIONS=detect_odr_violation=0:abort_on_error=1",
+          "ulimit -c unlimited",
+          "export AFL_SKIP_CPUFREQ=1"
+        ],
+        "working_directory": "/tmp/campaign_http_v2",
+        "input_format": "file",
+        "expected_exit_codes": [0, 1, 2]
+      },
+      "job_template": {
+        "duration": "2h",
+        "resource_limits": {
+          "memory_limit": 2147483648,
+          "cpu_cores": 4,
+          "disk_space": 10737418240
+        },
+        "enable_coverage": true,
+        "coverage_format": "json",
+        "sanitizers": ["asan", "ubsan"],
+        "minimize_crashes": true,
+        "deduplicate_crashes": true
+      },
+      "fuzzer_configs": [
+        {
+          "fuzzer_type": "afl++",
+          "enabled": true,
+          "job_count": 10,
+          "weight": 0.5,
+          "priority": 8,
+          "specific_config": {
+            "afl_mode": "qemu",
+            "dictionary": "/data/dictionaries/http.dict",
+            "timeout_ms": 5000,
+            "memory_limit": "2G"
+          },
+          "resource_limits": {
+            "memory_limit": 2147483648,
+            "cpu_cores": 4
+          },
+          "tags": ["main-fuzzer", "high-throughput"]
+        },
+        {
+          "fuzzer_type": "libfuzzer",
+          "enabled": true,
+          "job_count": 5,
+          "weight": 0.3,
+          "priority": 7,
+          "specific_config": {
+            "max_len": 65536,
+            "timeout": 10,
+            "rss_limit_mb": 1024
+          },
+          "resource_limits": {
+            "memory_limit": 1073741824,
+            "cpu_cores": 2
+          },
+          "tags": ["structure-aware", "in-process"]
+        },
+        {
+          "fuzzer_type": "honggfuzz",
+          "enabled": true,
+          "job_count": 3,
+          "weight": 0.2,
+          "priority": 6,
+          "specific_config": {
+            "threads": 4,
+            "timeout": 5,
+            "mutations_per_run": 1000
+          },
+          "resource_limits": {
+            "memory_limit": 1073741824,
+            "cpu_cores": 2
+          },
+          "tags": ["hardware-feedback", "intel-pt"]
+        }
+      ],
+      "corpus_strategy": {
+        "sync_enabled": true,
+        "sync_interval": "10m",
+        "deduplicate": true,
+        "size_limit": 1073741824,
+        "file_count_limit": 10000,
+        "selection_algorithm": "coverage_guided",
+        "minimum_coverage": 50,
+        "share_crashes_as_corpus": true,
+        "initial_corpus": [
+          "/data/http_corpus/basic_requests.zip",
+          "/data/http_corpus/malformed_headers.zip",
+          "/data/http_corpus/large_payloads.zip"
+        ]
+      },
+      "scheduling": {
+        "auto_start": false,
+        "scheduled_start": "2023-12-01T20:00:00Z",
+        "max_duration": "24h",
+        "job_spawn_strategy": "staggered",
+        "job_spawn_interval": "5m",
+        "max_concurrent_jobs": 8,
+        "auto_restart_failed": true,
+        "restart_delay": "15m",
+        "completion_criteria": {
+          "target_coverage": 85,
+          "target_crashes": 20,
+          "all_jobs_complete": true
+        }
+      },
+      "limits": {
+        "max_jobs": 50,
+        "max_crashes": 100,
+        "max_corpus_size": 5368709120,
+        "max_disk_usage": 53687091200,
+        "budget_cpu_hours": 500.0,
+        "budget_memory_gb_hours": 250.0,
+        "priority_threshold": 5
+      },
+      "owner": "security-team",
+      "tags": ["security", "http", "parser", "release-blocker", "v2.1.0"],
+      "metadata": {
+        "project": "web-security",
+        "version": "2.1.0",
+        "environment": "production-test",
+        "jira_ticket": "SEC-12345",
+        "deadline": "2023-12-05T00:00:00Z"
+      }
+    }
+  },
+
+  "campaign_simple": {
+    "summary": "Simple single-fuzzer campaign",
+    "description": "Basic campaign with just AFL++ for quick testing",
+    "value": {
+      "name": "Quick JSON Parser Test",
+      "description": "Simple AFL++ test of JSON parser for regression testing",
+      "target_config": {
+        "binary_path": "/opt/targets/json_parser",
+        "binary_checksum": "b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567a",
+        "command_line_template": "{binary} {input_file}",
+        "input_format": "file",
+        "expected_exit_codes": [0]
+      },
+      "fuzzer_configs": [
+        {
+          "fuzzer_type": "afl++",
+          "enabled": true,
+          "job_count": 2,
+          "weight": 1.0,
+          "priority": 5
+        }
+      ],
+      "corpus_strategy": {
+        "sync_enabled": false,
+        "deduplicate": true,
+        "initial_corpus": ["/data/json_samples/basic.json"]
+      },
+      "scheduling": {
+        "auto_start": true,
+        "max_duration": "30m",
+        "max_concurrent_jobs": 2
+      },
+      "owner": "dev-team",
+      "tags": ["regression", "json", "quick-test"]
+    }
+  },
+
+  "campaign_running": {
+    "summary": "Campaign currently executing",
+    "description": "Example of an active campaign with multiple jobs running",
+    "value": {
+      "id": "550e8400-e29b-41d4-a716-446655440002",
+      "name": "HTTP Parser Security Assessment v2.1.0",
+      "description": "Comprehensive security assessment of HTTP parsing library version 2.1.0",
+      "status": "running",
+      "target_config": {
+        "binary_path": "/opt/targets/http_parser_v2.1.0",
+        "binary_checksum": "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
+        "binary_version": "2.1.0",
+        "command_line_template": "{binary} --input {input_file} --output /dev/null",
+        "input_format": "file",
+        "expected_exit_codes": [0, 1, 2]
+      },
+      "job_template": {
+        "duration": "2h",
+        "resource_limits": {
+          "memory_limit": 2147483648,
+          "cpu_cores": 4
+        },
+        "enable_coverage": true,
+        "sanitizers": ["asan", "ubsan"]
+      },
+      "fuzzer_configs": [
+        {
+          "fuzzer_type": "afl++",
+          "enabled": true,
+          "job_count": 10,
+          "weight": 0.5,
+          "priority": 8
+        },
+        {
+          "fuzzer_type": "libfuzzer",
+          "enabled": true,
+          "job_count": 5,
+          "weight": 0.3,
+          "priority": 7
+        }
+      ],
+      "corpus_strategy": {
+        "sync_enabled": true,
+        "sync_interval": "10m",
+        "deduplicate": true,
+        "selection_algorithm": "coverage_guided"
+      },
+      "scheduling": {
+        "max_duration": "24h",
+        "max_concurrent_jobs": 8,
+        "auto_restart_failed": true
+      },
+      "limits": {
+        "max_jobs": 50,
+        "max_crashes": 100
+      },
+      "created_at": "2023-12-01T18:00:00Z",
+      "updated_at": "2023-12-01T20:15:30Z",
+      "started_at": "2023-12-01T20:00:00Z",
+      "completed_at": null,
+      "owner": "security-team",
+      "tags": ["security", "http", "v2.1.0"],
+      "metadata": {
+        "project": "web-security",
+        "jira_ticket": "SEC-12345"
+      }
+    }
+  },
+
+  "campaign_stats": {
+    "summary": "Comprehensive campaign statistics",
+    "description": "Detailed statistics for an active campaign showing progress and results",
+    "value": {
+      "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+      "status": "running",
+      "progress_percent": 68.5,
+      "jobs_total": 18,
+      "jobs_completed": 8,
+      "jobs_running": 6,
+      "jobs_failed": 2,
+      "jobs_pending": 2,
+      "crashes_total": 45,
+      "crashes_unique": 12,
+      "coverage_total": 48750,
+      "coverage_percentage": 76.8,
+      "corpus_size_files": 8500,
+      "corpus_size_bytes": 419430400,
+      "execution_time": "16h45m30s",
+      "cpu_time_used": "135h20m15s",
+      "memory_peak_usage": 17179869184,
+      "disk_usage": 85899345920,
+      "executions_per_second": 4250.75,
+      "last_updated": "2023-12-01T20:15:30Z",
+      "fuzzer_breakdown": [
+        {
+          "fuzzer_type": "afl++",
+          "jobs_count": 10,
+          "crashes_found": 28,
+          "coverage_contribution": 32500,
+          "execution_rate": 2850.5
+        },
+        {
+          "fuzzer_type": "libfuzzer",
+          "jobs_count": 5,
+          "crashes_found": 12,
+          "coverage_contribution": 12750,
+          "execution_rate": 950.25
+        },
+        {
+          "fuzzer_type": "honggfuzz",
+          "jobs_count": 3,
+          "crashes_found": 5,
+          "coverage_contribution": 3500,
+          "execution_rate": 450.0
+        }
+      ]
+    }
+  },
+
+  "campaign_completed": {
+    "summary": "Successfully completed campaign",
+    "description": "Example of a campaign that completed successfully with final results",
+    "value": {
+      "id": "550e8400-e29b-41d4-a716-446655440006",
+      "name": "XML Parser Regression Test",
+      "description": "Regression testing of XML parser after security patches",
+      "status": "completed",
+      "target_config": {
+        "binary_path": "/opt/targets/xml_parser",
+        "binary_checksum": "c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567ab2",
+        "command_line_template": "{binary} --parse {input_file}"
+      },
+      "fuzzer_configs": [
+        {
+          "fuzzer_type": "libfuzzer",
+          "enabled": true,
+          "job_count": 3,
+          "priority": 6
+        }
+      ],
+      "corpus_strategy": {
+        "sync_enabled": false,
+        "deduplicate": true
+      },
+      "scheduling": {
+        "max_duration": "1h",
+        "max_concurrent_jobs": 3
+      },
+      "created_at": "2023-12-01T14:00:00Z",
+      "updated_at": "2023-12-01T15:05:30Z",
+      "started_at": "2023-12-01T14:05:00Z",
+      "completed_at": "2023-12-01T15:05:30Z",
+      "owner": "dev-team",
+      "tags": ["regression", "xml", "post-patch"],
+      "metadata": {
+        "patch_version": "2.0.1",
+        "regression_check": "passed"
+      }
+    }
+  },
+
+  "campaign_list": {
+    "summary": "List of campaigns with filters",
+    "description": "Paginated response showing multiple campaigns with different statuses",
+    "value": {
+      "campaigns": [
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440002",
+          "name": "HTTP Parser Security Assessment v2.1.0",
+          "description": "Comprehensive security assessment",
+          "status": "running",
+          "created_at": "2023-12-01T18:00:00Z",
+          "started_at": "2023-12-01T20:00:00Z",
+          "owner": "security-team",
+          "tags": ["security", "http", "v2.1.0"]
+        },
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440006",
+          "name": "XML Parser Regression Test",
+          "description": "Regression testing after patches",
+          "status": "completed",
+          "created_at": "2023-12-01T14:00:00Z",
+          "completed_at": "2023-12-01T15:05:30Z",
+          "owner": "dev-team",
+          "tags": ["regression", "xml"]
+        },
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440007",
+          "name": "Image Parser Fuzz Test",
+          "description": "Testing image parsing libraries",
+          "status": "scheduled",
+          "created_at": "2023-12-01T16:30:00Z",
+          "owner": "media-team",
+          "tags": ["image", "parser", "scheduled"]
+        }
+      ],
+      "pagination": {
+        "limit": 50,
+        "offset": 0,
+        "total": 127,
+        "has_more": true
+      },
+      "filters": {
+        "status": ["running", "completed", "scheduled"],
+        "tags": ["security", "regression"]
+      }
+    }
+  },
+
+  "campaign_action_start": {
+    "summary": "Start campaign request",
+    "description": "Request to start a scheduled campaign immediately",
+    "value": {
+      "action": "start",
+      "reason": "Urgent security testing required before production deployment",
+      "cascade_to_jobs": true
+    }
+  },
+
+  "campaign_action_response": {
+    "summary": "Campaign action completed",
+    "description": "Response after successfully starting a campaign",
+    "value": {
+      "campaign_id": "550e8400-e29b-41d4-a716-446655440007",
+      "action": "start",
+      "status": "completed",
+      "performed_at": "2023-12-01T21:00:00Z",
+      "message": "Campaign started successfully, 8 jobs queued for execution",
+      "new_campaign_status": "running",
+      "affected_jobs": [
+        {
+          "job_id": "550e8400-e29b-41d4-a716-446655440020",
+          "action_applied": "queue",
+          "status": "queued"
+        },
+        {
+          "job_id": "550e8400-e29b-41d4-a716-446655440021",
+          "action_applied": "queue",
+          "status": "queued"
+        }
+      ]
+    }
+  },
+
+  "campaign_update": {
+    "summary": "Update campaign configuration",
+    "description": "Request to update campaign limits and scheduling",
+    "value": {
+      "name": "HTTP Parser Security Assessment v2.1.0 - Extended",
+      "description": "Extended comprehensive security assessment with additional fuzzer coverage",
+      "fuzzer_configs": [
+        {
+          "fuzzer_type": "afl++",
+          "enabled": true,
+          "job_count": 15,
+          "weight": 0.6,
+          "priority": 8
+        },
+        {
+          "fuzzer_type": "libfuzzer",
+          "enabled": true,
+          "job_count": 8,
+          "weight": 0.4,
+          "priority": 7
+        }
+      ],
+      "limits": {
+        "max_jobs": 75,
+        "max_crashes": 150,
+        "budget_cpu_hours": 750.0
+      },
+      "scheduling": {
+        "max_duration": "36h",
+        "max_concurrent_jobs": 12
+      },
+      "tags": ["security", "http", "v2.1.0", "extended"],
+      "metadata": {
+        "extension_reason": "Additional coverage required",
+        "approved_by": "security-lead"
+      }
+    }
+  }
+}
