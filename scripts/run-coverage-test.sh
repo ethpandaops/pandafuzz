@@ -385,7 +385,7 @@ else
     echo -e "\n${YELLOW}⚠ Warning: No edges found yet. Waiting more...${NC}"
 fi
 
-# Step 7.5: Check for real coverage data or generate synthetic if needed
+# Step 7.5: Check for real coverage data (no synthetic generation)
 echo -e "\n${YELLOW}Step 7.5: Checking for real coverage data...${NC}"
 
 # First check if real coverage data was generated
@@ -458,153 +458,12 @@ if [[ "$FUZZER_TYPE" == "libfuzzer" ]]; then
     fi
 fi
 
-# If no real coverage found, create synthetic data for testing
+# No synthetic data generation - only report status
 if [ "$REAL_COVERAGE_FOUND" = false ]; then
-    echo -e "${YELLOW}No real coverage data found, creating synthetic data for testing...${NC}"
-    
-    # Create the coverage directory and synthetic LCOV file
-    docker exec pandafuzz-master bash -c "
-    mkdir -p ${COVERAGE_DIR}
-    
-    # Create a synthetic LCOV coverage file
-    cat > ${COVERAGE_DIR}/coverage-\$(date +%s).lcov << 'LCOV_EOF'
-TN:
-SF:/tmp/coverage_test.c
-FN:15,process_input
-FN:86,main
-FNDA:1000,process_input
-FNDA:1000,main
-FNF:2
-FNH:2
-DA:16,1000
-DA:19,1000
-DA:20,500
-DA:21,250
-DA:22,125
-DA:23,125
-DA:24,62
-DA:25,62
-DA:26,31
-DA:27,31
-DA:28,15
-DA:35,1000
-DA:36,200
-DA:37,100
-DA:38,50
-DA:39,50
-DA:40,25
-DA:67,1000
-DA:68,100
-DA:69,50
-DA:70,50
-DA:71,25
-DA:72,25
-DA:79,1000
-DA:80,0
-DA:83,1000
-DA:87,1000
-DA:88,1000
-DA:90,1000
-DA:91,0
-DA:94,1000
-DA:97,50
-DA:98,25
-DA:99,25
-DA:100,950
-DA:104,1000
-LF:36
-LH:35
-end_of_record
-LCOV_EOF
-    
-    # Also create a JSON coverage file
-    cat > ${COVERAGE_DIR}/coverage-\$(date +%s).json << 'JSON_EOF'
-{
-  \"edges\": 8543,
-  \"total_edges\": 65536,
-  \"coverage_percent\": 13.04,
-  \"paths_total\": 127,
-  \"paths_pending\": 0,
-  \"paths_favored\": 42,
-  \"collected_at\": \"\$(date -Iseconds)\",
-  \"fuzzer_version\": \"4.09c\",
-  \"target_binary\": \"/tmp/afl_coverage_test\",
-  \"queue_size\": 127,
-  \"line_coverage\": 97.2,
-  \"function_coverage\": 100.0,
-  \"branch_coverage\": 85.7,
-  \"total_lines\": 36,
-  \"covered_lines\": 35,
-  \"total_functions\": 2,
-  \"covered_functions\": 2,
-  \"metadata\": {
-    \"test_mode\": \"synthetic\",
-    \"generator\": \"coverage_test_script\",
-    \"note\": \"Synthetic data for testing coverage download functionality\"
-  }
-}
-JSON_EOF
-    
-    echo 'Coverage files created:'
-    ls -la ${COVERAGE_DIR}/
-    
-    # Get the file names for database insertion
-    LCOV_FILE=\$(ls ${COVERAGE_DIR}/coverage-*.lcov | head -1)
-    JSON_FILE=\$(ls ${COVERAGE_DIR}/coverage-*.json | head -1)
-    
-    # Insert coverage report records into the database
-    sqlite3 /app/data/pandafuzz.db << SQL_EOF
--- Insert LCOV coverage report
-INSERT INTO coverage_reports (id, job_id, format, storage_path, size, created_at)
-VALUES (
-    'coverage-${JOB_ID}-lcov-' || strftime('%s', 'now'),
-    '${JOB_ID}',
-    'lcov',
-    '\${LCOV_FILE}',
-    1500,
-    datetime('now')
-);
-
--- Insert JSON coverage report  
-INSERT INTO coverage_reports (id, job_id, format, storage_path, size, created_at)
-VALUES (
-    'coverage-${JOB_ID}-json-' || strftime('%s', 'now'),
-    '${JOB_ID}',
-    'json',
-    '\${JSON_FILE}',
-    800,
-    datetime('now')
-);
-
--- Insert coverage metadata for LCOV report
-INSERT INTO coverage_metadata (
-    report_id,
-    line_coverage,
-    function_coverage,
-    branch_coverage,
-    total_lines,
-    covered_lines,
-    total_functions,
-    covered_functions,
-    created_at
-)
-VALUES (
-    'coverage-${JOB_ID}-lcov-' || strftime('%s', 'now'),
-    97.2,
-    100.0,
-    85.7,
-    36,
-    35,
-    2,
-    2,
-    datetime('now')
-);
-SQL_EOF
-    
-    echo 'Coverage reports inserted into database'
-"
+    echo -e "${YELLOW}⚠ No real coverage data found${NC}"
+    echo -e "${YELLOW}Note: Synthetic coverage generation has been disabled${NC}"
 else
-    echo -e "${GREEN}Using real coverage data - no synthetic data needed${NC}"
+    echo -e "${GREEN}✓ Using real coverage data${NC}"
 fi
 
 # Step 8: Check coverage results
