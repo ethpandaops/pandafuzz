@@ -360,6 +360,22 @@ func (s *Server) handleSubmitCoverageReport(w http.ResponseWriter, r *http.Reque
 
 // generateCoverageFiles creates coverage files and stores them in the storage backend
 func (s *Server) generateCoverageFiles(ctx context.Context, jobID string, coverageData map[string]interface{}) error {
+	// Get job information to check fuzzer type
+	job, err := s.state.GetJob(ctx, jobID)
+	if err != nil {
+		s.logger.WithError(err).WithField("job_id", jobID).Warn("Failed to get job for coverage file generation")
+		// Continue with generation if we can't get the job
+	}
+
+	// Skip JSON/LCOV generation for AFL++ jobs (they use raw format only)
+	if job != nil && (job.Fuzzer == "aflplusplus" || job.Fuzzer == "afl++" || job.Fuzzer == "afl") {
+		s.logger.WithFields(logrus.Fields{
+			"job_id": jobID,
+			"fuzzer": job.Fuzzer,
+		}).Info("Skipping JSON/LCOV generation for AFL++ job (raw format only)")
+		return nil
+	}
+
 	timestamp := time.Now().Unix()
 	reportID := fmt.Sprintf("coverage-%s-%d", jobID, timestamp)
 

@@ -490,7 +490,6 @@ func (fje *FuzzerJobExecutor) collectCoverage(job *common.Job, fuzz fuzzer.Fuzze
 			return
 		}
 
-		// Debug: Log what we got from the fuzzer
 		fje.logger.WithFields(logrus.Fields{
 			"coverage_data_keys": func() []string {
 				keys := make([]string, 0, len(coverageData))
@@ -499,11 +498,7 @@ func (fje *FuzzerJobExecutor) collectCoverage(job *common.Job, fuzz fuzzer.Fuzze
 				}
 				return keys
 			}(),
-			"line_coverage_raw":     coverageData["line_coverage"],
-			"line_coverage_type":    fmt.Sprintf("%T", coverageData["line_coverage"]),
-			"coverage_percent_raw":  coverageData["coverage_percent"],
-			"coverage_percent_type": fmt.Sprintf("%T", coverageData["coverage_percent"]),
-		}).Debug("DEBUG: Collected coverage from fuzzer")
+		}).Debug("Collected coverage from fuzzer")
 	} else {
 		fje.logger.Warn("Fuzzer does not support coverage collection")
 		return
@@ -526,15 +521,8 @@ func (fje *FuzzerJobExecutor) collectCoverage(job *common.Job, fuzz fuzzer.Fuzze
 
 		if val, ok := coverageData["line_coverage"].(float64); ok {
 			lineCoverage = val
-			fje.logger.WithField("line_coverage_float64", val).Debug("DEBUG: Extracted line_coverage as float64")
 		} else if val, ok := coverageData["coverage_percent"].(float64); ok {
 			lineCoverage = val
-			fje.logger.WithField("coverage_percent_float64", val).Debug("DEBUG: Extracted coverage_percent as float64")
-		} else {
-			fje.logger.WithFields(logrus.Fields{
-				"line_coverage":    coverageData["line_coverage"],
-				"coverage_percent": coverageData["coverage_percent"],
-			}).Debug("DEBUG: Failed to extract coverage as float64")
 		}
 
 		if val, ok := coverageData["function_coverage"].(float64); ok {
