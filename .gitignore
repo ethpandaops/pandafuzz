@@ -43,6 +43,7 @@ crash-*
 
 # Database files
 pandafuzz.db
+master.out
 /data/*.db
 /data/*.db-journal
 
