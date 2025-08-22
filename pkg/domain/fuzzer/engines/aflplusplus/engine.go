@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -68,6 +70,10 @@ type Engine struct {
 	crashesMutex sync.RWMutex
 	seenCrashes  map[string]bool
 
+	// Coverage tracking
+	coverageData  map[string]interface{}
+	coverageMutex sync.RWMutex
+
 	// Synchronization
 	wg            sync.WaitGroup
 	statsUpdateMu sync.Mutex
@@ -93,7 +99,8 @@ func NewEngine(target string, args []string, log logrus.FieldLogger) *Engine {
 		stats: &types.FuzzerStats{
 			StartTime: time.Now(),
 		},
-		log: log.WithField("engine", "afl++"),
+		coverageData: make(map[string]interface{}),
+		log:          log.WithField("engine", "afl++"),
 	}
 
 	// Try to get version
@@ -144,6 +151,13 @@ func (e *Engine) Start(ctx context.Context) error {
 	e.ctx, e.cancelFunc = context.WithCancel(ctx)
 	e.cmd = exec.CommandContext(e.ctx, aflBinary, cmdArgs...)
 
+	// Set process group for proper signal handling (Linux-specific)
+	e.cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:   true,
+		Pgid:      0,               // Create new process group
+		Pdeathsig: syscall.SIGKILL, // Kill children if parent dies
+	}
+
 	// Set environment
 	env := os.Environ()
 	if e.config.Environment != nil {
@@ -151,9 +165,22 @@ func (e *Engine) Start(ctx context.Context) error {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
 		}
 	}
+
+	// Configure coverage environment if enabled
+	if e.config != nil && e.config.EnableCoverage {
+		if err := e.configureCoverageEnvironment(&env); err != nil {
+			e.log.WithError(err).Warn("Failed to configure coverage environment")
+		}
+	}
+
 	// AFL++ specific environment variables
 	env = append(env, "AFL_SKIP_CPUFREQ=1")
 	env = append(env, "AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1")
+	// Enable fork-server mode
+	env = append(env, "AFL_NO_FORKSRV=0")
+	env = append(env, "AFL_FORKSRV_INIT_TIMEOUT=30000") // 30s timeout
+	env = append(env, fmt.Sprintf("__AFL_SHM_ID=afl_%d_%d", os.Getpid(), time.Now().UnixNano()))
+	env = append(env, "AFL_MAP_SIZE=65536") // Standard AFL map size
 	e.cmd.Env = env
 
 	// Setup pipes
@@ -181,6 +208,15 @@ func (e *Engine) Start(ctx context.Context) error {
 	e.isRunning.Store(true)
 	e.stats.StartTime = time.Now()
 
+	// Wait for AFL++ fork-server initialization
+	e.log.Info("Waiting for AFL++ fork-server initialization...")
+	if err := e.waitForInitialization(ctx, 5*time.Second); err != nil {
+		e.log.WithError(err).Warn("AFL++ initialization check failed")
+		// Don't fail, continue anyway as AFL++ might still work
+	} else {
+		e.log.Info("AFL++ fork-server initialized successfully")
+	}
+
 	// Start output processors
 	e.wg.Add(2)
 	go e.processOutput(e.stdout, "stdout")
@@ -194,6 +230,12 @@ func (e *Engine) Start(ctx context.Context) error {
 	// Start process monitor
 	e.wg.Add(1)
 	go e.monitorProcess()
+
+	// Start coverage collection if enabled
+	if e.config != nil && e.config.EnableCoverage {
+		e.wg.Add(1)
+		go e.monitorCoverage()
+	}
 
 	e.log.Info("AFL++ started successfully")
 	return nil
@@ -212,6 +254,16 @@ func (e *Engine) Stop() error {
 		e.cancelFunc()
 	}
 
+	// Try to gracefully terminate the process group
+	if e.cmd != nil && e.cmd.Process != nil {
+		pid := e.cmd.Process.Pid
+
+		// Send SIGTERM to the process group
+		if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+			e.log.WithError(err).Debug("Failed to send SIGTERM to process group")
+		}
+	}
+
 	// Give process time to exit gracefully
 	done := make(chan bool)
 	go func() {
@@ -222,11 +274,27 @@ func (e *Engine) Stop() error {
 	select {
 	case <-done:
 		// Process exited gracefully
-	case <-time.After(10 * time.Second):
+		e.log.Info("AFL++ process exited gracefully")
+	case <-time.After(5 * time.Second):
 		// Force kill if not exited
 		if e.cmd != nil && e.cmd.Process != nil {
-			e.log.Warn("Force killing AFL++ process")
-			e.cmd.Process.Kill()
+			pid := e.cmd.Process.Pid
+			e.log.Warn("Force killing AFL++ process group")
+
+			// Kill the entire process group
+			if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+				e.log.WithError(err).Error("Failed to kill process group")
+				// Try to kill just the process
+				e.cmd.Process.Kill()
+			}
+
+			// Wait a bit more for cleanup
+			select {
+			case <-done:
+				e.log.Info("AFL++ process killed successfully")
+			case <-time.After(2 * time.Second):
+				e.log.Warn("AFL++ process may not have fully terminated")
+			}
 		}
 	}
 
@@ -336,14 +404,37 @@ func (e *Engine) buildCommandArgs() []string {
 
 	// Memory limit
 	if e.config.MemoryLimit > 0 {
-		args = append(args, "-m", fmt.Sprintf("%d", e.config.MemoryLimit/(1024*1024)))
+		memMB := e.config.MemoryLimit / (1024 * 1024)
+		e.log.WithFields(logrus.Fields{
+			"memory_limit_bytes": e.config.MemoryLimit,
+			"memory_limit_mb":    memMB,
+		}).Debug("Converting memory limit from bytes to MB")
+		if memMB == 0 {
+			// If less than 1MB, use minimum of 1MB
+			e.log.Debug("Memory limit less than 1MB, using minimum of 1MB")
+			args = append(args, "-m", "1")
+		} else {
+			args = append(args, "-m", fmt.Sprintf("%d", memMB))
+		}
 	} else {
+		e.log.Debug("No memory limit set, using 'none'")
 		args = append(args, "-m", "none")
 	}
 
-	// Timeout
+	// Timeout (per test case execution timeout)
 	if e.config.Timeout > 0 {
 		args = append(args, "-t", fmt.Sprintf("%d", int(e.config.Timeout.Milliseconds())))
+	}
+
+	// Time-limited fuzzing (graceful exit after specified seconds)
+	// If MaxDuration is set, use AFL++'s -V flag to run for that duration
+	if e.config.MaxDuration > 0 {
+		// Convert duration to seconds
+		seconds := int(e.config.MaxDuration.Seconds())
+		if seconds > 0 {
+			args = append(args, "-V", fmt.Sprintf("%d", seconds))
+			e.log.WithField("duration_seconds", seconds).Info("AFL++ will run for limited time")
+		}
 	}
 
 	// Dictionary
@@ -498,6 +589,16 @@ func (e *Engine) readStats() {
 	defer e.statsUpdateMu.Unlock()
 
 	now := time.Now()
+
+	// Log detailed stats for debugging edge detection
+	if edges, ok := stats["edges_found"]; ok {
+		e.log.WithFields(logrus.Fields{
+			"edges_found":    edges,
+			"paths_total":    stats["paths_total"],
+			"unique_crashes": stats["unique_crashes"],
+			"execs_done":     stats["execs_done"],
+		}).Debug("AFL++ edge coverage stats")
+	}
 
 	// Update stats
 	if val, ok := stats["execs_done"]; ok {
@@ -681,14 +782,165 @@ func (e *Engine) generateCrashID() string {
 func (e *Engine) monitorProcess() {
 	defer e.wg.Done()
 
-	if e.cmd != nil {
-		err := e.cmd.Wait()
-		if err != nil && !errors.Is(err, context.Canceled) {
-			e.log.WithError(err).Error("Fuzzer process exited with error")
+	if e.cmd != nil && e.cmd.Process != nil {
+		pid := e.cmd.Process.Pid
+		e.log.WithField("pid", pid).Debug("Starting process monitor")
+
+		// Periodically check process health
+		healthTicker := time.NewTicker(5 * time.Second)
+		defer healthTicker.Stop()
+
+		done := make(chan error, 1)
+		go func() {
+			done <- e.cmd.Wait()
+		}()
+
+		for {
+			select {
+			case err := <-done:
+				if err != nil && !errors.Is(err, context.Canceled) {
+					e.log.WithFields(logrus.Fields{
+						"pid":   pid,
+						"error": err,
+					}).Error("Fuzzer process exited with error")
+				} else {
+					e.log.WithField("pid", pid).Info("Fuzzer process exited normally")
+				}
+				e.isRunning.Store(false)
+				return
+
+			case <-healthTicker.C:
+				if err := e.checkProcessHealth(pid); err != nil {
+					e.log.WithFields(logrus.Fields{
+						"pid":   pid,
+						"error": err,
+					}).Warn("Process health check failed")
+
+					// If process is zombie, try to recover
+					if strings.Contains(err.Error(), "zombie") {
+						e.log.WithField("pid", pid).Error("AFL++ process became zombie, stopping fuzzer")
+						e.isRunning.Store(false)
+						return
+					}
+				} else {
+					e.log.WithField("pid", pid).Debug("Process health check passed")
+				}
+			}
 		}
 	}
 
 	e.isRunning.Store(false)
+}
+
+// waitForInitialization waits for AFL++ fork-server to initialize
+func (e *Engine) waitForInitialization(ctx context.Context, timeout time.Duration) error {
+	if e.cmd == nil || e.cmd.Process == nil {
+		return fmt.Errorf("process not started")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	startTime := time.Now()
+	pid := e.cmd.Process.Pid
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("initialization timeout after %v", time.Since(startTime))
+		case <-ticker.C:
+			// Check if process is still alive
+			if err := e.checkProcessHealth(pid); err != nil {
+				return fmt.Errorf("process unhealthy during initialization: %w", err)
+			}
+
+			// Check for AFL++ shared memory or output directory creation
+			if e.checkAFLInitialized() {
+				e.log.Debug("AFL++ initialization detected")
+				return nil
+			}
+
+			// After 1 second, assume initialized if process is still running
+			if time.Since(startTime) > 1*time.Second {
+				e.log.Debug("AFL++ process running after 1s, assuming initialized")
+				return nil
+			}
+		}
+	}
+}
+
+// checkProcessHealth checks if the process is healthy (not zombie)
+func (e *Engine) checkProcessHealth(pid int) error {
+	// Check if process exists
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("process not found: %w", err)
+	}
+
+	// Send signal 0 to check if process is alive
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		return fmt.Errorf("process not responding: %w", err)
+	}
+
+	// Check for zombie state on Linux
+	statPath := fmt.Sprintf("/proc/%d/stat", pid)
+	if data, err := os.ReadFile(statPath); err == nil {
+		statStr := string(data)
+		// Find the last ')' to locate state field
+		lastParen := -1
+		for i := len(statStr) - 1; i >= 0; i-- {
+			if statStr[i] == ')' {
+				lastParen = i
+				break
+			}
+		}
+		if lastParen != -1 && lastParen+2 < len(statStr) {
+			state := statStr[lastParen+2 : lastParen+3]
+			if state == "Z" {
+				return fmt.Errorf("process is zombie")
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkAFLInitialized checks if AFL++ has initialized (created output dirs or SHM)
+func (e *Engine) checkAFLInitialized() bool {
+	// Check if fuzzer_stats file exists (AFL++ creates this early)
+	statsFile := filepath.Join(e.outputDir, "fuzzer_stats")
+	if e.config.AFLPlusPlusOptions.MainNode {
+		statsFile = filepath.Join(e.outputDir, "main", "fuzzer_stats")
+	} else if e.config.AFLPlusPlusOptions.SecondaryNode {
+		statsFile = filepath.Join(e.outputDir, "secondary", "fuzzer_stats")
+	}
+
+	if _, err := os.Stat(statsFile); err == nil {
+		return true
+	}
+
+	// Check if queue directory exists
+	queueDir := filepath.Join(e.outputDir, "queue")
+	if e.config.AFLPlusPlusOptions.MainNode {
+		queueDir = filepath.Join(e.outputDir, "main", "queue")
+	} else if e.config.AFLPlusPlusOptions.SecondaryNode {
+		queueDir = filepath.Join(e.outputDir, "secondary", "queue")
+	}
+
+	if _, err := os.Stat(queueDir); err == nil {
+		return true
+	}
+
+	// Check for shared memory segments (Linux-specific)
+	if data, err := os.ReadFile("/proc/sysvipc/shm"); err == nil && len(data) > 100 {
+		// If there's substantial SHM data, AFL++ likely created segments
+		return true
+	}
+
+	return false
 }
 
 // detectVersion attempts to detect the AFL++ version
@@ -714,4 +966,494 @@ func (e *Engine) detectVersion() string {
 	}
 
 	return "unknown"
+}
+
+// configureCoverageEnvironment configures environment variables for coverage collection
+func (e *Engine) configureCoverageEnvironment(env *[]string) error {
+	if e.config == nil || !e.config.EnableCoverage || e.config.AFLPlusPlusOptions == nil {
+		return nil
+	}
+
+	opts := e.config.AFLPlusPlusOptions
+
+	// Configure LLVM coverage if in LLVM mode
+	if e.isLLVMMode() {
+		profileFile := filepath.Join(e.config.CoverageDir, "afl-llvm.profraw")
+		*env = append(*env, fmt.Sprintf("LLVM_PROFILE_FILE=%s", profileFile))
+		e.log.WithField("profile_file", profileFile).Debug("Configured LLVM coverage environment")
+	}
+
+	// Configure AFL-specific coverage environment
+	if e.shouldUseAFLCov() {
+		*env = append(*env, "AFL_ENABLE_COVERAGE=1")
+		if opts.SourceDir != "" {
+			*env = append(*env, fmt.Sprintf("AFL_SOURCE_DIR=%s", opts.SourceDir))
+		}
+		e.log.Debug("Configured AFL coverage environment")
+	}
+
+	return nil
+}
+
+// isLLVMMode checks if AFL++ is running in LLVM mode
+func (e *Engine) isLLVMMode() bool {
+	if e.config == nil || e.config.AFLPlusPlusOptions == nil {
+		return false
+	}
+	return e.config.AFLPlusPlusOptions.LLVMMode
+}
+
+// shouldUseAFLCov checks if AFL coverage should be used
+func (e *Engine) shouldUseAFLCov() bool {
+	if e.config == nil || e.config.AFLPlusPlusOptions == nil {
+		return false
+	}
+	return e.config.AFLPlusPlusOptions.UseAFLCov
+}
+
+// CollectCoverageData collects coverage data from AFL++
+func (e *Engine) CollectCoverageData() (map[string]interface{}, error) {
+	if e.config == nil || !e.config.EnableCoverage {
+		return nil, errors.New("coverage collection not enabled")
+	}
+
+	coverageData := make(map[string]interface{})
+
+	if e.isLLVMMode() {
+		if data, err := e.collectLLVMCoverageData(); err == nil {
+			for k, v := range data {
+				coverageData[k] = v
+			}
+		} else {
+			e.log.WithError(err).Warn("Failed to collect LLVM coverage data")
+		}
+	}
+
+	if e.shouldUseAFLCov() {
+		if data, err := e.collectAFLCovData(); err == nil {
+			for k, v := range data {
+				coverageData[k] = v
+			}
+		} else {
+			e.log.WithError(err).Warn("Failed to collect AFL coverage data")
+		}
+	}
+
+	// Always try to collect basic AFL++ coverage statistics
+	if data, err := e.collectBasicCoverageStats(); err == nil {
+		for k, v := range data {
+			coverageData[k] = v
+		}
+	}
+
+	coverageData["timestamp"] = time.Now().Unix()
+	coverageData["collected_at"] = time.Now().Format(time.RFC3339)
+	coverageData["mode"] = e.getCoverageMode()
+
+	e.log.WithField("mode", e.getCoverageMode()).Debug("Coverage data collected successfully")
+	return coverageData, nil
+}
+
+// getCoverageMode returns the current coverage mode
+func (e *Engine) getCoverageMode() string {
+	modes := []string{}
+	if e.isLLVMMode() {
+		modes = append(modes, "llvm")
+	}
+	if e.shouldUseAFLCov() {
+		modes = append(modes, "afl-cov")
+	}
+	if len(modes) == 0 {
+		return "basic"
+	}
+	return strings.Join(modes, "+")
+}
+
+// collectLLVMCoverageData collects LLVM-based coverage data
+func (e *Engine) collectLLVMCoverageData() (map[string]interface{}, error) {
+	coverageData := make(map[string]interface{})
+	profileFile := filepath.Join(e.config.CoverageDir, "afl-llvm.profraw")
+
+	// Check if profile file exists
+	if _, err := os.Stat(profileFile); os.IsNotExist(err) {
+		e.log.Debug("LLVM coverage profile file not found")
+		return coverageData, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Merge profile data using llvm-profdata
+	profdataFile := filepath.Join(e.config.CoverageDir, "afl-merged.profdata")
+	profdataBinary := "llvm-profdata"
+	if e.config.AFLPlusPlusOptions.LLVMProfData != "" {
+		profdataBinary = e.config.AFLPlusPlusOptions.LLVMProfData
+	}
+
+	profdataCmd := exec.CommandContext(ctx, profdataBinary, "merge", "-sparse", profileFile, "-o", profdataFile)
+	if output, err := profdataCmd.CombinedOutput(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("llvm-profdata merge timed out after 30 seconds")
+		}
+		return nil, fmt.Errorf("llvm-profdata merge failed: %w, output: %s", err, string(output))
+	}
+
+	coverageData["llvm_profdata_file"] = profdataFile
+	coverageData["llvm_profile_file"] = profileFile
+
+	// Generate coverage report based on format
+	switch e.config.CoverageFormat {
+	case "json":
+		if err := e.generateLLVMJSONCoverage(ctx, profdataFile, coverageData); err != nil {
+			return nil, fmt.Errorf("failed to generate LLVM JSON coverage: %w", err)
+		}
+	case "lcov":
+		if err := e.generateLLVMLCOVCoverage(ctx, profdataFile, coverageData); err != nil {
+			return nil, fmt.Errorf("failed to generate LLVM LCOV coverage: %w", err)
+		}
+	case "html":
+		if err := e.generateLLVMHTMLCoverage(ctx, profdataFile, coverageData); err != nil {
+			return nil, fmt.Errorf("failed to generate LLVM HTML coverage: %w", err)
+		}
+	case "profdata":
+		// Already have profdata file
+		coverageData["llvm_format"] = "profdata"
+	default:
+		coverageData["llvm_format"] = "profdata" // Fallback
+	}
+
+	return coverageData, nil
+}
+
+// collectAFLCovData collects AFL-specific coverage data using afl-cov
+func (e *Engine) collectAFLCovData() (map[string]interface{}, error) {
+	coverageData := make(map[string]interface{})
+
+	if e.config.AFLPlusPlusOptions.SourceDir == "" {
+		return nil, errors.New("source directory required for AFL coverage analysis")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Use afl-cov to generate coverage analysis
+	covDir := filepath.Join(e.config.CoverageDir, "afl-cov")
+	if err := os.MkdirAll(covDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create afl-cov directory: %w", err)
+	}
+
+	// Try afl-cov-fast first, fallback to afl-cov
+	aflCovBinary := "afl-cov-fast"
+	if _, err := exec.LookPath(aflCovBinary); err != nil {
+		aflCovBinary = "afl-cov"
+	}
+
+	args := []string{
+		"-d", e.outputDir,
+		"-e", e.target,
+		"-c", covDir,
+		"--source-dir", e.config.AFLPlusPlusOptions.SourceDir,
+		"--coverage-at-exit",
+	}
+
+	if e.config.CoverageFormat == "lcov" {
+		args = append(args, "--lcov-web-all")
+	} else if e.config.CoverageFormat == "html" {
+		args = append(args, "--func-search", "--line-search")
+	}
+
+	cmd := exec.CommandContext(ctx, aflCovBinary, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("afl-cov analysis timed out after 60 seconds")
+		}
+		return nil, fmt.Errorf("afl-cov analysis failed: %w, output: %s", err, string(output))
+	}
+
+	coverageData["afl_cov_dir"] = covDir
+	coverageData["afl_cov_output"] = string(output)
+	coverageData["afl_cov_binary"] = aflCovBinary
+
+	// Check for generated files
+	if e.config.CoverageFormat == "lcov" {
+		lcovFile := filepath.Join(covDir, "coverage.info")
+		if _, err := os.Stat(lcovFile); err == nil {
+			coverageData["afl_lcov_file"] = lcovFile
+		}
+	}
+
+	if e.config.CoverageFormat == "html" {
+		htmlIndex := filepath.Join(covDir, "web", "index.html")
+		if _, err := os.Stat(htmlIndex); err == nil {
+			coverageData["afl_html_index"] = htmlIndex
+			coverageData["afl_html_dir"] = filepath.Join(covDir, "web")
+		}
+	}
+
+	return coverageData, nil
+}
+
+// extractAFLShowmapCoverage uses afl-showmap to extract coverage from queue files
+func (e *Engine) extractAFLShowmapCoverage(coverageData map[string]interface{}) error {
+	// Find queue directory
+	queueDir := filepath.Join(e.outputDir, "queue")
+	if e.config.AFLPlusPlusOptions.MainNode {
+		queueDir = filepath.Join(e.outputDir, "main", "queue")
+	} else if e.config.AFLPlusPlusOptions.SecondaryNode {
+		queueDir = filepath.Join(e.outputDir, "secondary", "queue")
+	}
+
+	// Check if queue directory exists
+	if _, err := os.Stat(queueDir); os.IsNotExist(err) {
+		return fmt.Errorf("queue directory not found: %s", queueDir)
+	}
+
+	// Get all queue files
+	queueFiles, err := filepath.Glob(filepath.Join(queueDir, "id:*"))
+	if err != nil || len(queueFiles) == 0 {
+		return fmt.Errorf("no queue files found in %s", queueDir)
+	}
+
+	// Use afl-showmap to extract coverage from the latest queue file
+	latestQueue := queueFiles[len(queueFiles)-1]
+	coverageMapFile := filepath.Join(e.config.CoverageDir, "afl_coverage_map.txt")
+
+	// Create coverage directory if it doesn't exist
+	if err := os.MkdirAll(e.config.CoverageDir, 0755); err != nil {
+		return fmt.Errorf("failed to create coverage directory: %w", err)
+	}
+
+	// Run afl-showmap
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "afl-showmap", "-o", coverageMapFile, "-e", "--", e.target)
+
+	// Provide input from queue file
+	inputData, err := os.ReadFile(latestQueue)
+	if err != nil {
+		return fmt.Errorf("failed to read queue file: %w", err)
+	}
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdin pipe: %w", err)
+	}
+
+	go func() {
+		defer stdin.Close()
+		stdin.Write(inputData)
+	}()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		e.log.WithError(err).WithField("output", string(output)).Debug("afl-showmap failed")
+		// Don't return error, just log it
+	}
+
+	// Parse coverage map file
+	if mapData, err := os.ReadFile(coverageMapFile); err == nil {
+		lines := strings.Split(string(mapData), "\n")
+		uniqueTuples := len(lines) - 1 // Subtract one for trailing newline
+		if uniqueTuples > 0 {
+			coverageData["afl_showmap_tuples"] = uniqueTuples
+			coverageData["afl_showmap_file"] = coverageMapFile
+
+			// Estimate coverage percentage based on typical map size
+			// AFL++ typically uses a 64KB map
+			estimatedCoverage := float64(uniqueTuples) / 65536.0 * 100.0
+			if estimatedCoverage > 100 {
+				estimatedCoverage = 100
+			}
+			coverageData["afl_estimated_coverage"] = estimatedCoverage
+		}
+	}
+
+	return nil
+}
+
+// collectBasicCoverageStats collects basic AFL++ coverage statistics
+func (e *Engine) collectBasicCoverageStats() (map[string]interface{}, error) {
+	coverageData := make(map[string]interface{})
+
+	// Read bitmap coverage from AFL++ if available
+	bitmapFile := filepath.Join(e.outputDir, "fuzz_bitmap")
+	if e.config.AFLPlusPlusOptions.MainNode {
+		bitmapFile = filepath.Join(e.outputDir, "main", "fuzz_bitmap")
+	} else if e.config.AFLPlusPlusOptions.SecondaryNode {
+		bitmapFile = filepath.Join(e.outputDir, "secondary", "fuzz_bitmap")
+	}
+
+	if bitmapData, err := os.ReadFile(bitmapFile); err == nil {
+		// Calculate bitmap coverage statistics
+		totalBits := len(bitmapData) * 8
+		setBits := 0
+		for _, b := range bitmapData {
+			for i := 0; i < 8; i++ {
+				if (b>>i)&1 == 1 {
+					setBits++
+				}
+			}
+		}
+
+		coverageData["bitmap_file"] = bitmapFile
+		coverageData["bitmap_size"] = len(bitmapData)
+		coverageData["total_bits"] = totalBits
+		coverageData["set_bits"] = setBits
+		if totalBits > 0 {
+			coverageData["bitmap_density"] = float64(setBits) / float64(totalBits) * 100
+		}
+	}
+
+	// Extract coverage using afl-showmap from queue files
+	if err := e.extractAFLShowmapCoverage(coverageData); err != nil {
+		e.log.WithError(err).Debug("Failed to extract afl-showmap coverage")
+	}
+
+	// Include current fuzzer statistics
+	coverageData["paths_total"] = e.lastPaths
+	coverageData["pending_paths"] = e.lastPendingPaths
+	coverageData["pending_favs"] = e.lastPendingFavs
+
+	// Calculate approximate line coverage based on AFL++ metrics
+	if e.lastPaths > 0 {
+		// Estimate line coverage from path coverage
+		pathCoverage := float64(e.lastPaths-e.lastPendingPaths) / float64(e.lastPaths) * 100
+		coverageData["line_coverage"] = pathCoverage
+		coverageData["function_coverage"] = pathCoverage * 0.8 // Conservative estimate
+		coverageData["coverage_percent"] = pathCoverage
+	}
+
+	return coverageData, nil
+}
+
+// Helper methods for LLVM coverage generation
+func (e *Engine) generateLLVMJSONCoverage(ctx context.Context, profdataFile string, coverageData map[string]interface{}) error {
+	jsonFile := filepath.Join(e.config.CoverageDir, "afl-llvm-coverage.json")
+	llvmCovBinary := "llvm-cov"
+	if e.config.AFLPlusPlusOptions.LLVMCovBinary != "" {
+		llvmCovBinary = e.config.AFLPlusPlusOptions.LLVMCovBinary
+	}
+
+	cmd := exec.CommandContext(ctx, llvmCovBinary, "export", e.target, "-instr-profile", profdataFile, "-format=text")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("llvm-cov export timed out after 30 seconds")
+		}
+		return fmt.Errorf("llvm-cov export failed: %w, output: %s", err, string(output))
+	}
+
+	if err := os.WriteFile(jsonFile, output, 0644); err != nil {
+		return fmt.Errorf("failed to write JSON coverage file: %w", err)
+	}
+
+	// Parse JSON for summary
+	var coverageReport map[string]interface{}
+	if err := json.Unmarshal(output, &coverageReport); err == nil {
+		if data, ok := coverageReport["data"]; ok {
+			coverageData["llvm_json_data"] = data
+		}
+	}
+
+	coverageData["llvm_json_file"] = jsonFile
+	coverageData["llvm_format"] = "json"
+	return nil
+}
+
+func (e *Engine) generateLLVMLCOVCoverage(ctx context.Context, profdataFile string, coverageData map[string]interface{}) error {
+	lcovFile := filepath.Join(e.config.CoverageDir, "afl-llvm-coverage.info")
+	llvmCovBinary := "llvm-cov"
+	if e.config.AFLPlusPlusOptions.LLVMCovBinary != "" {
+		llvmCovBinary = e.config.AFLPlusPlusOptions.LLVMCovBinary
+	}
+
+	cmd := exec.CommandContext(ctx, llvmCovBinary, "export", e.target, "-instr-profile", profdataFile, "-format=lcov")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("llvm-cov export timed out after 30 seconds")
+		}
+		return fmt.Errorf("llvm-cov export failed: %w, output: %s", err, string(output))
+	}
+
+	if err := os.WriteFile(lcovFile, output, 0644); err != nil {
+		return fmt.Errorf("failed to write LCOV coverage file: %w", err)
+	}
+
+	coverageData["llvm_lcov_file"] = lcovFile
+	coverageData["llvm_format"] = "lcov"
+	return nil
+}
+
+func (e *Engine) generateLLVMHTMLCoverage(ctx context.Context, profdataFile string, coverageData map[string]interface{}) error {
+	htmlDir := filepath.Join(e.config.CoverageDir, "afl-llvm-html")
+	if err := os.MkdirAll(htmlDir, 0755); err != nil {
+		return fmt.Errorf("failed to create HTML directory: %w", err)
+	}
+
+	llvmCovBinary := "llvm-cov"
+	if e.config.AFLPlusPlusOptions.LLVMCovBinary != "" {
+		llvmCovBinary = e.config.AFLPlusPlusOptions.LLVMCovBinary
+	}
+
+	cmd := exec.CommandContext(ctx, llvmCovBinary, "show", e.target, "-instr-profile", profdataFile, "-format=html", "-output-dir", htmlDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("llvm-cov show timed out after 30 seconds")
+		}
+		return fmt.Errorf("llvm-cov show failed: %w, output: %s", err, string(output))
+	}
+
+	coverageData["llvm_html_dir"] = htmlDir
+	coverageData["llvm_html_index"] = filepath.Join(htmlDir, "index.html")
+	coverageData["llvm_format"] = "html"
+	return nil
+}
+
+// monitorCoverage monitors and periodically collects coverage data
+func (e *Engine) monitorCoverage() {
+	defer e.wg.Done()
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-e.ctx.Done():
+			// Final coverage collection before exit
+			if data, err := e.CollectCoverageData(); err == nil {
+				e.coverageMutex.Lock()
+				e.coverageData = data
+				e.coverageMutex.Unlock()
+			}
+			return
+		case <-ticker.C:
+			if !e.isRunning.Load() {
+				return
+			}
+			if data, err := e.CollectCoverageData(); err == nil {
+				e.coverageMutex.Lock()
+				e.coverageData = data
+				e.coverageMutex.Unlock()
+			} else {
+				e.log.WithError(err).Debug("Failed to collect coverage data")
+			}
+		}
+	}
+}
+
+// GetCoverageData returns the current coverage data
+func (e *Engine) GetCoverageData() map[string]interface{} {
+	e.coverageMutex.RLock()
+	defer e.coverageMutex.RUnlock()
+
+	// Return a copy of the coverage data
+	data := make(map[string]interface{})
+	for k, v := range e.coverageData {
+		data[k] = v
+	}
+	return data
 }

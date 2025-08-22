@@ -173,6 +173,8 @@ func (s *Server) handleJobCreateWithUpload(w http.ResponseWriter, r *http.Reques
 		CorpusID:          req.CorpusID,
 		CollectionID:      req.CollectionID,
 		UseCampaignCorpus: req.UseCampaignCorpus,
+		EnableCoverage:    req.EnableCoverage,
+		CoverageFormat:    req.CoverageFormat,
 	}
 
 	job, err := s.services.Job.CreateJob(r.Context(), jobReq)

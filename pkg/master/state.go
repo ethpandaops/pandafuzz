@@ -33,6 +33,9 @@ type PersistentState struct {
 
 	// Campaign management
 	campaignManager *CampaignStateManager
+
+	// Storage backend
+	Storage common.Storage // Storage backend for files
 }
 
 // StateStats tracks statistics about the state manager
@@ -243,7 +246,39 @@ func (ps *PersistentState) GetJob(ctx context.Context, jobID string) (*common.Jo
 	}
 	ps.mu.RUnlock()
 
-	// Load from database without holding lock
+	// If we have SQLiteStorage, use its GetJob method to get data from the jobs table
+	// This ensures we get all fields including enable_coverage and coverage_format
+	ps.logger.WithFields(logrus.Fields{
+		"job_id":  jobID,
+		"db_type": fmt.Sprintf("%T", ps.db),
+	}).Info("Checking database type for GetJob")
+
+	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
+		ps.logger.WithField("job_id", jobID).Info("Using SQLiteStorage.GetJob for job retrieval")
+		job, err := sqliteDB.GetJob(ctx, jobID)
+		if err != nil {
+			if common.IsNotFoundError(err) {
+				return nil, common.NewValidationError("get_job", fmt.Errorf("job not found: %s", jobID))
+			}
+			return nil, common.NewDatabaseError("get_job", err)
+		}
+
+		ps.logger.WithFields(logrus.Fields{
+			"job_id":          jobID,
+			"enable_coverage": job.EnableCoverage,
+			"coverage_format": job.CoverageFormat,
+		}).Debug("Retrieved job from SQLiteStorage")
+
+		// Update cache with proper synchronization
+		ps.mu.Lock()
+		ps.jobs[jobID] = job
+		ps.cacheAccessTime["job:"+jobID] = time.Now()
+		ps.mu.Unlock()
+
+		return job, nil
+	}
+
+	// Fallback: Load from database metadata table without holding lock
 	var job common.Job
 	err := ps.retryManager.Execute(func() error {
 		return ps.db.Get(ctx, "job:"+jobID, &job)
@@ -814,19 +849,53 @@ func (ps *PersistentState) LoadPersistedState(ctx context.Context) error {
 			ps.mu.Lock()
 			defer ps.mu.Unlock()
 
-			// Load all jobs with "job:" prefix
+			// Load all jobs - use SQLiteStorage.GetJob if available for proper field loading
 			jobsLoaded := 0
-			if err := advDB.Iterate(ctx, "job:", func(key string, value []byte) error {
-				var job common.Job
-				if err := json.Unmarshal(value, &job); err != nil {
-					ps.logger.WithError(err).WithField("key", key).Warn("Failed to unmarshal job")
-					return nil // Continue with other jobs
+			ps.logger.WithField("db_type", fmt.Sprintf("%T", ps.db)).Info("Checking db type for job loading")
+			if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
+				// Use SQLiteStorage to load jobs from the jobs table with all fields
+				ps.logger.Info("Loading jobs from SQLiteStorage jobs table")
+
+				// We need to get job IDs first, then load each job
+				if err := advDB.Iterate(ctx, "job:", func(key string, value []byte) error {
+					// Extract job ID from key (format: "job:uuid")
+					jobID := strings.TrimPrefix(key, "job:")
+					if jobID == key {
+						return nil // Skip if not a job key
+					}
+
+					// Load job from jobs table instead of using JSON value
+					job, err := sqliteDB.GetJob(ctx, jobID)
+					if err != nil {
+						// Fallback to JSON if not in jobs table
+						var jsonJob common.Job
+						if err := json.Unmarshal(value, &jsonJob); err != nil {
+							ps.logger.WithError(err).WithField("key", key).Warn("Failed to load job")
+							return nil
+						}
+						ps.jobs[jsonJob.ID] = &jsonJob
+					} else {
+						ps.jobs[job.ID] = job
+					}
+					jobsLoaded++
+					return nil
+				}); err != nil {
+					ps.logger.WithError(err).Warn("Failed to iterate jobs, continuing without loaded state")
 				}
-				ps.jobs[job.ID] = &job
-				jobsLoaded++
-				return nil
-			}); err != nil {
-				ps.logger.WithError(err).Warn("Failed to iterate jobs, continuing without loaded state")
+			} else {
+				// Fallback: load from metadata table
+				if err := advDB.Iterate(ctx, "job:", func(key string, value []byte) error {
+					var job common.Job
+					if err := json.Unmarshal(value, &job); err != nil {
+						ps.logger.WithError(err).WithField("key", key).Warn("Failed to unmarshal job")
+						return nil // Continue with other jobs
+					}
+					ps.jobs[job.ID] = &job
+					jobsLoaded++
+					return nil
+				}); err != nil {
+					ps.logger.WithError(err).Warn("Failed to iterate jobs, continuing without loaded state")
+				}
 			}
 
 			// Load all bots with "bot:" prefix

@@ -57,7 +57,7 @@ func (s *jobService) CreateJob(ctx context.Context, req CreateJobRequest) (*comm
 	}
 
 	// Validate fuzzer type
-	validFuzzers := []string{"afl++", "libfuzzer", "honggfuzz"}
+	validFuzzers := []string{"aflplusplus", "afl++", "libfuzzer", "honggfuzz"}
 	isValid := false
 	for _, valid := range validFuzzers {
 		if req.Fuzzer == valid {
@@ -73,6 +73,12 @@ func (s *jobService) CreateJob(ctx context.Context, req CreateJobRequest) (*comm
 	// Create job
 	jobID := uuid.New().String()
 	now := time.Now()
+
+	s.logger.WithFields(logrus.Fields{
+		"job_id":               jobID,
+		"req_duration":         req.Duration,
+		"req_duration_seconds": req.Duration.Seconds(),
+	}).Info("DEBUG: CreateJob called with duration")
 
 	// Set default duration if not provided
 	duration := req.Duration
@@ -100,6 +106,27 @@ func (s *jobService) CreateJob(ctx context.Context, req CreateJobRequest) (*comm
 		}
 	}
 
+	// Ensure duration is stored in config
+	jobConfig := req.Config
+	// Always use the top-level duration if provided
+	if duration > 0 {
+		jobConfig.Duration = duration
+		s.logger.WithFields(logrus.Fields{
+			"job_id":                 jobID,
+			"duration":               duration,
+			"duration_seconds":       duration.Seconds(),
+			"config_duration_before": req.Config.Duration,
+			"config_duration_after":  jobConfig.Duration,
+		}).Info("Setting job config duration")
+	} else {
+		s.logger.WithFields(logrus.Fields{
+			"job_id":           jobID,
+			"request_duration": req.Duration,
+			"duration_var":     duration,
+			"config_duration":  req.Config.Duration,
+		}).Warn("Duration is zero or not provided")
+	}
+
 	job := &common.Job{
 		ID:                jobID,
 		Name:              req.Name,
@@ -109,12 +136,14 @@ func (s *jobService) CreateJob(ctx context.Context, req CreateJobRequest) (*comm
 		CreatedAt:         now,
 		TimeoutAt:         now.Add(duration),
 		WorkDir:           fmt.Sprintf("job_%s", jobID), // Use relative path that bot will resolve
-		Config:            req.Config,
+		Config:            jobConfig,
 		Progress:          0, // Initialize progress to 0
 		CampaignID:        campaignID,
 		CollectionID:      collectionID,
 		UseCampaignCorpus: useCampaignCorpus,
 		Priority:          req.Priority,
+		EnableCoverage:    req.EnableCoverage,
+		CoverageFormat:    req.CoverageFormat,
 	}
 
 	// Save job with context

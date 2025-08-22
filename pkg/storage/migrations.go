@@ -66,6 +66,12 @@ func GetMigrations() []Migration {
 			Up:          addCorpusCollectionsUp,
 			Down:        addCorpusCollectionsDown,
 		},
+		{
+			ID:          "009_add_raw_coverage_files",
+			Description: "Add columns to store raw AFL++ coverage file paths",
+			Up:          addRawCoverageFilesUp,
+			Down:        addRawCoverageFilesDown,
+		},
 	}
 }
 
@@ -811,5 +817,95 @@ func addCorpusCollectionsDown(tx *sql.Tx) error {
 	// We can't easily remove the collection_id column from jobs table in SQLite
 	// So we'll leave it in place
 
+	return nil
+}
+
+// addRawCoverageFilesUp adds columns for raw AFL++ coverage file storage
+func addRawCoverageFilesUp(tx *sql.Tx) error {
+	// Check if file_type column already exists
+	var count int
+	err := tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('coverage_reports') 
+		WHERE name = 'file_type'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for file_type column: %w", err)
+	}
+
+	if count == 0 {
+		// Add the file_type column
+		if _, err := tx.Exec(`
+			ALTER TABLE coverage_reports ADD COLUMN file_type TEXT
+		`); err != nil {
+			return fmt.Errorf("failed to add file_type column: %w", err)
+		}
+	}
+
+	// Check and add fuzzer_stats_path column
+	err = tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('coverage_reports') 
+		WHERE name = 'fuzzer_stats_path'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for fuzzer_stats_path column: %w", err)
+	}
+
+	if count == 0 {
+		if _, err := tx.Exec(`
+			ALTER TABLE coverage_reports ADD COLUMN fuzzer_stats_path TEXT
+		`); err != nil {
+			return fmt.Errorf("failed to add fuzzer_stats_path column: %w", err)
+		}
+	}
+
+	// Check and add plot_data_path column
+	err = tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('coverage_reports') 
+		WHERE name = 'plot_data_path'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for plot_data_path column: %w", err)
+	}
+
+	if count == 0 {
+		if _, err := tx.Exec(`
+			ALTER TABLE coverage_reports ADD COLUMN plot_data_path TEXT
+		`); err != nil {
+			return fmt.Errorf("failed to add plot_data_path column: %w", err)
+		}
+	}
+
+	// Check and add fuzz_bitmap_path column
+	err = tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('coverage_reports') 
+		WHERE name = 'fuzz_bitmap_path'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for fuzz_bitmap_path column: %w", err)
+	}
+
+	if count == 0 {
+		if _, err := tx.Exec(`
+			ALTER TABLE coverage_reports ADD COLUMN fuzz_bitmap_path TEXT
+		`); err != nil {
+			return fmt.Errorf("failed to add fuzz_bitmap_path column: %w", err)
+		}
+	}
+
+	// Create index for file_type
+	if _, err := tx.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_coverage_reports_file_type ON coverage_reports(file_type)
+	`); err != nil {
+		return fmt.Errorf("failed to create file_type index: %w", err)
+	}
+
+	return nil
+}
+
+// addRawCoverageFilesDown removes raw coverage file columns
+func addRawCoverageFilesDown(tx *sql.Tx) error {
+	// SQLite doesn't support dropping columns directly
+	// We would need to recreate the table without the columns
+	// For simplicity, we'll just leave the columns as is
 	return nil
 }

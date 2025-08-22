@@ -18,6 +18,7 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/config"
+	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
 	"github.com/sirupsen/logrus"
 )
 
@@ -80,33 +81,63 @@ type AgentStats struct {
 }
 
 // NewAgent creates a new bot agent
-func NewAgent(config *common.BotConfig, logger *logrus.Logger) (*Agent, error) {
+func NewAgent(botConfig *common.BotConfig, logger *logrus.Logger) (*Agent, error) {
 	// Create retry client for master communication
-	client, err := NewRetryClient(config, logger)
+	client, err := NewRetryClient(botConfig, logger)
 	if err != nil {
 		return nil, common.NewSystemError("create_retry_client", err)
 	}
 
+	// Create storage backend for coverage files
+	var storageConfig config.StorageConfig
+	if botConfig.Storage != nil {
+		// Use provided storage configuration
+		storageConfig = *botConfig.Storage
+	} else {
+		// Fall back to default filesystem storage
+		workDir := botConfig.Fuzzing.WorkDir
+		storageConfig = config.StorageConfig{
+			Type: config.StorageTypeFilesystem,
+			Filesystem: config.FilesystemConfig{
+				BasePath: filepath.Join(workDir, "coverage_data"),
+			},
+			MaxFileSize:       104857600, // 100MB default
+			EnableDedup:       true,
+			EnableCompression: false,
+		}
+	}
+	storageBackend, err := backend.NewStorageBackend(storageConfig, logger)
+	if err != nil {
+		return nil, common.NewSystemError("create_storage_backend", err)
+	}
+
+	// Create coverage collector
+	coverageCollector := NewCoverageCollector(storageBackend, client, logger)
+
 	// Create job executor with fuzzer implementation
-	executor := NewFuzzerJobExecutor(config, logger)
+	executor := NewFuzzerJobExecutor(botConfig, logger)
+	// Set the client as the result handler for coverage reporting
+	executor.SetResultHandler(client)
+	// Set the coverage collector for raw file collection
+	executor.SetCoverageCollector(coverageCollector)
 
 	// Create resource monitor
-	resourceMonitor := NewResourceMonitor(config, logger)
+	resourceMonitor := NewResourceMonitor(botConfig, logger)
 
 	// Create cleanup manager
-	cleanupManager := NewCleanupManager(config, logger)
+	cleanupManager := NewCleanupManager(botConfig, logger)
 
 	// Create result collector
-	resultCollector, err := NewResultCollector(config, config.MasterURL, logger)
+	resultCollector, err := NewResultCollector(botConfig, botConfig.MasterURL, logger)
 	if err != nil {
 		return nil, common.NewSystemError("create_result_collector", err)
 	}
 
 	// Create reproducibility executor
-	reproExecutor := NewReproducibilityExecutor(client, config, logger)
+	reproExecutor := NewReproducibilityExecutor(client, botConfig, logger)
 
 	// Create minimizer client
-	minimizerClient, err := NewMinimizerClient(config, logger)
+	minimizerClient, err := NewMinimizerClient(botConfig, logger)
 	if err != nil {
 		return nil, common.NewSystemError("create_minimizer_client", err)
 	}
@@ -114,7 +145,7 @@ func NewAgent(config *common.BotConfig, logger *logrus.Logger) (*Agent, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Agent{
-		config:          config,
+		config:          botConfig,
 		client:          client,
 		logger:          logger,
 		executor:        executor,
@@ -129,7 +160,7 @@ func NewAgent(config *common.BotConfig, logger *logrus.Logger) (*Agent, error) {
 			StartTime:     time.Now(),
 			CurrentStatus: "initialized",
 		},
-		ID:         config.ID,
+		ID:         botConfig.ID,
 		startTime:  time.Now(),
 		version:    "1.0.0", // TODO: Get from build info
 		workerMode: false,   // Default to polling mode

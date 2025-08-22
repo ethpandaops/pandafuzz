@@ -16,12 +16,14 @@ import (
 
 // FuzzerJobExecutor handles job execution using the fuzzer interface
 type FuzzerJobExecutor struct {
-	config        *common.BotConfig
-	logger        *logrus.Logger
-	resultChan    chan common.FuzzerEvent
-	activeFuzzers map[string]fuzzer.Fuzzer
-	mu            sync.RWMutex
-	botID         string
+	config            *common.BotConfig
+	logger            *logrus.Logger
+	resultChan        chan common.FuzzerEvent
+	activeFuzzers     map[string]fuzzer.Fuzzer
+	mu                sync.RWMutex
+	botID             string
+	resultHandler     interface{} // Handler for reporting results to master
+	coverageCollector *CoverageCollector
 }
 
 // NewFuzzerJobExecutor creates a new fuzzer-based job executor
@@ -114,6 +116,18 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 		fuzzerTimeout = 10 * time.Second // Default 10 second timeout for AFL++
 	}
 
+	// Set coverage type based on job configuration
+	var coverageType fuzzer.CoverageType
+	if job.EnableCoverage {
+		// Default to edge coverage for AFL++
+		coverageType = fuzzer.CoverageEdge
+		fje.logger.WithFields(logrus.Fields{
+			"job_id":          job.ID,
+			"enable_coverage": job.EnableCoverage,
+			"coverage_format": job.CoverageFormat,
+		}).Info("Coverage collection enabled for job")
+	}
+
 	config := fuzzer.FuzzConfig{
 		JobID:           job.ID, // Set the actual job ID
 		Target:          targetPath,
@@ -128,6 +142,16 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 		StatsInterval:   10 * time.Second,
 		LogLevel:        fje.logger.Level.String(),
 		OutputWriter:    logWriter, // Set the log file writer
+		Coverage:        coverageType,
+	}
+
+	// Add coverage-specific options if enabled
+	if job.EnableCoverage {
+		if config.FuzzerOptions == nil {
+			config.FuzzerOptions = make(map[string]any)
+		}
+		config.FuzzerOptions["enable_coverage"] = true
+		config.FuzzerOptions["coverage_format"] = job.CoverageFormat
 	}
 
 	// Add dictionary if provided
@@ -305,6 +329,21 @@ exitLoop:
 		logFile.Close()
 	}
 
+	// Collect coverage if enabled (before returning)
+	if job.EnableCoverage && fuzz != nil {
+		fje.collectCoverage(job, fuzz)
+
+		// For AFL++ jobs, also collect raw coverage files
+		if job.Fuzzer == "afl++" || job.Fuzzer == "aflplusplus" || job.Fuzzer == "afl" {
+			if fje.coverageCollector != nil {
+				ctx := context.Background()
+				if err := fje.coverageCollector.CollectAndStoreRawAFLFiles(ctx, job); err != nil {
+					fje.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to collect raw AFL++ files")
+				}
+			}
+		}
+	}
+
 	if timedOut {
 		msg := fmt.Sprintf("%s execution completed (timeout reached after %v)", job.Fuzzer, job.Config.Duration)
 		fje.logger.WithField("job_id", job.ID).Info("Returning from ExecuteJob with timeout")
@@ -365,6 +404,16 @@ func (fje *FuzzerJobExecutor) GetFuzzer(jobID string) (fuzzer.Fuzzer, bool) {
 	return fuzz, exists
 }
 
+// SetResultHandler sets the result handler for reporting to master
+func (fje *FuzzerJobExecutor) SetResultHandler(handler interface{}) {
+	fje.resultHandler = handler
+}
+
+// SetCoverageCollector sets the coverage collector for raw file collection
+func (fje *FuzzerJobExecutor) SetCoverageCollector(collector *CoverageCollector) {
+	fje.coverageCollector = collector
+}
+
 // CleanupJob removes the fuzzer from active jobs and performs cleanup
 // This should be called AFTER crash detection is complete
 func (fje *FuzzerJobExecutor) CleanupJob(jobID string) error {
@@ -411,6 +460,107 @@ func (fje *FuzzerJobExecutor) createFuzzer(job *common.Job) (fuzzer.Fuzzer, erro
 
 	default:
 		return nil, fmt.Errorf("unsupported fuzzer type: %s", job.Fuzzer)
+	}
+}
+
+// collectCoverage collects and reports coverage data for a job
+func (fje *FuzzerJobExecutor) collectCoverage(job *common.Job, fuzz fuzzer.Fuzzer) {
+	// AFL++ uses raw coverage files, not stats-based coverage
+	if job.Fuzzer == "aflplusplus" || job.Fuzzer == "afl++" {
+		fje.logger.WithField("job_id", job.ID).Debug("AFL++ uses raw coverage files, skipping stats-based coverage collection")
+		return
+	}
+
+	fje.logger.WithFields(logrus.Fields{
+		"job_id":          job.ID,
+		"coverage_format": job.CoverageFormat,
+	}).Info("Collecting coverage data")
+
+	// Try to collect coverage data from the fuzzer
+	var coverageData map[string]interface{}
+
+	// Check if fuzzer implements coverage collection
+	if collector, ok := fuzz.(interface {
+		CollectCoverageData() (map[string]interface{}, error)
+	}); ok {
+		var err error
+		coverageData, err = collector.CollectCoverageData()
+		if err != nil {
+			fje.logger.WithError(err).Warn("Failed to collect coverage data from fuzzer")
+			return
+		}
+
+		fje.logger.WithFields(logrus.Fields{
+			"coverage_data_keys": func() []string {
+				keys := make([]string, 0, len(coverageData))
+				for k := range coverageData {
+					keys = append(keys, k)
+				}
+				return keys
+			}(),
+		}).Debug("Collected coverage from fuzzer")
+	} else {
+		fje.logger.Warn("Fuzzer does not support coverage collection")
+		return
+	}
+
+	if len(coverageData) == 0 {
+		fje.logger.Warn("No coverage data collected")
+		return
+	}
+
+	// Report coverage data to master
+	if fje.resultHandler != nil {
+		// Create coverage report
+		reportID := fmt.Sprintf("coverage-%s-%d", job.ID, time.Now().Unix())
+
+		// Extract coverage stats if available
+		lineCoverage := 0.0
+		functionCoverage := 0.0
+		branchCoverage := 0.0
+
+		if val, ok := coverageData["line_coverage"].(float64); ok {
+			lineCoverage = val
+		} else if val, ok := coverageData["coverage_percent"].(float64); ok {
+			lineCoverage = val
+		}
+
+		if val, ok := coverageData["function_coverage"].(float64); ok {
+			functionCoverage = val
+		}
+
+		if val, ok := coverageData["branch_coverage"].(float64); ok {
+			branchCoverage = val
+		}
+
+		coverageReport := map[string]interface{}{
+			"job_id":            job.ID,
+			"bot_id":            fje.botID,
+			"report_id":         reportID,
+			"format":            job.CoverageFormat,
+			"coverage_data":     coverageData,
+			"line_coverage":     lineCoverage,
+			"function_coverage": functionCoverage,
+			"branch_coverage":   branchCoverage,
+			"collected_at":      time.Now(),
+		}
+
+		// Try to report via the result handler
+		if reporter, ok := fje.resultHandler.(interface {
+			ReportCoverageData(data map[string]interface{}) error
+		}); ok {
+			if err := reporter.ReportCoverageData(coverageReport); err != nil {
+				fje.logger.WithError(err).Warn("Failed to report coverage data to master")
+			} else {
+				fje.logger.WithFields(logrus.Fields{
+					"report_id":         reportID,
+					"line_coverage":     lineCoverage,
+					"function_coverage": functionCoverage,
+				}).Info("Coverage data reported to master")
+			}
+		} else {
+			fje.logger.Warn("Result handler does not support coverage reporting")
+		}
 	}
 }
 

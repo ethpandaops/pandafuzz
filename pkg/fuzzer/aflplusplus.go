@@ -210,7 +210,7 @@ func (afl *AFLPlusPlus) Initialize() error {
 	os.Setenv("AFL_SKIP_CPUFREQ", "1")
 	os.Setenv("AFL_NO_AFFINITY", "1")
 	os.Setenv("AFL_NO_UI", "1")
-	os.Setenv("AFL_SKIP_BIN_CHECK", "1")
+	// Removed AFL_SKIP_BIN_CHECK to allow AFL++ to detect instrumentation
 	os.Setenv("AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES", "1")
 
 	// Enable specific AFL++ features based on config
@@ -816,36 +816,89 @@ func (afl *AFLPlusPlus) validateConfig(config FuzzConfig) error {
 }
 
 func (afl *AFLPlusPlus) buildAFLArgs() []string {
+	afl.logger.Debug("buildAFLArgs called")
 	args := []string{}
 
-	// Use non-instrumented mode
-	args = append(args, "-n")
+	// Note: Removed hardcoded -n flag to allow AFL++ to use instrumentation feedback
+	// AFL++ will automatically detect if binary is instrumented
 
 	// Input directory
-	if afl.config.SeedDirectory != "" {
-		args = append(args, "-i", afl.config.SeedDirectory)
-	} else {
-		// Create minimal seed if none provided
-		seedDir := filepath.Join(afl.outputDir, "seeds")
-		os.MkdirAll(seedDir, 0755)
-		seedFile := filepath.Join(seedDir, "seed")
-		os.WriteFile(seedFile, []byte("0"), 0644)
-		args = append(args, "-i", seedDir)
+	// The work directory is the parent of the parent of outputDir
+	// outputDir is like /app/work/jobs/job_XXX/output/afl_output
+	// workDir should be /app/work/jobs/job_XXX
+	workDir := filepath.Dir(filepath.Dir(afl.outputDir))
+	inputDir := filepath.Join(workDir, "input")
+
+	afl.logger.WithFields(logrus.Fields{
+		"output_dir": afl.outputDir,
+		"work_dir":   workDir,
+		"input_dir":  inputDir,
+		"seed_dir":   afl.config.SeedDirectory,
+	}).Debug("Calculated directories for AFL++")
+
+	// Determine seed directory to use
+	seedDir := afl.config.SeedDirectory
+	if seedDir == "" {
+		seedDir = inputDir
 	}
+
+	// Ensure seed directory exists
+	if err := os.MkdirAll(seedDir, 0755); err != nil {
+		afl.logger.WithError(err).Error("Failed to create seed directory")
+	}
+
+	// Check if seed directory is empty
+	entries, err := os.ReadDir(seedDir)
+	if err != nil {
+		afl.logger.WithError(err).Error("Failed to read seed directory")
+	}
+
+	// If directory is empty, create a default seed
+	if len(entries) == 0 {
+		afl.logger.WithField("seed_dir", seedDir).Debug("Seed directory is empty, creating default seed")
+		seedFile := filepath.Join(seedDir, "seed01.txt")
+		if err := os.WriteFile(seedFile, []byte("0"), 0644); err != nil {
+			afl.logger.WithError(err).Error("Failed to create seed file")
+		} else {
+			afl.logger.WithField("seed_file", seedFile).Info("Created default seed file")
+		}
+	}
+
+	args = append(args, "-i", seedDir)
 
 	// Output directory
 	args = append(args, "-o", afl.outputDir)
 
-	// Memory limit
-	args = append(args, "-m", fmt.Sprintf("%d", afl.config.MemoryLimit))
+	// Memory limit - AFL++ expects MB, config is in bytes
+	if afl.config.MemoryLimit > 0 {
+		memMB := afl.config.MemoryLimit / (1024 * 1024)
+		if memMB == 0 {
+			// If less than 1MB, use minimum of 512MB for AFL++
+			memMB = 512
+		}
+		args = append(args, "-m", fmt.Sprintf("%d", memMB))
+	} else {
+		// Default to 512MB if not specified
+		args = append(args, "-m", "512")
+	}
 
-	// Timeout
+	// Timeout (per test case execution timeout)
 	timeoutMs := afl.config.Timeout.Milliseconds()
 	if timeoutMs <= 0 {
 		timeoutMs = 1000 // Default to 1 second
 	}
 	afl.logger.WithField("timeout_ms", timeoutMs).Debug("Setting AFL++ timeout")
 	args = append(args, "-t", fmt.Sprintf("%d", timeoutMs))
+
+	// Time-limited fuzzing (graceful exit after specified duration)
+	// Use AFL++'s -V flag to run for a specific duration then exit gracefully
+	if afl.config.Duration > 0 {
+		seconds := int(afl.config.Duration.Seconds())
+		if seconds > 0 {
+			args = append(args, "-V", fmt.Sprintf("%d", seconds))
+			afl.logger.WithField("duration_seconds", seconds).Info("AFL++ will run for limited time and exit gracefully")
+		}
+	}
 
 	// Dictionary
 	if afl.config.Dictionary != "" {
@@ -1556,6 +1609,150 @@ func (afl *AFLPlusPlus) GetEnhancedMetrics() *common.EnhancedMetrics {
 	}
 
 	return nil
+}
+
+// CollectCoverageData collects coverage data for AFL++
+func (a *AFLPlusPlus) CollectCoverageData() (map[string]interface{}, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	a.logger.Debug("DEBUG: CollectCoverageData called")
+
+	if a.config.Coverage == "" {
+		return nil, fmt.Errorf("coverage collection not enabled")
+	}
+
+	coverageData := make(map[string]interface{})
+
+	// Collect basic AFL++ coverage statistics from fuzzer stats
+	// Try multiple possible locations for the stats file
+	possibleStatsFiles := []string{
+		filepath.Join(a.outputDir, "afl_output", "default", "fuzzer_stats"),
+		filepath.Join(a.outputDir, "afl_output", "fuzzer_stats"),
+		filepath.Join(a.outputDir, "fuzzer_stats"),
+	}
+
+	var statsData []byte
+	var statsErr error
+	for _, statsFile := range possibleStatsFiles {
+		if data, err := os.ReadFile(statsFile); err == nil {
+			statsData = data
+			a.logger.WithField("stats_file", statsFile).Debug("Found AFL++ stats file")
+			break
+		} else {
+			statsErr = err
+		}
+	}
+
+	if statsData != nil {
+		stats := make(map[string]string)
+		lines := strings.Split(string(statsData), "\n")
+		for _, line := range lines {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				stats[key] = value
+			}
+		}
+
+		// Extract coverage metrics - check for both old and new key names
+		if val, ok := stats["edges_found"]; ok {
+			a.logger.WithFields(logrus.Fields{
+				"edges_found_raw": val,
+				"type":            fmt.Sprintf("%T", val),
+			}).Debug("DEBUG: Found edges_found in stats")
+
+			coverageData["edges_found"] = val
+			// Convert edges to approximate line coverage percentage
+			if edges, err := strconv.ParseInt(val, 10, 64); err == nil && edges > 0 {
+				// Rough approximation: assume we're covering some percentage based on edges
+				lineCov := float64(edges) * 2.0
+				coverageData["line_coverage"] = lineCov // Each edge ~ 2% coverage
+				coverageData["coverage_percent"] = lineCov
+
+				a.logger.WithFields(logrus.Fields{
+					"edges_parsed":  edges,
+					"line_coverage": lineCov,
+					"type":          fmt.Sprintf("%T", lineCov),
+				}).Debug("DEBUG: Calculated coverage from edges")
+			} else if err != nil {
+				a.logger.WithError(err).WithField("val", val).Debug("DEBUG: Failed to parse edges_found")
+			}
+		}
+		if val, ok := stats["bitmap_cvg"]; ok {
+			coverageData["bitmap_coverage"] = val
+		}
+		if val, ok := stats["paths_total"]; ok {
+			coverageData["paths_total"] = val
+		}
+		if val, ok := stats["unique_crashes"]; ok {
+			coverageData["unique_crashes"] = val
+		}
+		if val, ok := stats["unique_hangs"]; ok {
+			coverageData["unique_hangs"] = val
+		}
+		if val, ok := stats["corpus_count"]; ok {
+			coverageData["corpus_count"] = val
+		}
+		if val, ok := stats["exec_timeout"]; ok {
+			coverageData["exec_timeout"] = val
+		}
+		if val, ok := stats["max_depth"]; ok {
+			coverageData["max_depth"] = val
+		}
+	} else if statsErr != nil {
+		a.logger.WithError(statsErr).Debug("Could not read AFL++ stats file from any location")
+	}
+
+	// Try to collect LLVM coverage if available
+	if a.isLLVMMode() {
+		if err := a.collectLLVMCoverage(coverageData); err != nil {
+			a.logger.WithError(err).Debug("Failed to collect LLVM coverage")
+		}
+	}
+
+	// Add metadata
+	coverageData["timestamp"] = time.Now().Unix()
+	coverageData["collected_at"] = time.Now().Format(time.RFC3339)
+	coverageData["fuzzer"] = "afl++"
+	coverageData["format"] = "afl"
+
+	// Add current stats
+	coverageData["total_executions"] = a.stats.Executions
+	coverageData["exec_per_second"] = a.stats.ExecPerSecond
+	coverageData["coverage_percent"] = a.stats.CoveragePercent
+
+	return coverageData, nil
+}
+
+// isLLVMMode checks if AFL++ is running in LLVM mode
+func (a *AFLPlusPlus) isLLVMMode() bool {
+	// Check if we're using afl-clang-fast or afl-clang-lto
+	return strings.Contains(a.config.Target, "afl-clang") ||
+		strings.Contains(os.Getenv("AFL_USE_LLVM"), "1")
+}
+
+// collectLLVMCoverage collects LLVM-based coverage data
+func (a *AFLPlusPlus) collectLLVMCoverage(coverageData map[string]interface{}) error {
+	// Check for llvm-cov output
+	llvmCovFile := filepath.Join(a.outputDir, "coverage.json")
+	if _, err := os.Stat(llvmCovFile); err == nil {
+		if data, err := os.ReadFile(llvmCovFile); err == nil {
+			coverageData["llvm_coverage"] = string(data)
+			return nil
+		}
+	}
+
+	// Try to generate LLVM coverage report
+	cmd := exec.Command("llvm-cov", "report", a.config.Target,
+		"-instr-profile", filepath.Join(a.outputDir, "default.profdata"))
+	output, err := cmd.Output()
+	if err == nil {
+		coverageData["llvm_coverage_report"] = string(output)
+	}
+
+	return err
 }
 
 // CreateAFLPlusPlus creates a new AFL++ instance with optional logger

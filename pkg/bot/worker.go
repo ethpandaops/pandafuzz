@@ -240,6 +240,10 @@ func (r *MasterResultReporter) ReportCoverage(ctx context.Context, coverage *com
 	return r.client.ReportCoverage(coverage)
 }
 
+func (r *MasterResultReporter) ReportCoverageData(data map[string]interface{}) error {
+	return r.client.ReportCoverageData(data)
+}
+
 func (r *MasterResultReporter) ReportCorpusUpdate(ctx context.Context, corpus *common.CorpusUpdate) error {
 	return r.client.ReportCorpusUpdate(corpus)
 }
@@ -256,6 +260,14 @@ func (h *workerResultHandler) ReportCrash(crash *common.CrashResult) error {
 
 func (h *workerResultHandler) ReportCoverage(coverage *common.CoverageResult) error {
 	return h.reporter.ReportCoverage(context.Background(), coverage)
+}
+
+func (h *workerResultHandler) ReportCoverageData(data map[string]interface{}) error {
+	// Use MasterResultReporter's method directly since it doesn't need context
+	if r, ok := h.reporter.(*MasterResultReporter); ok {
+		return r.ReportCoverageData(data)
+	}
+	return nil
 }
 
 func (h *workerResultHandler) ReportCorpusUpdate(corpus *common.CorpusUpdate) error {

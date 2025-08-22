@@ -165,6 +165,7 @@ RUN apt-get update || apt-get update && \
     clang-14 \
     llvm-14 \
     llvm-14-dev \
+    llvm-14-tools \
     libclang-14-dev \
     lld-14 \
     python3 \
@@ -186,13 +187,16 @@ RUN apt-get update || apt-get update && \
     libasan6 \
     libubsan1 \
     libtsan0 \
+    libfuzzer-14-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up LLVM alternatives to ensure correct version is used
 RUN update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-14 100 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100 && \
-    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100
+    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100 && \
+    update-alternatives --install /usr/bin/llvm-profdata llvm-profdata /usr/bin/llvm-profdata-14 100 && \
+    update-alternatives --install /usr/bin/llvm-cov llvm-cov /usr/bin/llvm-cov-14 100
 
 # Set LLVM_CONFIG for AFL++ build
 ENV LLVM_CONFIG=llvm-config-14
@@ -229,9 +233,16 @@ ENV AFL_SKIP_CPUFREQ=1
 ENV AFL_NO_AFFINITY=1
 ENV AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
 ENV AFL_NO_UI=1
-ENV AFL_SKIP_BIN_CHECK=1
+# Removed AFL_SKIP_BIN_CHECK to allow AFL++ to detect instrumentation
 # Fix: Add path for AFL++ to find its support files
 ENV AFL_PATH=/usr/local/lib/afl
+# Add AFL++ binaries to PATH
+ENV PATH=/usr/local/bin:$PATH
+
+# Set coverage environment variables
+ENV LLVM_PROFILE_FILE=/app/work/coverage-%p-%m.profraw
+ENV AFL_LLVM_DOCUMENT_IDS=1
+ENV AFL_LLVM_CMPLOG=1
 
 # Install HongFuzz runtime dependencies
 RUN apt-get update && apt-get install -y \
@@ -244,8 +255,48 @@ RUN apt-get update && apt-get install -y \
 # Copy HongFuzz binaries from builder stage
 COPY --from=honggfuzz-builder /usr/bin/honggfuzz /usr/local/bin/
 
-# Set proper permissions for AFL++
-RUN chmod 755 /usr/local/bin/afl-*
+# Install coverage tools
+# Note: genhtml is part of lcov package, afl-cov needs to be installed from source
+RUN apt-get update && apt-get install -y \
+    lcov \
+    gcovr \
+    perl \
+    && rm -rf /var/lib/apt/lists/* && \
+    # Install afl-cov from GitHub
+    cd /tmp && \
+    wget https://github.com/vanhauser-thc/afl-cov/archive/refs/tags/0.6.2.tar.gz && \
+    tar -xzf 0.6.2.tar.gz && \
+    cd afl-cov-0.6.2 && \
+    cp afl-cov /usr/local/bin/ && \
+    chmod +x /usr/local/bin/afl-cov && \
+    cd / && \
+    rm -rf /tmp/afl-cov-0.6.2 /tmp/0.6.2.tar.gz && \
+    # Verify LLVM coverage tools are accessible
+    ln -sf /usr/bin/llvm-profdata-14 /usr/bin/llvm-profdata || true && \
+    ln -sf /usr/bin/llvm-cov-14 /usr/bin/llvm-cov || true
+
+# Set proper permissions for AFL++ and ensure binaries are accessible
+RUN chmod 755 /usr/local/bin/afl-* && \
+    # Create symbolic links for AFL++ binaries if not already in PATH
+    for tool in /usr/local/bin/afl-*; do \
+        if [ -f "$tool" ] && [ ! -f "/usr/bin/$(basename $tool)" ]; then \
+            ln -sf "$tool" "/usr/bin/$(basename $tool)"; \
+        fi \
+    done && \
+    # Validate coverage tools installation
+    echo "Validating coverage tools installation..." && \
+    which llvm-profdata && echo "llvm-profdata found" && \
+    which llvm-cov && llvm-cov -version | head -1 && \
+    which afl-clang-fast && echo "afl-clang-fast found" && \
+    which lcov && lcov --version | head -1 && \
+    which genhtml && genhtml --version | head -1 && \
+    which afl-cov && echo "afl-cov found" && \
+    # Test LibFuzzer availability (optional - may not work in all environments)
+    (echo 'extern "C" int LLVMFuzzerTestOneInput(const uint8_t*, size_t) { return 0; }' | \
+        clang++ -fsanitize=fuzzer -x c++ -o /tmp/test_fuzzer - 2>/dev/null && \
+        echo "LibFuzzer support validated" && rm -f /tmp/test_fuzzer) || \
+        echo "LibFuzzer support not available (will be handled at runtime)" && \
+    echo "All coverage tools validated successfully!"
 
 # Switch to non-root user
 USER pandafuzz
@@ -274,6 +325,7 @@ RUN apt-get update || apt-get update && \
     linux-tools-generic \
     tcpdump \
     netcat-openbsd \
+    jq \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

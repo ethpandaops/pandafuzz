@@ -10,6 +10,7 @@ import (
 type FuzzerConfig struct {
 	// Common configuration options
 	Timeout         time.Duration     `json:"timeout,omitempty"`
+	MaxDuration     time.Duration     `json:"max_duration,omitempty"` // Maximum time to run fuzzer before graceful exit
 	MemoryLimit     uint64            `json:"memory_limit,omitempty"`
 	Workers         int               `json:"workers,omitempty"`
 	Dictionary      string            `json:"dictionary,omitempty"`
@@ -25,6 +26,11 @@ type FuzzerConfig struct {
 	LibFuzzerOptions   *LibFuzzerOptions   `json:"libfuzzer_options,omitempty"`
 	AFLPlusPlusOptions *AFLPlusPlusOptions `json:"afl_plus_plus_options,omitempty"`
 	HonggfuzzOptions   *HonggfuzzOptions   `json:"honggfuzz_options,omitempty"`
+
+	// Coverage options
+	EnableCoverage bool   `json:"enable_coverage,omitempty"` // Enable coverage collection
+	CoverageFormat string `json:"coverage_format,omitempty"` // Coverage output format (lcov, html, json, profdata, sancov)
+	CoverageDir    string `json:"coverage_dir,omitempty"`    // Directory to store coverage data
 
 	// Advanced options
 	ExtraArgs     []string          `json:"extra_args,omitempty"`
@@ -50,6 +56,7 @@ type LibFuzzerOptions struct {
 	PrintCoverage       int    `json:"print_coverage,omitempty"`
 	PrintCorpusStats    int    `json:"print_corpus_stats,omitempty"`
 	PrintFinalStats     int    `json:"print_final_stats,omitempty"`
+	PrintCoveragePCs    int    `json:"print_coverage_pcs,omitempty"` // Print coverage PCs for analysis
 	DetectLeaks         int    `json:"detect_leaks,omitempty"`
 	PurgeAllocatorCache int    `json:"purge_allocator_cache,omitempty"`
 	TraceMalloc         int    `json:"trace_malloc,omitempty"`
@@ -82,6 +89,11 @@ type AFLPlusPlusOptions struct {
 	FraidaMode      bool   `json:"frida_mode,omitempty"`
 	CmplogMode      bool   `json:"cmplog_mode,omitempty"`
 	WineMode        bool   `json:"wine_mode,omitempty"`
+	UseAFLCov       bool   `json:"use_afl_cov,omitempty"`          // Enable AFL coverage analysis
+	LLVMMode        bool   `json:"llvm_mode,omitempty"`            // Enable LLVM coverage mode
+	SourceDir       string `json:"source_dir,omitempty"`           // Source directory for coverage analysis
+	LLVMCovBinary   string `json:"llvm_cov_binary,omitempty"`      // Path to llvm-cov binary
+	LLVMProfData    string `json:"llvm_profdata_binary,omitempty"` // Path to llvm-profdata binary
 }
 
 // HonggfuzzOptions contains Honggfuzz-specific configuration
@@ -111,6 +123,8 @@ type HonggfuzzOptions struct {
 	ExitUponCrash       bool     `json:"exit_upon_crash,omitempty"`
 	PostProcessorCmd    string   `json:"post_processor_cmd,omitempty"`
 	SocketFuzzing       bool     `json:"socket_fuzzing,omitempty"`
+	Sancov              bool     `json:"sancov,omitempty"`          // Enable sanitizer coverage
+	CoverageReport      bool     `json:"coverage_report,omitempty"` // Generate coverage report
 	NetDriver           bool     `json:"net_driver,omitempty"`
 	NetBindTo           string   `json:"net_bind_to,omitempty"`
 	NetConnectTo        string   `json:"net_connect_to,omitempty"`
@@ -158,10 +172,33 @@ func (c *FuzzerConfig) Validate() error {
 		return errors.New("memory limit too small (minimum 1MB)")
 	}
 
+	// Validate coverage options
+	if c.EnableCoverage {
+		if c.CoverageDir == "" {
+			return errors.New("coverage directory must be specified when coverage is enabled")
+		}
+		if c.CoverageFormat == "" {
+			return errors.New("coverage format must be specified when coverage is enabled")
+		}
+		validFormats := map[string]bool{
+			"lcov":     true,
+			"html":     true,
+			"json":     true,
+			"profdata": true,
+			"sancov":   true,
+		}
+		if !validFormats[c.CoverageFormat] {
+			return fmt.Errorf("invalid coverage format: %s", c.CoverageFormat)
+		}
+	}
+
 	// Validate fuzzer-specific options
 	if c.LibFuzzerOptions != nil {
 		if err := c.LibFuzzerOptions.Validate(); err != nil {
 			return fmt.Errorf("invalid libfuzzer options: %w", err)
+		}
+		if err := c.LibFuzzerOptions.ValidateCoverage(c.EnableCoverage); err != nil {
+			return fmt.Errorf("invalid libfuzzer coverage options: %w", err)
 		}
 	}
 
@@ -169,11 +206,17 @@ func (c *FuzzerConfig) Validate() error {
 		if err := c.AFLPlusPlusOptions.Validate(); err != nil {
 			return fmt.Errorf("invalid AFL++ options: %w", err)
 		}
+		if err := c.AFLPlusPlusOptions.ValidateCoverage(c.EnableCoverage); err != nil {
+			return fmt.Errorf("invalid AFL++ coverage options: %w", err)
+		}
 	}
 
 	if c.HonggfuzzOptions != nil {
 		if err := c.HonggfuzzOptions.Validate(); err != nil {
 			return fmt.Errorf("invalid honggfuzz options: %w", err)
+		}
+		if err := c.HonggfuzzOptions.ValidateCoverage(c.EnableCoverage); err != nil {
+			return fmt.Errorf("invalid honggfuzz coverage options: %w", err)
 		}
 	}
 
@@ -224,6 +267,20 @@ func (o *LibFuzzerOptions) Validate() error {
 	return nil
 }
 
+// ValidateCoverage validates LibFuzzer-specific coverage options
+func (o *LibFuzzerOptions) ValidateCoverage(enableCoverage bool) error {
+	if !enableCoverage {
+		return nil
+	}
+
+	// When coverage is enabled, at least one coverage option should be set
+	if o.UseCounters == 0 && o.PrintCoveragePCs == 0 && o.PrintCoverage == 0 {
+		return errors.New("at least one coverage option must be enabled (use_counters, print_coverage_pcs, or print_coverage)")
+	}
+
+	return nil
+}
+
 // Validate validates AFL++-specific options
 func (o *AFLPlusPlusOptions) Validate() error {
 	if o.InputDir == "" {
@@ -254,6 +311,28 @@ func (o *AFLPlusPlusOptions) Validate() error {
 	return nil
 }
 
+// ValidateCoverage validates AFL++-specific coverage options
+func (o *AFLPlusPlusOptions) ValidateCoverage(enableCoverage bool) error {
+	if !enableCoverage {
+		return nil
+	}
+
+	// When coverage is enabled, validate related fields
+	if o.UseAFLCov {
+		if o.SourceDir == "" {
+			return errors.New("source_dir must be specified when use_afl_cov is enabled")
+		}
+	}
+
+	if o.LLVMMode {
+		if o.LLVMCovBinary != "" && o.LLVMProfData == "" {
+			return errors.New("llvm_profdata_binary must be specified when llvm_cov_binary is used")
+		}
+	}
+
+	return nil
+}
+
 // Validate validates Honggfuzz-specific options
 func (o *HonggfuzzOptions) Validate() error {
 	if o.InputDir == "" {
@@ -274,6 +353,20 @@ func (o *HonggfuzzOptions) Validate() error {
 
 	if o.AsLimit < 0 || o.RssLimit < 0 || o.DataLimit < 0 || o.StackLimit < 0 {
 		return errors.New("resource limits cannot be negative")
+	}
+
+	return nil
+}
+
+// ValidateCoverage validates Honggfuzz-specific coverage options
+func (o *HonggfuzzOptions) ValidateCoverage(enableCoverage bool) error {
+	if !enableCoverage {
+		return nil
+	}
+
+	// When coverage is enabled and sancov is used, validate sancov directory
+	if o.Sancov && o.SancovDir == "" {
+		return errors.New("sancov_dir must be specified when sancov is enabled")
 	}
 
 	return nil
@@ -300,6 +393,15 @@ func (b *ConfigBuilder) WithTimeout(timeout time.Duration) *ConfigBuilder {
 		return b
 	}
 	b.config.Timeout = timeout
+	return b
+}
+
+// WithMaxDuration sets the maximum duration for fuzzing
+func (b *ConfigBuilder) WithMaxDuration(duration time.Duration) *ConfigBuilder {
+	if b.err != nil {
+		return b
+	}
+	b.config.MaxDuration = duration
 	return b
 }
 
@@ -340,6 +442,37 @@ func (b *ConfigBuilder) WithSeedCorpus(path string) *ConfigBuilder {
 		return b
 	}
 	b.config.SeedCorpus = path
+	return b
+}
+
+// WithCoverage enables coverage collection with specified format and directory
+func (b *ConfigBuilder) WithCoverage(enabled bool, format, dir string) *ConfigBuilder {
+	if b.err != nil {
+		return b
+	}
+	b.config.EnableCoverage = enabled
+	if enabled {
+		b.config.CoverageFormat = format
+		b.config.CoverageDir = dir
+	}
+	return b
+}
+
+// WithCoverageFormat sets the coverage format
+func (b *ConfigBuilder) WithCoverageFormat(format string) *ConfigBuilder {
+	if b.err != nil {
+		return b
+	}
+	b.config.CoverageFormat = format
+	return b
+}
+
+// WithCoverageDir sets the coverage directory
+func (b *ConfigBuilder) WithCoverageDir(dir string) *ConfigBuilder {
+	if b.err != nil {
+		return b
+	}
+	b.config.CoverageDir = dir
 	return b
 }
 

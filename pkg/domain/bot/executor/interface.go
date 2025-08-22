@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/domain/bot/types"
-	"github.com/ethpandaops/pandafuzz/pkg/domain/job/types"
+	jobtypes "github.com/ethpandaops/pandafuzz/pkg/domain/job/types"
 )
 
 // Executor defines the interface for executing work on bots

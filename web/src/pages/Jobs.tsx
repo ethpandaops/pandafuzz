@@ -1,16 +1,13 @@
-import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   Box,
   Button,
-  Card,
-  CardContent,
   Chip,
   CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
-  Fab,
   IconButton,
   LinearProgress,
   Paper,
@@ -20,20 +17,12 @@ import {
   TableContainer,
   TableHead,
   TableRow,
-  TextField,
   Typography,
-  MenuItem,
   Grid,
-  FormControlLabel,
-  Switch,
   Alert,
   Tooltip,
-  Skeleton,
-  Grow,
-  Collapse,
   Snackbar,
-  Zoom,
-  alpha,
+  Tab,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -41,7 +30,6 @@ import {
   Delete as DeleteIcon,
   Info as InfoIcon,
   Description as LogsIcon,
-  CloudUpload as UploadIcon,
   CheckCircle as SuccessIcon,
   Error as ErrorIcon,
   Schedule as PendingIcon,
@@ -49,8 +37,14 @@ import {
   Refresh as RefreshIcon,
 } from '@mui/icons-material';
 import api from '../api/client';
-import { Job, JobStatus, JobPriority, Bot } from '../types';
+import { Job, JobStatus, JobPriority, Bot, JobCoverageConfig } from '../types';
 import { SortableTableHeader, useSort } from '../components/SortableTableHeader';
+import JobCreationForm, { JobFormData } from '../components/JobCreationForm';
+import JobCoverageView from '../components/JobCoverageView';
+import TabContext from '@mui/lab/TabContext';
+import TabList from '@mui/lab/TabList';
+import TabPanel from '@mui/lab/TabPanel';
+import AssessmentIcon from '@mui/icons-material/Assessment';
 
 const statusColors: Record<JobStatus, 'default' | 'primary' | 'success' | 'error' | 'warning'> = {
   [JobStatus.Pending]: 'default',
@@ -101,27 +95,14 @@ function Jobs() {
     severity: 'success' | 'error' | 'info' | 'warning';
   }>({ open: false, message: '', severity: 'info' });
   
-  // New job form state
-  const [newJob, setNewJob] = useState({
-    name: '',
-    fuzzer: 'afl++',
-    target: '',
-    target_args: '',
-    priority: JobPriority.Normal,
-    timeout_sec: 3600,
-    memory_limit: 2048,
-    collection_id: ''
-  });
-  
-  // File upload state
-  const [useFileUpload, setUseFileUpload] = useState(true);
-  const [targetBinaryFile, setTargetBinaryFile] = useState<File | null>(null);
-  const [seedCorpusFiles, setSeedCorpusFiles] = useState<File[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const corpusInputRef = useRef<HTMLInputElement>(null);
+  // Job creation state
+  const [createJobLoading, setCreateJobLoading] = useState(false);
   
   // Corpus collections state
   const [corpusCollections, setCorpusCollections] = useState<any[]>([]);
+  
+  // Tab state for job details dialog
+  const [detailsTabValue, setDetailsTabValue] = useState('details');
 
   const fetchJobs = useCallback(async (showLoading = true) => {
     try {
@@ -206,12 +187,33 @@ function Jobs() {
     return bot ? bot.name : botId;
   }, [bots]);
 
-  const handleCreateJob = async () => {
+  const handleCreateJob = async (
+    formData: JobFormData,
+    useFileUpload: boolean,
+    targetBinaryFile: File | null,
+    seedCorpusFiles: File[]
+  ) => {
     try {
+      setCreateJobLoading(true);
+      
       const jobData = {
-        ...newJob,
-        target_args: newJob.target_args.split(' ').filter(arg => arg),
-        collection_id: newJob.collection_id || undefined,
+        name: formData.name,
+        fuzzer: formData.fuzzer,
+        target: formData.target,
+        target_args: formData.target_args.split(' ').filter(arg => arg),
+        priority: formData.priority,
+        timeout_sec: formData.timeout_sec,
+        memory_limit: formData.memory_limit,
+        collection_id: formData.collection_id || undefined,
+        // Add coverage configuration
+        ...(formData.enableCoverage && {
+          config: {
+            coverage: {
+              enabled: true,
+              format: formData.coverageFormat,
+            } as JobCoverageConfig
+          }
+        })
       };
       
       if (useFileUpload && targetBinaryFile) {
@@ -223,19 +225,6 @@ function Jobs() {
       }
       
       setCreateDialogOpen(false);
-      setNewJob({
-        name: '',
-        fuzzer: 'afl++',
-        target: '',
-        target_args: '',
-        priority: JobPriority.Normal,
-        timeout_sec: 3600,
-        memory_limit: 2048,
-        collection_id: '',
-      });
-      setTargetBinaryFile(null);
-      setSeedCorpusFiles([]);
-      setUseFileUpload(true);
       setSnackbar({
         open: true,
         message: 'Job created successfully!',
@@ -248,6 +237,8 @@ function Jobs() {
         message: err instanceof Error ? err.message : 'Failed to create job',
         severity: 'error',
       });
+    } finally {
+      setCreateJobLoading(false);
     }
   };
 
@@ -343,19 +334,6 @@ function Jobs() {
           startIcon={<AddIcon />}
           onClick={() => {
             setCreateDialogOpen(true);
-            setNewJob({
-              name: '',
-              fuzzer: 'afl++',
-              target: '',
-              target_args: '',
-              priority: JobPriority.Normal,
-              timeout_sec: 3600,
-              memory_limit: 2048,
-              collection_id: '',
-            });
-            setTargetBinaryFile(null);
-            setSeedCorpusFiles([]);
-            setUseFileUpload(true);
             setError(null);
           }}
         >
@@ -393,6 +371,7 @@ function Jobs() {
               />
               <TableCell>Target</TableCell>
               <TableCell>Bot</TableCell>
+              <TableCell>Coverage</TableCell>
               <SortableTableHeader
                 label="Created"
                 sortKey="created_at"
@@ -438,12 +417,36 @@ function Jobs() {
                   )}
                 </TableCell>
                 <TableCell>
+                  {job.config?.coverage?.enabled ? (
+                    <Tooltip title={`Format: ${job.config.coverage.format.toUpperCase()}`}>
+                      <Chip 
+                        icon={<AssessmentIcon />}
+                        label="Enabled" 
+                        size="small" 
+                        color="primary" 
+                        variant="outlined" 
+                      />
+                    </Tooltip>
+                  ) : (
+                    '-'
+                  )}
+                </TableCell>
+                <TableCell>
                   {formatDuration(job.started_at, job.completed_at)}
                 </TableCell>
                 <TableCell>
                   <IconButton
                     size="small"
-                    onClick={() => setSelectedJob(job)}
+                    onClick={async () => {
+                      // Fetch fresh job data to get coverage fields
+                      try {
+                        const freshJob = await api.getJob(job.id);
+                        setSelectedJob(freshJob);
+                      } catch (err) {
+                        // Fallback to cached job if fetch fails
+                        setSelectedJob(job);
+                      }
+                    }}
                     title="View details"
                   >
                     <InfoIcon />
@@ -495,217 +498,61 @@ function Jobs() {
       <Dialog
         open={createDialogOpen}
         onClose={() => setCreateDialogOpen(false)}
-        maxWidth="sm"
+        maxWidth="md"
         fullWidth
       >
         <DialogTitle>Create New Job</DialogTitle>
         <DialogContent>
-          {error && (
-            <Alert severity="error" sx={{ mb: 2 }}>
-              {error}
-            </Alert>
-          )}
-          {useFileUpload ? (
-            <Alert severity="info" sx={{ mb: 2 }}>
-              Upload your target binary and optionally include seed corpus files. The binary will be stored and made available to fuzzing bots.
-            </Alert>
-          ) : (
-            <Alert severity="warning" sx={{ mb: 2 }}>
-              Advanced mode: Specify a path to an existing binary on the fuzzing bots. Make sure the binary exists at the specified location on all bots.
-            </Alert>
-          )}
-          <Grid container spacing={2} sx={{ mt: 1 }}>
-            <Grid item xs={12}>
-              <TextField
-                fullWidth
-                label="Job Name"
-                value={newJob.name}
-                onChange={(e) => setNewJob({ ...newJob, name: e.target.value })}
-              />
-            </Grid>
-            <Grid item xs={6}>
-              <TextField
-                fullWidth
-                select
-                label="Fuzzer"
-                value={newJob.fuzzer}
-                onChange={(e) => setNewJob({ ...newJob, fuzzer: e.target.value })}
-              >
-                <MenuItem value="afl++">AFL++</MenuItem>
-                <MenuItem value="libfuzzer">LibFuzzer</MenuItem>
-              </TextField>
-            </Grid>
-            <Grid item xs={6}>
-              <TextField
-                fullWidth
-                select
-                label="Priority"
-                value={newJob.priority}
-                onChange={(e) => setNewJob({ ...newJob, priority: e.target.value as JobPriority })}
-              >
-                <MenuItem value={JobPriority.Low}>Low</MenuItem>
-                <MenuItem value={JobPriority.Normal}>Normal</MenuItem>
-                <MenuItem value={JobPriority.High}>High</MenuItem>
-              </TextField>
-            </Grid>
-            <Grid item xs={12}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={useFileUpload}
-                    onChange={(e) => {
-                      setUseFileUpload(e.target.checked);
-                      if (e.target.checked) {
-                        setTargetBinaryFile(null);
-                        setSeedCorpusFiles([]);
-                      }
-                    }}
-                  />
-                }
-                label="Use existing binary path (advanced)"
-              />
-            </Grid>
-            {!useFileUpload ? (
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  label="Target Binary Path"
-                  value={newJob.target}
-                  onChange={(e) => setNewJob({ ...newJob, target: e.target.value })}
-                  helperText="Path to the binary on the fuzzing bot"
-                />
-              </Grid>
-            ) : (
-              <>
-                <Grid item xs={12}>
-                  <input
-                    type="file"
-                    hidden
-                    ref={fileInputRef}
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        setTargetBinaryFile(file);
-                      }
-                    }}
-                    accept="*"
-                  />
-                  <Button
-                    variant="outlined"
-                    fullWidth
-                    startIcon={<UploadIcon />}
-                    onClick={() => fileInputRef.current?.click()}
-                    sx={{ justifyContent: 'flex-start', textAlign: 'left' }}
-                    color={targetBinaryFile ? 'primary' : 'inherit'}
-                  >
-                    {targetBinaryFile ? targetBinaryFile.name : 'Select Target Binary (Required)'}
-                  </Button>
-                  {targetBinaryFile && (
-                    <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
-                      Size: {(targetBinaryFile.size / 1024 / 1024).toFixed(2)} MB
-                    </Typography>
-                  )}
-                </Grid>
-                <Grid item xs={12}>
-                  <input
-                    type="file"
-                    hidden
-                    multiple
-                    ref={corpusInputRef}
-                    onChange={(e) => {
-                      const files = Array.from(e.target.files || []);
-                      setSeedCorpusFiles(files);
-                    }}
-                  />
-                  <Button
-                    variant="outlined"
-                    fullWidth
-                    startIcon={<UploadIcon />}
-                    onClick={() => corpusInputRef.current?.click()}
-                    sx={{ justifyContent: 'flex-start', textAlign: 'left' }}
-                  >
-                    {seedCorpusFiles.length > 0
-                      ? `${seedCorpusFiles.length} seed corpus files selected`
-                      : 'Select Seed Corpus (Optional)'}
-                  </Button>
-                </Grid>
-              </>
-            )}
-            <Grid item xs={12}>
-              <TextField
-                fullWidth
-                select
-                label="Corpus Collection (Optional)"
-                value={newJob.collection_id}
-                onChange={(e) => setNewJob({ ...newJob, collection_id: e.target.value })}
-                helperText="Use an existing corpus collection for this job"
-              >
-                <MenuItem value="">None</MenuItem>
-                {corpusCollections.map((collection) => (
-                  <MenuItem key={collection.id} value={collection.id}>
-                    {collection.name} ({collection.file_count} files, {(collection.total_size / 1024 / 1024).toFixed(2)} MB)
-                  </MenuItem>
-                ))}
-              </TextField>
-            </Grid>
-            <Grid item xs={12}>
-              <TextField
-                fullWidth
-                label="Target Arguments"
-                value={newJob.target_args}
-                onChange={(e) => setNewJob({ ...newJob, target_args: e.target.value })}
-                helperText="Space-separated arguments"
-              />
-            </Grid>
-            <Grid item xs={6}>
-              <TextField
-                fullWidth
-                label="Timeout (seconds)"
-                type="number"
-                value={newJob.timeout_sec}
-                onChange={(e) => setNewJob({ ...newJob, timeout_sec: parseInt(e.target.value) })}
-              />
-            </Grid>
-            <Grid item xs={6}>
-              <TextField
-                fullWidth
-                label="Memory Limit (MB)"
-                type="number"
-                value={newJob.memory_limit}
-                onChange={(e) => setNewJob({ ...newJob, memory_limit: parseInt(e.target.value) })}
-              />
-            </Grid>
-          </Grid>
+          <JobCreationForm
+            corpusCollections={corpusCollections}
+            onSubmit={handleCreateJob}
+            onCancel={() => setCreateDialogOpen(false)}
+            error={error}
+            loading={createJobLoading}
+          />
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => {
-            setCreateDialogOpen(false);
-            setUseFileUpload(true);
-            setTargetBinaryFile(null);
-            setSeedCorpusFiles([]);
-          }}>Cancel</Button>
-          <Button 
-            onClick={handleCreateJob} 
-            variant="contained"
-            disabled={!newJob.name || !newJob.fuzzer || (useFileUpload ? !targetBinaryFile : !newJob.target)}
-          >
-            Create
-          </Button>
-        </DialogActions>
       </Dialog>
 
       {/* Job Details Dialog */}
       <Dialog
         open={selectedJob !== null}
-        onClose={() => setSelectedJob(null)}
-        maxWidth="md"
+        onClose={() => {
+          setSelectedJob(null);
+          setDetailsTabValue('details');
+        }}
+        maxWidth="lg"
         fullWidth
       >
-        <DialogTitle>Job Details</DialogTitle>
+        <DialogTitle>
+          <Box display="flex" justifyContent="space-between" alignItems="center">
+            Job Details: {selectedJob?.name}
+            {selectedJob?.config?.coverage?.enabled && (
+              <Chip
+                icon={<AssessmentIcon />}
+                label="Coverage Enabled"
+                size="small"
+                color="primary"
+                variant="outlined"
+              />
+            )}
+          </Box>
+        </DialogTitle>
         <DialogContent>
           {selectedJob && (
-            <Box>
-              <Grid container spacing={2}>
+            <TabContext value={detailsTabValue}>
+              <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
+                <TabList onChange={(e, newValue) => setDetailsTabValue(newValue)}>
+                  <Tab label="Details" value="details" />
+                  <Tab 
+                    label="Coverage Reports" 
+                    value="coverage"
+                    icon={<AssessmentIcon />}
+                    iconPosition="start"
+                  />
+                </TabList>
+              </Box>
+              <TabPanel value="details" sx={{ px: 0, pt: 3 }}>
+                <Grid container spacing={2}>
                 <Grid item xs={6}>
                   <Typography variant="subtitle2" color="textSecondary">
                     ID
@@ -802,8 +649,21 @@ function Jobs() {
                     </Typography>
                   </Grid>
                 )}
-              </Grid>
-            </Box>
+                </Grid>
+              </TabPanel>
+              <TabPanel value="coverage" sx={{ px: 0, pt: 3 }}>
+                <JobCoverageView 
+                  jobId={selectedJob.id}
+                  onError={(error) => {
+                    setSnackbar({
+                      open: true,
+                      message: error,
+                      severity: 'error',
+                    });
+                  }}
+                />
+              </TabPanel>
+            </TabContext>
           )}
         </DialogContent>
         <DialogActions>

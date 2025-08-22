@@ -1,309 +1,244 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   Box,
   Card,
   CardContent,
-  Grid,
-  LinearProgress,
+  Chip,
+  CircularProgress,
+  IconButton,
   Paper,
-  TextField,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Tooltip,
   Typography,
-  MenuItem,
 } from '@mui/material';
 import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-  AreaChart,
-  Area,
-} from 'recharts';
+  Download as DownloadIcon,
+  Refresh as RefreshIcon,
+} from '@mui/icons-material';
 import api from '../api/client';
-import { CoverageResult } from '../types';
-
-interface CoverageData {
-  timestamp: string;
-  coverage: number;
-  edges: number;
-  newEdges: number;
-}
+import { CoverageReport } from '../types/coverage';
 
 function Coverage() {
-  const [coverageResults, setCoverageResults] = useState<CoverageResult[]>([]);
+  const [allCoverageReports, setAllCoverageReports] = useState<CoverageReport[]>([]);
   const [loading, setLoading] = useState(true);
+  const [downloading, setDownloading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selectedJob, setSelectedJob] = useState<string>('');
-  const [jobs, setJobs] = useState<Array<{ id: string; name: string }>>([]);
+
+  const fetchCoverageData = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      
+      // Fetch all jobs
+      const jobsData = await api.getJobs({ limit: 100 });
+      
+      // Fetch coverage reports for ALL jobs (not just those with a specific flag)
+      // The backend will return empty arrays for jobs without coverage
+      const allReports: CoverageReport[] = [];
+      
+      for (const job of jobsData) {
+        try {
+          const reports = await api.getCoverageReports(job.id);
+          // Add job name to each report for context
+          if (reports && reports.length > 0) {
+            const reportsWithJobInfo = reports.map(report => ({
+              ...report,
+              jobName: job.name,
+              jobId: job.id
+            }));
+            allReports.push(...reportsWithJobInfo);
+          }
+        } catch (err) {
+          // Silently skip jobs without coverage reports
+          console.debug(`No coverage for job ${job.id}:`, err);
+        }
+      }
+      
+      // Sort by timestamp descending
+      allReports.sort((a, b) => 
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
+      
+      setAllCoverageReports(allReports);
+      
+      if (allReports.length === 0) {
+        setError('No coverage reports found. Coverage reports will appear here when jobs complete fuzzing runs.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to fetch coverage data');
+      setAllCoverageReports([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        setLoading(true);
-        
-        // Fetch jobs for filter
-        const jobsData = await api.getJobs({ limit: 100 });
-        setJobs(jobsData.map((j) => ({ id: j.id, name: j.name })));
-        
-        // Fetch coverage results
-        const params = selectedJob ? { job_id: selectedJob } : undefined;
-        const data = await api.getCoverageResults({ ...params, limit: 1000 });
-        setCoverageResults(data);
-        setError(null);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to fetch coverage data');
-      } finally {
-        setLoading(false);
-      }
-    };
+    fetchCoverageData();
+    // Refresh every 30 seconds
+    const interval = setInterval(fetchCoverageData, 30000);
+    return () => clearInterval(interval);
+  }, [fetchCoverageData]);
 
-    fetchData();
-  }, [selectedJob]);
+  const handleDownloadReport = async (report: CoverageReport) => {
+    if (!report.job_id || !report.id) {
+      console.error('Missing job_id or report id for download');
+      return;
+    }
 
-  if (loading && coverageResults.length === 0) {
-    return <LinearProgress />;
-  }
+    try {
+      setDownloading(report.id);
+      const blob = await api.downloadCoverageReport(report.job_id, report.id);
+      
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `coverage-${report.jobName || report.job_id}-${report.id}-${report.format || 'report'}`;
+      document.body.appendChild(link);
+      link.click();
+      
+      // Cleanup
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to download coverage report:', err);
+      setError(`Failed to download report: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setDownloading(null);
+    }
+  };
 
-  if (error) {
+  const formatFileSize = (bytes: number): string => {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  const formatDate = (dateString: string): string => {
+    return new Date(dateString).toLocaleString();
+  };
+
+  if (loading && allCoverageReports.length === 0) {
     return (
-      <Box p={2}>
-        <Typography color="error">Error: {error}</Typography>
+      <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
+        <CircularProgress />
       </Box>
     );
   }
-
-  // Process data for charts
-  const processedData = coverageResults
-    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
-    .map((result) => ({
-      timestamp: new Date(result.timestamp).toLocaleTimeString(),
-      coverage: result.coverage_percent,
-      edges: result.covered_edges,
-      newEdges: result.new_edges,
-    }));
-
-  // Calculate statistics
-  const latestCoverage = coverageResults.length > 0
-    ? coverageResults[coverageResults.length - 1].coverage_percent
-    : 0;
-  
-  const totalEdges = coverageResults.length > 0
-    ? Math.max(...coverageResults.map((r) => r.edges))
-    : 0;
-  
-  const coveredEdges = coverageResults.length > 0
-    ? Math.max(...coverageResults.map((r) => r.covered_edges))
-    : 0;
-  
-  const totalNewEdges = coverageResults.reduce((sum, r) => sum + r.new_edges, 0);
-
-  // Group by job for job-specific stats
-  const jobStats = coverageResults.reduce((acc, result) => {
-    if (!acc[result.job_id]) {
-      acc[result.job_id] = {
-        jobId: result.job_id,
-        botId: result.bot_id,
-        maxCoverage: 0,
-        totalNewEdges: 0,
-        dataPoints: 0,
-      };
-    }
-    acc[result.job_id].maxCoverage = Math.max(
-      acc[result.job_id].maxCoverage,
-      result.coverage_percent
-    );
-    acc[result.job_id].totalNewEdges += result.new_edges;
-    acc[result.job_id].dataPoints++;
-    return acc;
-  }, {} as Record<string, any>);
 
   return (
     <Box>
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
-        <Typography variant="h4">Coverage Analysis</Typography>
-        <TextField
-          select
-          label="Filter by Job"
-          value={selectedJob}
-          onChange={(e) => setSelectedJob(e.target.value)}
-          size="small"
-          sx={{ minWidth: 200 }}
-        >
-          <MenuItem value="">All Jobs</MenuItem>
-          {jobs.map((job) => (
-            <MenuItem key={job.id} value={job.id}>
-              {job.name}
-            </MenuItem>
-          ))}
-        </TextField>
+        <Typography variant="h4">Coverage Reports</Typography>
+        <Box display="flex" gap={2} alignItems="center">
+          <Chip 
+            label={`${allCoverageReports.length} reports`}
+            color="primary"
+            variant="outlined"
+          />
+          <Tooltip title="Refresh">
+            <IconButton onClick={fetchCoverageData} disabled={loading}>
+              <RefreshIcon />
+            </IconButton>
+          </Tooltip>
+        </Box>
       </Box>
 
-      {coverageResults.length === 0 ? (
+      {error && (
+        <Box mb={2}>
+          <Typography color="error">{error}</Typography>
+        </Box>
+      )}
+
+      {allCoverageReports.length === 0 ? (
         <Card>
           <CardContent>
             <Box display="flex" flexDirection="column" alignItems="center" py={4}>
               <Typography variant="h6" color="textSecondary" gutterBottom>
-                No coverage data available yet
+                No coverage reports available
               </Typography>
-              <Typography variant="body2" color="textSecondary">
-                Coverage data will appear here as fuzzing jobs run
+              <Typography variant="body2" color="textSecondary" textAlign="center">
+                Coverage reports will appear here when jobs with coverage enabled complete fuzzing runs.
               </Typography>
             </Box>
           </CardContent>
         </Card>
       ) : (
-      <Grid container spacing={3}>
-        <Grid item xs={12} sm={6} md={3}>
-          <Card>
-            <CardContent>
-              <Typography color="textSecondary" gutterBottom>
-                Current Coverage
-              </Typography>
-              <Typography variant="h4">
-                {latestCoverage.toFixed(1)}%
-              </Typography>
-            </CardContent>
-          </Card>
-        </Grid>
-        <Grid item xs={12} sm={6} md={3}>
-          <Card>
-            <CardContent>
-              <Typography color="textSecondary" gutterBottom>
-                Covered Edges
-              </Typography>
-              <Typography variant="h4">
-                {coveredEdges.toLocaleString()}
-              </Typography>
-              <Typography variant="body2" color="textSecondary">
-                of {totalEdges.toLocaleString()}
-              </Typography>
-            </CardContent>
-          </Card>
-        </Grid>
-        <Grid item xs={12} sm={6} md={3}>
-          <Card>
-            <CardContent>
-              <Typography color="textSecondary" gutterBottom>
-                New Edges Found
-              </Typography>
-              <Typography variant="h4">{totalNewEdges.toLocaleString()}</Typography>
-            </CardContent>
-          </Card>
-        </Grid>
-        <Grid item xs={12} sm={6} md={3}>
-          <Card>
-            <CardContent>
-              <Typography color="textSecondary" gutterBottom>
-                Active Jobs
-              </Typography>
-              <Typography variant="h4">
-                {Object.keys(jobStats).length}
-              </Typography>
-            </CardContent>
-          </Card>
-        </Grid>
-
-        <Grid item xs={12}>
-          <Paper sx={{ p: 2 }}>
-            <Typography variant="h6" gutterBottom>
-              Coverage Over Time
-            </Typography>
-            <ResponsiveContainer width="100%" height={300}>
-              <AreaChart data={processedData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="timestamp" />
-                <YAxis domain={[0, 100]} />
-                <Tooltip />
-                <Legend />
-                <Area
-                  type="monotone"
-                  dataKey="coverage"
-                  stroke="#8884d8"
-                  fill="#8884d8"
-                  fillOpacity={0.6}
-                  name="Coverage %"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </Paper>
-        </Grid>
-
-        <Grid item xs={12}>
-          <Paper sx={{ p: 2 }}>
-            <Typography variant="h6" gutterBottom>
-              Edge Discovery Rate
-            </Typography>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={processedData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="timestamp" />
-                <YAxis />
-                <Tooltip />
-                <Legend />
-                <Line
-                  type="monotone"
-                  dataKey="edges"
-                  stroke="#82ca9d"
-                  name="Total Edges"
-                />
-                <Line
-                  type="monotone"
-                  dataKey="newEdges"
-                  stroke="#ffc658"
-                  name="New Edges"
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </Paper>
-        </Grid>
-
-        {Object.values(jobStats).length > 0 && (
-          <Grid item xs={12}>
-            <Paper sx={{ p: 2 }}>
-              <Typography variant="h6" gutterBottom>
-                Job Performance Summary
-              </Typography>
-              <Box sx={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr style={{ borderBottom: '2px solid #333' }}>
-                      <th style={{ padding: '8px', textAlign: 'left' }}>Job ID</th>
-                      <th style={{ padding: '8px', textAlign: 'left' }}>Bot ID</th>
-                      <th style={{ padding: '8px', textAlign: 'right' }}>Max Coverage</th>
-                      <th style={{ padding: '8px', textAlign: 'right' }}>New Edges</th>
-                      <th style={{ padding: '8px', textAlign: 'right' }}>Data Points</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {Object.values(jobStats).map((stat: any) => (
-                      <tr key={stat.jobId} style={{ borderBottom: '1px solid #555' }}>
-                        <td style={{ padding: '8px', fontFamily: 'monospace' }}>
-                          {stat.jobId.substring(0, 8)}...
-                        </td>
-                        <td style={{ padding: '8px', fontFamily: 'monospace' }}>
-                          {stat.botId.substring(0, 8)}...
-                        </td>
-                        <td style={{ padding: '8px', textAlign: 'right' }}>
-                          {stat.maxCoverage.toFixed(1)}%
-                        </td>
-                        <td style={{ padding: '8px', textAlign: 'right' }}>
-                          {stat.totalNewEdges.toLocaleString()}
-                        </td>
-                        <td style={{ padding: '8px', textAlign: 'right' }}>
-                          {stat.dataPoints}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </Box>
-            </Paper>
-          </Grid>
-        )}
-      </Grid>
+        <TableContainer component={Paper}>
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableCell>Job Name</TableCell>
+                <TableCell>Format</TableCell>
+                <TableCell>Size</TableCell>
+                <TableCell>Created</TableCell>
+                <TableCell>Bot ID</TableCell>
+                <TableCell align="center">Actions</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {allCoverageReports.map((report) => (
+                <TableRow key={`${report.job_id}-${report.id}`} hover>
+                  <TableCell>
+                    <Box>
+                      <Typography variant="body2" fontWeight="medium">
+                        {report.jobName || report.job_id}
+                      </Typography>
+                      {report.edges && (
+                        <Typography variant="caption" color="textSecondary">
+                          {report.edges.toLocaleString()} edges
+                          {report.new_edges && ` (+${report.new_edges.toLocaleString()} new)`}
+                        </Typography>
+                      )}
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <Chip 
+                      label={report.format || 'unknown'} 
+                      size="small" 
+                      variant="outlined"
+                    />
+                  </TableCell>
+                  <TableCell>
+                    {formatFileSize(report.size || 0)}
+                  </TableCell>
+                  <TableCell>
+                    <Typography variant="body2">
+                      {formatDate(report.created_at)}
+                    </Typography>
+                  </TableCell>
+                  <TableCell>
+                    <Typography variant="body2" fontFamily="monospace" fontSize="0.8em">
+                      {report.bot_id ? report.bot_id.substring(0, 8) + '...' : 'N/A'}
+                    </Typography>
+                  </TableCell>
+                  <TableCell align="center">
+                    <Tooltip title="Download coverage report">
+                      <IconButton
+                        onClick={() => handleDownloadReport(report)}
+                        disabled={downloading === report.id}
+                        size="small"
+                      >
+                        {downloading === report.id ? (
+                          <CircularProgress size={20} />
+                        ) : (
+                          <DownloadIcon />
+                        )}
+                      </IconButton>
+                    </Tooltip>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
       )}
     </Box>
   );

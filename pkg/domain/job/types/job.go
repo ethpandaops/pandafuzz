@@ -47,6 +47,12 @@ type Job struct {
 	// Queue tracking
 	QueuedAt     *time.Time `json:"queued_at,omitempty"` // When the job was added to queue
 	DequeueCount int        `json:"dequeue_count"`       // Number of times dequeued
+
+	// Coverage tracking
+	EnableCoverage   bool           `json:"enable_coverage"`
+	CoverageFormat   string         `json:"coverage_format,omitempty"`
+	CoverageReportID string         `json:"coverage_report_id,omitempty"`
+	CoverageStats    *CoverageStats `json:"coverage_stats,omitempty"`
 }
 
 // JobPriority represents the priority level of a job
@@ -83,6 +89,15 @@ type JobProgress struct {
 	Coverage          float64        `json:"coverage"`
 	LastUpdated       time.Time      `json:"last_updated"`
 	EstimatedTimeLeft *time.Duration `json:"estimated_time_left,omitempty"`
+}
+
+// CoverageStats contains detailed coverage information for a job
+type CoverageStats struct {
+	LineCoverage     float64   `json:"line_coverage"`
+	FunctionCoverage float64   `json:"function_coverage"`
+	BranchCoverage   float64   `json:"branch_coverage,omitempty"`
+	CollectedAt      time.Time `json:"collected_at"`
+	ReportPath       string    `json:"report_path"`
 }
 
 // NewJob creates a new job instance with required fields
@@ -342,6 +357,14 @@ func (j *Job) Validate() error {
 	if j.Priority < PriorityLow || j.Priority > PriorityCritical {
 		return fmt.Errorf("invalid job priority: %d", j.Priority)
 	}
+
+	// Validate coverage format if coverage is enabled
+	if j.EnableCoverage && j.CoverageFormat != "" {
+		if !isValidCoverageFormat(j.CoverageFormat) {
+			return fmt.Errorf("invalid coverage format: %s (must be one of: json, html, lcov, cobertura)", j.CoverageFormat)
+		}
+	}
+
 	return nil
 }
 
@@ -473,4 +496,33 @@ func (j *Job) Queue() error {
 	j.DequeueCount++
 
 	return nil
+}
+
+// IsCoverageEnabled checks if coverage collection is enabled for this job
+func (j *Job) IsCoverageEnabled() bool {
+	return j.EnableCoverage
+}
+
+// UpdateCoverageStats updates the job's coverage statistics
+func (j *Job) UpdateCoverageStats(stats *CoverageStats) error {
+	if !j.EnableCoverage {
+		return errors.New("cannot update coverage stats when coverage is disabled")
+	}
+	if stats == nil {
+		return errors.New("coverage stats cannot be nil")
+	}
+
+	j.CoverageStats = stats
+	j.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
+// isValidCoverageFormat validates the coverage format
+func isValidCoverageFormat(format string) bool {
+	switch format {
+	case "json", "html", "lcov", "cobertura":
+		return true
+	default:
+		return false
+	}
 }

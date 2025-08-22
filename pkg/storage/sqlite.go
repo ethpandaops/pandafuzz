@@ -162,6 +162,13 @@ func (s *SQLiteStorage) createTablesContext(ctx context.Context) error {
 		timeout_at DATETIME NOT NULL,
 		work_dir TEXT NOT NULL,
 		config TEXT, -- JSON object
+		progress INTEGER DEFAULT 0,
+		campaign_id TEXT,
+		use_campaign_corpus INTEGER DEFAULT 0,
+		collection_id VARCHAR(255),
+		enable_coverage BOOLEAN DEFAULT FALSE,
+		coverage_format TEXT,
+		coverage_report_id TEXT,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(assigned_bot) REFERENCES bots(id)
 	);
@@ -239,6 +246,41 @@ func (s *SQLiteStorage) createTablesContext(ctx context.Context) error {
 		FOREIGN KEY(crash_id) REFERENCES crashes(id) ON DELETE CASCADE
 	);
 
+	-- Coverage reports table
+	CREATE TABLE IF NOT EXISTS coverage_reports (
+		id TEXT PRIMARY KEY,
+		job_id TEXT NOT NULL,
+		format TEXT NOT NULL,
+		storage_path TEXT NOT NULL,
+		size INTEGER NOT NULL,
+		file_type TEXT,
+		fuzzer_stats_path TEXT,
+		plot_data_path TEXT,
+		fuzz_bitmap_path TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+	);
+
+	-- Coverage metadata table
+	CREATE TABLE IF NOT EXISTS coverage_metadata (
+		id TEXT PRIMARY KEY,
+		job_id TEXT NOT NULL,
+		report_id TEXT NOT NULL,
+		total_functions INTEGER DEFAULT 0,
+		covered_functions INTEGER DEFAULT 0,
+		total_lines INTEGER DEFAULT 0,
+		covered_lines INTEGER DEFAULT 0,
+		total_branches INTEGER DEFAULT 0,
+		covered_branches INTEGER DEFAULT 0,
+		function_coverage REAL DEFAULT 0.0,
+		line_coverage REAL DEFAULT 0.0,
+		branch_coverage REAL DEFAULT 0.0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+		FOREIGN KEY(report_id) REFERENCES coverage_reports(id) ON DELETE CASCADE
+	);
+
 	-- Create indexes for performance
 	CREATE INDEX IF NOT EXISTS idx_bots_status ON bots(status);
 	CREATE INDEX IF NOT EXISTS idx_bots_timeout ON bots(timeout_at);
@@ -250,6 +292,12 @@ func (s *SQLiteStorage) createTablesContext(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_crashes_timestamp ON crashes(timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_coverage_job_id ON coverage(job_id);
 	CREATE INDEX IF NOT EXISTS idx_corpus_job_id ON corpus_updates(job_id);
+	CREATE INDEX IF NOT EXISTS idx_jobs_enable_coverage ON jobs(enable_coverage);
+	CREATE INDEX IF NOT EXISTS idx_jobs_coverage_report_id ON jobs(coverage_report_id);
+	CREATE INDEX IF NOT EXISTS idx_coverage_reports_job_id ON coverage_reports(job_id);
+	CREATE INDEX IF NOT EXISTS idx_coverage_reports_file_type ON coverage_reports(file_type);
+	CREATE INDEX IF NOT EXISTS idx_coverage_metadata_job_id ON coverage_metadata(job_id);
+	CREATE INDEX IF NOT EXISTS idx_coverage_metadata_report_id ON coverage_metadata(report_id);
 	`
 
 	_, err := s.db.ExecContext(ctx, schema)
@@ -1710,7 +1758,8 @@ func (s *SQLiteStorage) CreateJob(ctx context.Context, job *common.Job) error {
 // GetJob retrieves a job by ID
 func (s *SQLiteStorage) GetJob(ctx context.Context, id string) (*common.Job, error) {
 	query := `SELECT id, name, target, fuzzer, status, assigned_bot,
-		created_at, started_at, completed_at, timeout_at, work_dir, config, progress
+		created_at, started_at, completed_at, timeout_at, work_dir, config, progress,
+		COALESCE(enable_coverage, 0), COALESCE(coverage_format, '')
 		FROM jobs WHERE id = ?`
 
 	var job common.Job
@@ -1718,12 +1767,14 @@ func (s *SQLiteStorage) GetJob(ctx context.Context, id string) (*common.Job, err
 	var startedAt, completedAt sql.NullTime
 	var configJSON sql.NullString
 	var progress sql.NullInt64
+	var enableCoverage int
+	var coverageFormat string
 
 	err := ExecuteWithRetry(ctx, s.config, func() error {
 		return s.db.QueryRowContext(ctx, query, id).Scan(
 			&job.ID, &job.Name, &job.Target, &job.Fuzzer, &job.Status, &assignedBot,
 			&job.CreatedAt, &startedAt, &completedAt, &job.TimeoutAt, &job.WorkDir,
-			&configJSON, &progress)
+			&configJSON, &progress, &enableCoverage, &coverageFormat)
 	})
 
 	if err == sql.ErrNoRows {
@@ -1754,6 +1805,10 @@ func (s *SQLiteStorage) GetJob(ctx context.Context, id string) (*common.Job, err
 			s.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to unmarshal job config")
 		}
 	}
+
+	// Set coverage fields
+	job.EnableCoverage = enableCoverage == 1
+	job.CoverageFormat = coverageFormat
 
 	return &job, nil
 }

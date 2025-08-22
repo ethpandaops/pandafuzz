@@ -42,6 +42,8 @@ crash-*
 /cmd/master/master
 
 # Database files
+pandafuzz.db
+master.out
 /data/*.db
 /data/*.db-journal
 

@@ -1,0 +1,192 @@
+package master
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
+)
+
+// CoverageReportRequest represents a coverage report submission from a bot
+type CoverageReportRequest struct {
+	JobID            string                 `json:"job_id"`
+	BotID            string                 `json:"bot_id"`
+	ReportID         string                 `json:"report_id"`
+	Format           string                 `json:"format"`
+	CoverageData     map[string]interface{} `json:"coverage_data"`
+	LineCoverage     float64                `json:"line_coverage"`
+	FunctionCoverage float64                `json:"function_coverage"`
+	BranchCoverage   float64                `json:"branch_coverage"`
+	CollectedAt      time.Time              `json:"collected_at"`
+}
+
+// CoverageReportResponse represents a coverage report in responses
+type CoverageReportResponse struct {
+	JobID            string    `json:"job_id"`
+	ReportID         string    `json:"report_id"`
+	Format           string    `json:"format"`
+	LineCoverage     float64   `json:"line_coverage"`
+	FunctionCoverage float64   `json:"function_coverage"`
+	BranchCoverage   float64   `json:"branch_coverage"`
+	CollectedAt      time.Time `json:"collected_at"`
+	HasData          bool      `json:"has_data"`
+}
+
+// handleSubmitCoverageReport handles detailed coverage report submission
+func (s *Server) handleSubmitCoverageReport(w http.ResponseWriter, r *http.Request) {
+	var req CoverageReportRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid coverage report", err)
+		return
+	}
+
+	// Validate request
+	if req.JobID == "" || req.BotID == "" || req.ReportID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Job ID, Bot ID, and Report ID are required", nil)
+		return
+	}
+
+	// Set default format if not provided
+	if req.Format == "" {
+		req.Format = "json"
+	}
+
+	// Set collection time if not provided
+	if req.CollectedAt.IsZero() {
+		req.CollectedAt = time.Now()
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.config.Timeouts.DatabaseOp)
+	defer cancel()
+
+	// Prepare coverage data in the expected format for the coverage table
+	// Extract edge count from coverage data if available
+	edges := int64(0)
+	newEdges := int64(0)
+	execCount := int64(0)
+
+	if val, ok := req.CoverageData["total_executions"].(float64); ok {
+		execCount = int64(val)
+	}
+	if val, ok := req.CoverageData["bitmap_coverage"].(string); ok {
+		// Try to parse percentage from bitmap coverage (e.g., "12.34%")
+		if pct := strings.TrimSuffix(val, "%"); pct != val {
+			if f, err := strconv.ParseFloat(pct, 64); err == nil {
+				edges = int64(f * 100) // Convert percentage to edge approximation
+			}
+		}
+	}
+
+	// Create coverage record in the expected format
+	coverageRecord := map[string]interface{}{
+		"id":         req.ReportID,
+		"job_id":     req.JobID,
+		"bot_id":     req.BotID,
+		"edges":      edges,
+		"new_edges":  newEdges,
+		"timestamp":  req.CollectedAt.Unix(),
+		"exec_count": execCount,
+	}
+
+	// Store the coverage record in the coverage table format
+	coverageKey := fmt.Sprintf("coverage:%s", req.ReportID)
+	if err := s.state.db.Store(ctx, coverageKey, coverageRecord); err != nil {
+		s.logger.WithError(err).Error("Failed to store coverage report")
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store coverage report", err)
+		return
+	}
+
+	// Also store the full report separately for detailed viewing
+	fullReportKey := fmt.Sprintf("coverage:report:%s", req.ReportID)
+	if err := s.state.db.Store(ctx, fullReportKey, req); err != nil {
+		s.logger.WithError(err).Warn("Failed to store full coverage report")
+	}
+
+	// Store a reference from job to coverage report
+	jobCoverageKey := fmt.Sprintf("job:coverage:%s:%s", req.JobID, req.ReportID)
+	if err := s.state.db.Store(ctx, jobCoverageKey, req.ReportID); err != nil {
+		s.logger.WithError(err).Warn("Failed to store job coverage reference")
+	}
+
+	// Update coverage stats counter
+	s.state.stats.CoverageReports++
+
+	s.logger.WithFields(logrus.Fields{
+		"report_id":         req.ReportID,
+		"job_id":            req.JobID,
+		"bot_id":            req.BotID,
+		"line_coverage":     req.LineCoverage,
+		"function_coverage": req.FunctionCoverage,
+		"branch_coverage":   req.BranchCoverage,
+	}).Info("Coverage report submitted successfully")
+
+	response := map[string]interface{}{
+		"status":    "success",
+		"report_id": req.ReportID,
+		"timestamp": time.Now(),
+	}
+
+	s.writeJSONResponse(w, response)
+}
+
+// handleGetCoverageReport retrieves coverage reports for a job
+func (s *Server) handleGetCoverageReport(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	jobID := vars["id"]
+
+	if jobID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Job ID is required", nil)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.config.Timeouts.DatabaseOp)
+	defer cancel()
+
+	// Retrieve all coverage reports for this job
+	// This is a simplified approach - in production, use proper querying
+	reports := []CoverageReportResponse{}
+
+	// Check for recent coverage reports (last 24 hours)
+	// Since we know the report ID format includes timestamp, we can construct likely keys
+	now := time.Now().Unix()
+	for ts := now; ts > now-86400 && len(reports) < 100; ts-- {
+		// Try coverage-{job_id}-{timestamp} pattern
+		reportID := fmt.Sprintf("coverage-%s-%d", jobID, ts)
+		jobCoverageKey := fmt.Sprintf("job:coverage:%s:%s", jobID, reportID)
+
+		// Check if this key exists
+		var storedReportID string
+		if err := s.state.db.Get(ctx, jobCoverageKey, &storedReportID); err == nil && storedReportID != "" {
+			// Retrieve the actual coverage report
+			fullReportKey := fmt.Sprintf("coverage:report:%s", storedReportID)
+			var report CoverageReportRequest
+			if err := s.state.db.Get(ctx, fullReportKey, &report); err == nil {
+				reports = append(reports, CoverageReportResponse{
+					JobID:            report.JobID,
+					ReportID:         report.ReportID,
+					Format:           report.Format,
+					LineCoverage:     report.LineCoverage,
+					FunctionCoverage: report.FunctionCoverage,
+					BranchCoverage:   report.BranchCoverage,
+					CollectedAt:      report.CollectedAt,
+					HasData:          len(report.CoverageData) > 0,
+				})
+			}
+		}
+	}
+
+	// Build response
+	response := map[string]interface{}{
+		"job_id":  jobID,
+		"reports": reports,
+		"count":   len(reports),
+	}
+
+	s.writeJSONResponse(w, response)
+}

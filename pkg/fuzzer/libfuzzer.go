@@ -322,6 +322,7 @@ func (lf *LibFuzzer) Start(ctx context.Context) error {
 
 	// Build LibFuzzer command
 	args := lf.buildLibFuzzerArgs()
+	lf.logger.WithField("libfuzzer_args", args).Debug("LibFuzzer command arguments")
 	lf.cmd = exec.CommandContext(lf.ctx, lf.config.Target, args...)
 
 	// Set working directory if specified
@@ -934,6 +935,7 @@ func (lf *LibFuzzer) buildLibFuzzerArgs() []string {
 	if lf.config.Duration > 0 {
 		seconds := int(lf.config.Duration.Seconds())
 		args = append(args, fmt.Sprintf("-max_total_time=%d", seconds))
+		lf.logger.WithField("duration_seconds", seconds).Info("LibFuzzer will run for limited time and exit gracefully")
 	} else if lf.config.MaxExecutions == 0 {
 		// If neither duration nor max executions is set, default to 60 seconds
 		// to prevent libfuzzer from running indefinitely or exiting immediately
