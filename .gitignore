@@ -68,3 +68,9 @@ bot-docker.yaml
 
 # IDE files
 .vscode/
+
+# Generated code (auto-generated from OpenAPI specs)
+pkg/api/v1/generated/*.gen.go
+pkg/clients/go/generated/
+pkg/clients/python/pandafuzz/
+pkg/clients/typescript/dist/
