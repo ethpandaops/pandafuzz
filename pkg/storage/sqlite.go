@@ -169,6 +169,9 @@ func (s *SQLiteStorage) createTablesContext(ctx context.Context) error {
 		enable_coverage BOOLEAN DEFAULT FALSE,
 		coverage_format TEXT,
 		coverage_report_id TEXT,
+		lease_token VARCHAR(64),
+		lease_expires_at DATETIME,
+		last_heartbeat DATETIME,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(assigned_bot) REFERENCES bots(id)
 	);
@@ -636,7 +639,7 @@ func (s *SQLiteStorage) storeBotContext(ctx context.Context, id, data string) er
 func (s *SQLiteStorage) getBotContext(ctx context.Context, id string) (string, error) {
 	query := `SELECT json_object('id', id, 'name', name, 'hostname', hostname, 'status', status, 'last_seen', last_seen,
 			         'registered_at', registered_at, 'current_job', current_job, 'capabilities', json(capabilities),
-			         'timeout_at', timeout_at, 'is_online', CAST(is_online AS INTEGER) != 0, 'failure_count', failure_count, 'api_endpoint', api_endpoint) FROM bots WHERE id = ?`
+			         'timeout_at', timeout_at, 'is_online', json(CASE WHEN is_online THEN 'true' ELSE 'false' END), 'failure_count', failure_count, 'api_endpoint', api_endpoint) FROM bots WHERE id = ?`
 
 	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (string, error) {
 		var data string
@@ -654,13 +657,15 @@ func (s *SQLiteStorage) deleteBotContext(ctx context.Context, id string) error {
 }
 
 func (s *SQLiteStorage) storeJobContext(ctx context.Context, id, data string) error {
-	query := `INSERT OR REPLACE INTO jobs (id, name, target, fuzzer, status, assigned_bot, created_at, started_at, completed_at, timeout_at, work_dir, config, updated_at)
+	query := `INSERT OR REPLACE INTO jobs (id, name, target, fuzzer, status, assigned_bot, created_at, started_at, completed_at, timeout_at, work_dir, config, collection_id, campaign_id, use_campaign_corpus, enable_coverage, coverage_format, updated_at)
 			  SELECT ?, json_extract(?, '$.name'), json_extract(?, '$.target'), json_extract(?, '$.fuzzer'),
 			         json_extract(?, '$.status'), json_extract(?, '$.assigned_bot'), json_extract(?, '$.created_at'),
 			         json_extract(?, '$.started_at'), json_extract(?, '$.completed_at'), json_extract(?, '$.timeout_at'),
-			         json_extract(?, '$.work_dir'), json_extract(?, '$.config'), CURRENT_TIMESTAMP`
+			         json_extract(?, '$.work_dir'), json_extract(?, '$.config'), json_extract(?, '$.collection_id'),
+			         json_extract(?, '$.campaign_id'), json_extract(?, '$.use_campaign_corpus'),
+			         json_extract(?, '$.enable_coverage'), json_extract(?, '$.coverage_format'), CURRENT_TIMESTAMP`
 
-	_, err := RetryableExec(ctx, s.db, s.config, query, id, data, data, data, data, data, data, data, data, data, data, data)
+	_, err := RetryableExec(ctx, s.db, s.config, query, id, data, data, data, data, data, data, data, data, data, data, data, data, data, data, data, data)
 	return err
 }
 
@@ -668,7 +673,10 @@ func (s *SQLiteStorage) getJobContext(ctx context.Context, id string) (string, e
 	query := `SELECT json_object('id', id, 'name', name, 'target', target, 'fuzzer', fuzzer, 'status', status,
 			         'assigned_bot', assigned_bot, 'created_at', created_at, 'started_at', started_at,
 			         'completed_at', completed_at, 'timeout_at', timeout_at, 'work_dir', work_dir,
-			         'config', json(config)) FROM jobs WHERE id = ?`
+			         'config', json(config), 'collection_id', collection_id, 'campaign_id', campaign_id,
+			         'use_campaign_corpus', json(CASE WHEN use_campaign_corpus THEN 'true' ELSE 'false' END),
+			         'enable_coverage', json(CASE WHEN enable_coverage THEN 'true' ELSE 'false' END),
+			         'coverage_format', coverage_format) FROM jobs WHERE id = ?`
 
 	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (string, error) {
 		var data string
@@ -947,13 +955,25 @@ func (tx *SQLiteTransaction) storeBotInTx(ctx context.Context, id, data string) 
 }
 
 func (tx *SQLiteTransaction) storeJobInTx(ctx context.Context, id, data string) error {
-	query := `INSERT OR REPLACE INTO jobs (id, name, target, fuzzer, status, assigned_bot, created_at, started_at, completed_at, timeout_at, work_dir, config, updated_at)
+	// Debug: log the JSON data to verify coverage fields
+	var jobData map[string]interface{}
+	if err := json.Unmarshal([]byte(data), &jobData); err == nil {
+		tx.logger.WithFields(logrus.Fields{
+			"job_id":          id,
+			"enable_coverage": jobData["enable_coverage"],
+			"coverage_format": jobData["coverage_format"],
+		}).Info("DEBUG: Storing job in SQLite with coverage settings")
+	}
+
+	query := `INSERT OR REPLACE INTO jobs (id, name, target, fuzzer, status, assigned_bot, created_at, started_at, completed_at, timeout_at, work_dir, config, collection_id, campaign_id, use_campaign_corpus, enable_coverage, coverage_format, updated_at)
 			  SELECT ?, json_extract(?, '$.name'), json_extract(?, '$.target'), json_extract(?, '$.fuzzer'),
 			         json_extract(?, '$.status'), json_extract(?, '$.assigned_bot'), json_extract(?, '$.created_at'),
 			         json_extract(?, '$.started_at'), json_extract(?, '$.completed_at'), json_extract(?, '$.timeout_at'),
-			         json_extract(?, '$.work_dir'), json_extract(?, '$.config'), CURRENT_TIMESTAMP`
+			         json_extract(?, '$.work_dir'), json_extract(?, '$.config'), json_extract(?, '$.collection_id'),
+			         json_extract(?, '$.campaign_id'), json_extract(?, '$.use_campaign_corpus'),
+			         json_extract(?, '$.enable_coverage'), json_extract(?, '$.coverage_format'), CURRENT_TIMESTAMP`
 
-	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data)
+	_, err := tx.tx.ExecContext(ctx, query, id, data, data, data, data, data, data, data, data, data, data, data, data, data, data, data, data)
 	return err
 }
 
@@ -1871,16 +1891,21 @@ func (s *SQLiteStorage) UpdateJob(ctx context.Context, id string, updates map[st
 
 // ListJobs retrieves jobs with pagination and optional status filter
 func (s *SQLiteStorage) ListJobs(ctx context.Context, limit, offset int, status string) ([]*common.Job, error) {
+	// Build query to get ALL non-deleted jobs
 	query := `SELECT id, name, target, fuzzer, status, assigned_bot,
 		created_at, started_at, completed_at, timeout_at, work_dir, config, progress
-		FROM jobs`
+		FROM jobs
+		WHERE 1=1` // Start with a true condition for easier query building
+
 	args := []interface{}{}
 
+	// If status filter is provided, add it to the WHERE clause
 	if status != "" {
-		query += " WHERE status = ?"
+		query += " AND status = ?"
 		args = append(args, status)
 	}
 
+	// Order by creation time to maintain consistent ordering
 	query += " ORDER BY created_at DESC"
 
 	if limit > 0 {

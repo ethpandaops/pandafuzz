@@ -31,6 +31,7 @@ import {
 import api from '../api/client';
 import { CrashResult } from '../types';
 import { SortableTableHeader, useSort } from '../components/SortableTableHeader';
+import { formatDateTime } from '../utils/dateFormat';
 
 function Crashes() {
   const [crashes, setCrashes] = useState<CrashResult[]>([]);
@@ -272,7 +273,7 @@ function Crashes() {
                   )}
                 </TableCell>
                 <TableCell>
-                  {new Date(crash.timestamp).toLocaleString()}
+                  {formatDateTime(crash.timestamp)}
                 </TableCell>
                 <TableCell>
                   <IconButton
@@ -382,7 +383,7 @@ function Crashes() {
                     Timestamp
                   </Typography>
                   <Typography variant="body1" gutterBottom>
-                    {new Date(selectedCrash.timestamp).toLocaleString()}
+                    {formatDateTime(selectedCrash.timestamp)}
                   </Typography>
                 </Grid>
                 {selectedCrash.output && (

@@ -45,6 +45,7 @@ type JobRequest struct {
 	Target            string           `json:"target" validate:"required,max=500"`
 	Fuzzer            string           `json:"fuzzer" validate:"required,oneof=afl++ libfuzzer honggfuzz"`
 	Duration          time.Duration    `json:"duration,omitempty"`
+	TimeoutSec        int              `json:"timeout_sec,omitempty"` // Accept timeout as integer seconds for compatibility
 	Config            common.JobConfig `json:"config,omitempty"`
 	CampaignID        string           `json:"campaign_id,omitempty" validate:"omitempty,uuid"`
 	CorpusID          string           `json:"corpus_id,omitempty" validate:"omitempty,uuid"`

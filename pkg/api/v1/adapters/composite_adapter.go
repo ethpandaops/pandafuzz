@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/sirupsen/logrus"
 
 	"github.com/ethpandaops/pandafuzz/pkg/api/v1/generated"
@@ -168,6 +170,10 @@ func (a *CompositeAdapter) ListCrashes(w http.ResponseWriter, r *http.Request, p
 	a.crashAdapter.ListCrashes(w, r, params)
 }
 
+func (a *CompositeAdapter) CreateCrash(w http.ResponseWriter, r *http.Request) {
+	a.crashAdapter.CreateCrash(w, r)
+}
+
 func (a *CompositeAdapter) GetCrash(w http.ResponseWriter, r *http.Request, crashId generated.CrashIdParam, params generated.GetCrashParams) {
 	a.crashAdapter.GetCrash(w, r, crashId, params)
 }
@@ -231,7 +237,14 @@ func (a *CompositeAdapter) GetEventStream(w http.ResponseWriter, r *http.Request
 
 	// Register SSE client
 	clientID := fmt.Sprintf("sse_%d", time.Now().UnixNano())
-	client := sse.NewClient(clientID, w)
+	config := sse.ClientConfig{
+		BufferSize:        100,
+		WriteTimeout:      30 * time.Second,
+		MaxEventsPerSec:   100,
+		BurstSize:         10,
+		EnableCompression: false,
+	}
+	client := sse.NewClient(clientID, w, r, config, a.logger)
 
 	if err := a.sse.Register(client); err != nil {
 		a.logger.WithError(err).Error("failed to register SSE client")
@@ -424,8 +437,10 @@ func (a *CompositeAdapter) executeBatchOperations(r *http.Request, req generated
 	totalTime := float32(time.Since(startTime).Seconds())
 	partialSuccess := successful > 0 && failed > 0
 
+	// Parse the UUID string
+	uuidVal, _ := uuid.Parse(batchId)
 	return generated.BatchResponse{
-		BatchId:              generated.UUID(batchId), // This will need proper UUID conversion
+		BatchId:              openapi_types.UUID(uuidVal), // Convert to openapi UUID
 		TotalOperations:      len(req.Operations),
 		SuccessfulOperations: successful,
 		FailedOperations:     failed,
@@ -461,4 +476,14 @@ func (a *CompositeAdapter) writeError(w http.ResponseWriter, statusCode int, err
 	if encodeErr := json.NewEncoder(w).Encode(problem); encodeErr != nil {
 		a.logger.WithError(encodeErr).Error("failed to encode error response")
 	}
+}
+
+// AckJob forwards to job adapter
+func (a *CompositeAdapter) AckJob(w http.ResponseWriter, r *http.Request, jobID, botID, leaseToken string) {
+	a.jobAdapter.AckJob(w, r, jobID, botID, leaseToken)
+}
+
+// JobHeartbeat forwards to job adapter
+func (a *CompositeAdapter) JobHeartbeat(w http.ResponseWriter, r *http.Request, jobID, botID, leaseToken string) {
+	a.jobAdapter.JobHeartbeat(w, r, jobID, botID, leaseToken)
 }

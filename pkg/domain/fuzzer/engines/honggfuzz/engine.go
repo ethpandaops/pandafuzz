@@ -658,11 +658,24 @@ func (e *Engine) checkForCrashes() {
 		crashDir = "/tmp/honggfuzz"
 	}
 
-	// Honggfuzz saves crashes with specific naming pattern
-	pattern := filepath.Join(crashDir, "*.fuzz")
-	files, err := filepath.Glob(pattern)
-	if err != nil {
-		return
+	// Honggfuzz saves crashes in a more complex structure:
+	// <workspace>/<target>/SIG*/**/*.fuzz
+	// The target name is derived from the binary name
+	targetName := filepath.Base(e.target)
+
+	// First try the new structure with signal directories
+	sigPattern := filepath.Join(crashDir, targetName, "SIG*", "*.fuzz")
+	files, _ := filepath.Glob(sigPattern)
+
+	// Also check nested directories under SIG*
+	deepSigPattern := filepath.Join(crashDir, targetName, "SIG*", "*", "*.fuzz")
+	deepFiles, _ := filepath.Glob(deepSigPattern)
+	files = append(files, deepFiles...)
+
+	// Fallback to the old pattern for backward compatibility
+	if len(files) == 0 {
+		pattern := filepath.Join(crashDir, "*.fuzz")
+		files, _ = filepath.Glob(pattern)
 	}
 
 	for _, file := range files {

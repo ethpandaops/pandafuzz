@@ -665,7 +665,7 @@ func (afl *AFLPlusPlus) GetCrashes() ([]*common.CrashResult, error) {
 
 			crash := &common.CrashResult{
 				ID:          file.Name(),
-				JobID:       afl.config.Target,
+				JobID:       afl.config.JobID, // Use actual job ID from config
 				BotID:       afl.botID,
 				Timestamp:   info.ModTime(),
 				FilePath:    filepath.Join(afl.crashDir, file.Name()),
@@ -674,6 +674,7 @@ func (afl *AFLPlusPlus) GetCrashes() ([]*common.CrashResult, error) {
 				Type:        crashType,
 				Input:       crashData,                                    // Include the crash input data
 				InputBase64: base64.StdEncoding.EncodeToString(crashData), // Base64 encode the crash data
+				IsUnique:    true,                                         // Mark as unique for now
 			}
 
 			afl.logger.WithFields(logrus.Fields{
@@ -815,12 +816,51 @@ func (afl *AFLPlusPlus) validateConfig(config FuzzConfig) error {
 	return nil
 }
 
+// isInstrumented checks if the binary is instrumented for AFL++
+func (afl *AFLPlusPlus) isInstrumented() bool {
+	// Check for AFL++ instrumentation signatures in the binary
+	cmd := exec.Command("strings", afl.config.Target)
+	output, err := cmd.Output()
+	if err != nil {
+		afl.logger.WithError(err).Warn("Failed to check binary instrumentation, assuming not instrumented")
+		return false
+	}
+
+	// Look for AFL++ instrumentation markers
+	outputStr := string(output)
+	aflMarkers := []string{
+		"__afl_",
+		"__AFL_",
+		"afl-compiler-rt",
+		"__sanitizer_cov_",
+		"SanitizerCoverage",
+	}
+
+	for _, marker := range aflMarkers {
+		if strings.Contains(outputStr, marker) {
+			afl.logger.Debug("Found AFL++ instrumentation marker in binary")
+			return true
+		}
+	}
+
+	afl.logger.Debug("No AFL++ instrumentation detected in binary, will use dumb mode")
+	return false
+}
+
 func (afl *AFLPlusPlus) buildAFLArgs() []string {
 	afl.logger.Debug("buildAFLArgs called")
 	args := []string{}
 
-	// Note: Removed hardcoded -n flag to allow AFL++ to use instrumentation feedback
-	// AFL++ will automatically detect if binary is instrumented
+	// Check if binary is instrumented, if not use dumb mode
+	afl.logger.WithField("target", afl.config.Target).Debug("Checking if binary is instrumented")
+	if afl.config.Target != "" && !afl.isInstrumented() {
+		args = append(args, "-n")
+		afl.logger.Debug("Binary is not instrumented, running AFL++ in dumb mode (-n)")
+	} else if afl.config.Target != "" {
+		afl.logger.Debug("Binary is instrumented, running AFL++ with instrumentation feedback")
+	} else {
+		afl.logger.Debug("Target not set, cannot check instrumentation")
+	}
 
 	// Input directory
 	// The work directory is the parent of the parent of outputDir

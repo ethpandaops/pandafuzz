@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Button, Card, CardContent, Typography, Box, Chip, CircularProgress, Alert } from '@mui/material';
 import { Download, Folder, InsertDriveFile } from '@mui/icons-material';
+import { formatDateTime } from '../utils/dateFormat';
 
 interface RawCoverageFile {
   id: string;
@@ -91,9 +92,6 @@ export const RawCoverageView: React.FC<RawCoverageViewProps> = ({ jobId }) => {
     return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
   };
 
-  const formatDate = (dateString: string): string => {
-    return new Date(dateString).toLocaleString();
-  };
 
   if (loading) {
     return (
@@ -231,7 +229,7 @@ export const RawCoverageView: React.FC<RawCoverageViewProps> = ({ jobId }) => {
           <Box mt={2} pt={2} borderTop="1px solid" borderColor="divider">
             <Typography variant="caption" color="text.secondary">
               Total size: {formatBytes(latestFile.size)} • 
-              Collected: {formatDate(latestFile.created_at)}
+              Collected: {formatDateTime(latestFile.created_at)}
             </Typography>
           </Box>
         )}

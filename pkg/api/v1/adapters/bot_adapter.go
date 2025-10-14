@@ -1,11 +1,9 @@
 package adapters
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -220,7 +218,7 @@ func (a *BotAdapter) UpdateBot(w http.ResponseWriter, r *http.Request, botId gen
 	if req.Capabilities != nil {
 		capabilities := make([]botTypes.Capability, len(*req.Capabilities))
 		for i, cap := range *req.Capabilities {
-			capabilities[i] = generatedToCapability(cap)
+			capabilities[i] = generatedUpdateToCapability(cap)
 		}
 		agent.Capabilities = capabilities
 	}
@@ -257,7 +255,7 @@ func (a *BotAdapter) DeleteBot(w http.ResponseWriter, r *http.Request, botId gen
 	ctx := r.Context()
 
 	// Check if bot exists first
-	agent, err := a.botRepo.FindByID(ctx, botId.String())
+	_, err := a.botRepo.FindByID(ctx, botId.String())
 	if err != nil {
 		a.writeError(w, http.StatusNotFound, "BOT_NOT_FOUND", "Bot not found", err)
 		return
@@ -386,7 +384,7 @@ func (a *BotAdapter) GetBotJobs(w http.ResponseWriter, r *http.Request, botId ge
 	// Filter jobs assigned to this bot
 	var botJobs []*jobTypes.Job
 	for _, job := range jobs {
-		if job.AssignedBotID != nil && *job.AssignedBotID == botId.String() {
+		if job.LockedBy == botId.String() {
 			botJobs = append(botJobs, job)
 		}
 	}
@@ -419,9 +417,9 @@ func (a *BotAdapter) convertAgentToBot(agent *botTypes.Agent) generated.Bot {
 	bot := generated.Bot{
 		Id:            uuid.MustParse(agent.ID),
 		Name:          agent.Name,
-		Hostname:      agent.Hostname,
+		Hostname:      agent.Name, // Use name as hostname for now
 		Status:        botStatusToGenerated(agent.Status),
-		IsOnline:      agent.IsOnline(),
+		IsOnline:      agent.Status == botTypes.StatusIdle || agent.Status == botTypes.StatusWorking,
 		RegisteredAt:  agent.CreatedAt,
 		LastHeartbeat: agent.LastHeartbeat,
 	}
@@ -458,24 +456,36 @@ func (a *BotAdapter) convertAgentToBot(agent *botTypes.Agent) generated.Bot {
 }
 
 func (a *BotAdapter) convertJobToAPI(job *jobTypes.Job) generated.Job {
+	// Calculate timeout from scheduled time + max duration
+	timeoutAt := time.Now().Add(24 * time.Hour) // Default timeout
+	if job.ScheduledAt != nil && job.MaxDuration > 0 {
+		timeoutAt = job.ScheduledAt.Add(job.MaxDuration)
+	}
+
 	apiJob := generated.Job{
 		Id:           uuid.MustParse(job.ID),
 		Name:         job.Name,
 		Status:       domainJobStatusToGenerated(job.Status),
 		CreatedAt:    job.CreatedAt,
 		TargetBinary: job.TargetBinary,
-		TimeoutAt:    job.TimeoutAt,
+		TimeoutAt:    timeoutAt,
 		Fuzzer:       generated.FuzzerType(job.FuzzerType),
 	}
 
-	if job.CampaignID != nil {
-		campaignID := uuid.MustParse(*job.CampaignID)
-		apiJob.CampaignId = &campaignID
+	// Check if campaign ID is in metadata
+	if job.Metadata != nil {
+		if campaignID, ok := job.Metadata["campaign_id"]; ok {
+			if id, err := uuid.Parse(campaignID); err == nil {
+				apiJob.CampaignId = &id
+			}
+		}
 	}
 
-	if job.AssignedBotID != nil {
-		botID := uuid.MustParse(*job.AssignedBotID)
-		apiJob.AssignedBotId = &botID
+	// Use LockedBy as AssignedBotId
+	if job.LockedBy != "" {
+		if botID, err := uuid.Parse(job.LockedBy); err == nil {
+			apiJob.AssignedBotId = &botID
+		}
 	}
 
 	if job.StartedAt != nil {
@@ -554,12 +564,28 @@ func generatedToCapability(cap generated.BotCreateRequestCapabilities) botTypes.
 	}
 }
 
+func generatedUpdateToCapability(cap generated.BotUpdateRequestCapabilities) botTypes.Capability {
+	// Convert update capabilities to bot types capabilities
+	switch cap {
+	case generated.BotUpdateRequestCapabilitiesFuzzing:
+		return botTypes.CapabilityFuzzing
+	case generated.BotUpdateRequestCapabilitiesAnalysis:
+		return botTypes.CapabilityAnalysis
+	case generated.BotUpdateRequestCapabilitiesReproduction:
+		return botTypes.CapabilityReporting
+	case generated.BotUpdateRequestCapabilitiesCoverage:
+		return botTypes.CapabilityCoordination
+	default:
+		return botTypes.CapabilityFuzzing
+	}
+}
+
 func generatedJobStatusToDomain(status generated.JobStatus) jobTypes.JobStatus {
 	switch status {
 	case generated.JobStatusPending:
 		return jobTypes.StatusPending
 	case generated.JobStatusAssigned:
-		return jobTypes.StatusAssigned
+		return jobTypes.StatusQueued // Use Queued for Assigned
 	case generated.JobStatusRunning:
 		return jobTypes.StatusRunning
 	case generated.JobStatusCompleted:
@@ -567,9 +593,9 @@ func generatedJobStatusToDomain(status generated.JobStatus) jobTypes.JobStatus {
 	case generated.JobStatusFailed:
 		return jobTypes.StatusFailed
 	case generated.JobStatusCancelled:
-		return jobTypes.StatusCanceled
+		return jobTypes.StatusCancelled
 	case generated.JobStatusTimeout:
-		return jobTypes.StatusTimeout
+		return jobTypes.StatusFailed // No timeout status in domain, map to failed
 	default:
 		return jobTypes.StatusPending
 	}
@@ -579,18 +605,18 @@ func domainJobStatusToGenerated(status jobTypes.JobStatus) generated.JobStatus {
 	switch status {
 	case jobTypes.StatusPending:
 		return generated.JobStatusPending
-	case jobTypes.StatusAssigned:
-		return generated.JobStatusAssigned
+	case jobTypes.StatusQueued:
+		return generated.JobStatusAssigned // Map queued to assigned
 	case jobTypes.StatusRunning:
 		return generated.JobStatusRunning
 	case jobTypes.StatusCompleted:
 		return generated.JobStatusCompleted
 	case jobTypes.StatusFailed:
 		return generated.JobStatusFailed
-	case jobTypes.StatusCanceled:
+	case jobTypes.StatusCancelled:
 		return generated.JobStatusCancelled
-	case jobTypes.StatusTimeout:
-		return generated.JobStatusTimeout
+	case jobTypes.StatusPaused:
+		return generated.JobStatusPending // Map paused to pending
 	default:
 		return generated.JobStatusPending
 	}

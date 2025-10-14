@@ -7,12 +7,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	// "github.com/go-chi/chi/v5/middleware" // Temporarily disabled for build
+	"github.com/sirupsen/logrus"
+
+	apiv1 "github.com/ethpandaops/pandafuzz/pkg/api/v1"
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/httputil"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
 	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
 	"github.com/gorilla/mux"
-	"github.com/sirupsen/logrus"
 )
 
 // Server represents the master HTTP server
@@ -25,6 +29,8 @@ type Server struct {
 	services        *service.Manager
 	httpServer      *http.Server
 	router          *mux.Router
+	chiRouter       chi.Router
+	apiV1           *apiv1.API
 	logger          *logrus.Logger
 	retryManager    *common.RetryManager
 	circuitBreaker  *common.CircuitBreaker
@@ -110,15 +116,29 @@ func (s *Server) Start() error {
 
 	s.logger.Info("Starting master HTTP server")
 
+	// Initialize API v1 if services are available
+	if s.services != nil {
+		if err := s.initializeAPIv1(); err != nil {
+			return common.NewSystemError("initialize_api_v1", err)
+		}
+	}
+
 	// Setup router and middleware
 	if err := s.setupRouter(); err != nil {
 		return common.NewSystemError("setup_router", err)
 	}
 
-	// Configure HTTP server
+	// Configure HTTP server - use Chi router if available, otherwise fall back to Gorilla mux
+	var handler http.Handler
+	if s.chiRouter != nil {
+		handler = s.chiRouter
+	} else {
+		handler = s.router
+	}
+
 	s.httpServer = &http.Server{
 		Addr:           fmt.Sprintf("%s:%d", s.config.Server.Host, s.config.Server.Port),
-		Handler:        s.router,
+		Handler:        handler,
 		ReadTimeout:    s.config.Server.ReadTimeout,
 		WriteTimeout:   s.config.Server.WriteTimeout,
 		IdleTimeout:    s.config.Server.IdleTimeout,
@@ -130,6 +150,13 @@ func (s *Server) Start() error {
 		ctx := context.Background()
 		if err := s.services.Start(ctx); err != nil {
 			return common.NewSystemError("start_services", err)
+		}
+
+		// Start API v1 if initialized
+		if s.apiV1 != nil {
+			if err := s.apiV1.Start(ctx); err != nil {
+				return common.NewSystemError("start_api_v1", err)
+			}
 		}
 
 		// Start separate metrics server if configured
@@ -152,6 +179,12 @@ func (s *Server) Start() error {
 		if err := s.botPoller.Start(); err != nil {
 			return common.NewSystemError("start_bot_poller", err)
 		}
+	}
+
+	// Start lease expiry sweep
+	if s.state != nil {
+		ctx := context.Background()
+		s.state.StartLeaseExpirySweep(ctx, 15*time.Second) // 15s interval to reduce DB load
 	}
 
 	// Start server in background
@@ -193,6 +226,14 @@ func (s *Server) Stop() error {
 	// Create shutdown context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer cancel()
+
+	// Stop API v1 if running
+	if s.apiV1 != nil {
+		s.logger.Info("Stopping API v1")
+		if err := s.apiV1.Stop(ctx); err != nil {
+			s.logger.WithError(err).Error("Error stopping API v1")
+		}
+	}
 
 	// Stop services through manager
 	if s.services != nil {
@@ -256,9 +297,19 @@ func (s *Server) SetServiceManager(sm *service.Manager) {
 	s.services = sm
 }
 
-// GetRouter returns the configured router
+// GetRouter returns the configured Gorilla mux router (for backwards compatibility)
 func (s *Server) GetRouter() *mux.Router {
 	return s.router
+}
+
+// GetChiRouter returns the configured Chi router
+func (s *Server) GetChiRouter() chi.Router {
+	return s.chiRouter
+}
+
+// GetAPIv1 returns the API v1 instance
+func (s *Server) GetAPIv1() *apiv1.API {
+	return s.apiV1
 }
 
 // InitializeRouter sets up the router without starting the server
@@ -336,6 +387,60 @@ func (s *Server) createServiceManager(stateAdapter service.StateStore) *service.
 // GetStorageBackend returns the storage backend instance
 func (s *Server) GetStorageBackend() backend.StorageBackend {
 	return s.storageBackend
+}
+
+// initializeAPIv1 creates and initializes the API v1 instance
+func (s *Server) initializeAPIv1() error {
+	if s.services == nil {
+		return fmt.Errorf("services are required to initialize API v1")
+	}
+
+	s.logger.Info("Initializing API v1")
+
+	// Create API v1 configuration
+	apiConfig := apiv1.DefaultConfig()
+
+	// Configure based on master config
+	if s.config.Server.EnableCORS {
+		apiConfig.EnableCORS = true
+		apiConfig.CORSOrigins = []string{"*"} // TODO: make this configurable
+	}
+
+	if s.config.Server.RateLimitRPS > 0 {
+		apiConfig.RateLimit = s.config.Server.RateLimitRPS
+	}
+
+	// Enable features based on master config
+	apiConfig.EnableMetrics = s.config.Monitoring.Enabled
+
+	// Configure request timeout
+	if s.config.Timeouts.HTTPRequest > 0 {
+		apiConfig.RequestTimeout = s.config.Timeouts.HTTPRequest
+	}
+
+	// Create services struct for API v1
+	services := apiv1.Services{
+		Bot:             s.services.Bot,
+		Job:             s.services.Job,
+		Campaign:        s.services.Campaign,
+		Corpus:          s.services.Corpus,
+		Result:          s.services.Result,
+		System:          s.services.System,
+		Monitoring:      s.services.Monitoring,
+		Reproducibility: s.services.Reproducibility,
+		CrashMinimizer:  s.services.CrashMinimizer,
+	}
+
+	// Create API v1 instance
+	apiV1, err := apiv1.NewAPI(apiConfig, services, s.logger)
+	if err != nil {
+		return fmt.Errorf("failed to create API v1: %w", err)
+	}
+
+	s.apiV1 = apiV1
+	s.logger.Info("API v1 initialized successfully")
+
+	return nil
 }
 
 // getStorageBasePath returns the base path for storage operations

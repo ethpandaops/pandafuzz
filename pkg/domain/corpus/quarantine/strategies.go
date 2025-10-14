@@ -25,8 +25,8 @@ func (s *ConsecutiveFailureStrategy) ShouldQuarantine(result ExecutionResult, hi
 	}
 
 	// Count consecutive failures within the window
-	consecutiveFailures := 1 // Current failure
-	cutoff := time.Now().Add(-s.Window)
+	consecutiveFailures := 1      // Current failure
+	_ = time.Now().Add(-s.Window) // cutoff for future timestamp filtering
 
 	for i := len(history) - 1; i >= 0; i-- {
 		if history[i].EntryID != result.EntryID {

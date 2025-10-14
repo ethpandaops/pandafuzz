@@ -22,6 +22,7 @@ import {
 } from '@mui/icons-material';
 import api from '../api/client';
 import { CoverageReport } from '../types/coverage';
+import { formatDateTime } from '../utils/dateFormat';
 
 function Coverage() {
   const [allCoverageReports, setAllCoverageReports] = useState<CoverageReport[]>([]);
@@ -121,9 +122,6 @@ function Coverage() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const formatDate = (dateString: string): string => {
-    return new Date(dateString).toLocaleString();
-  };
 
   if (loading && allCoverageReports.length === 0) {
     return (
@@ -211,7 +209,7 @@ function Coverage() {
                   </TableCell>
                   <TableCell>
                     <Typography variant="body2">
-                      {formatDate(report.created_at)}
+                      {formatDateTime(report.created_at)}
                     </Typography>
                   </TableCell>
                   <TableCell>

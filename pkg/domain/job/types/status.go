@@ -17,6 +17,9 @@ const (
 	// StatusQueued indicates the job is queued and waiting to be executed
 	StatusQueued JobStatus = "queued"
 
+	// StatusStarting indicates the job has been ACKed and is starting
+	StatusStarting JobStatus = "starting"
+
 	// StatusRunning indicates the job is currently executing
 	StatusRunning JobStatus = "running"
 
@@ -41,7 +44,7 @@ func (s JobStatus) String() string {
 // IsValid checks if the job status is valid
 func (s JobStatus) IsValid() bool {
 	switch s {
-	case StatusPending, StatusQueued, StatusRunning, StatusCompleted,
+	case StatusPending, StatusQueued, StatusStarting, StatusRunning, StatusCompleted,
 		StatusFailed, StatusCancelled, StatusPaused:
 		return true
 	default:
@@ -63,10 +66,11 @@ func (s JobStatus) IsTerminal() bool {
 func (s JobStatus) CanTransitionTo(target JobStatus) bool {
 	// Define valid state transitions
 	transitions := map[JobStatus][]JobStatus{
-		StatusPending: {StatusQueued, StatusCancelled},
-		StatusQueued:  {StatusRunning, StatusCancelled},
-		StatusRunning: {StatusCompleted, StatusFailed, StatusCancelled, StatusPaused},
-		StatusPaused:  {StatusRunning, StatusCancelled},
+		StatusPending:  {StatusQueued, StatusStarting, StatusCancelled},
+		StatusQueued:   {StatusStarting, StatusRunning, StatusCancelled},
+		StatusStarting: {StatusRunning, StatusFailed, StatusCancelled},
+		StatusRunning:  {StatusCompleted, StatusFailed, StatusCancelled, StatusPaused},
+		StatusPaused:   {StatusRunning, StatusCancelled},
 		// Terminal states cannot transition
 		StatusCompleted: {},
 		StatusFailed:    {},

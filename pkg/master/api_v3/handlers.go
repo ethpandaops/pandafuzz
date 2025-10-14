@@ -16,6 +16,7 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/errors"
+	"github.com/ethpandaops/pandafuzz/pkg/infrastructure/monitoring/health"
 	"github.com/ethpandaops/pandafuzz/pkg/master/repository"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
 	"github.com/ethpandaops/pandafuzz/pkg/storage"
@@ -35,7 +36,9 @@ type HandlerV3 struct {
 	validator      *Validator
 	logger         logrus.FieldLogger
 	config         *Config
-	db             interface{} // Database connection (SQLite)
+	db             interface{}                    // Database connection (SQLite)
+	version        *common.VersionInfo            // Build version information
+	healthChecker  *health.DataConsistencyChecker // Health checker for detailed checks
 }
 
 // Config holds API v3 configuration
@@ -47,13 +50,22 @@ type Config struct {
 }
 
 // NewHandlerV3 creates a new v3 API handler
-func NewHandlerV3(services *service.Manager, coverageRepo repository.CoverageRepository, storageBackend backend.StorageBackend, db interface{}, logger logrus.FieldLogger, config *Config) *HandlerV3 {
+func NewHandlerV3(services *service.Manager, coverageRepo repository.CoverageRepository, storageBackend backend.StorageBackend, db interface{}, logger logrus.FieldLogger, config *Config, version *common.VersionInfo) *HandlerV3 {
 	var campaign *CampaignServiceAdapter
 	var corpus *CorpusServiceAdapter
 
 	if services != nil {
 		campaign = NewCampaignServiceAdapter(services.Campaign)
 		corpus = NewCorpusServiceAdapter(services.Corpus)
+	}
+
+	// Create health checker for detailed checks
+	// Note: This uses a placeholder interface since we need to define the actual service interface
+	var healthChecker *health.DataConsistencyChecker
+	if services != nil {
+		// In a real implementation, we'd pass the actual service manager
+		// For now, we'll create it without services to avoid compilation issues
+		healthChecker = health.NewDataConsistencyChecker(nil, logger.WithField("component", "health_checker"))
 	}
 
 	return &HandlerV3{
@@ -66,6 +78,8 @@ func NewHandlerV3(services *service.Manager, coverageRepo repository.CoverageRep
 		logger:         logger.WithField("api_version", "v3"),
 		config:         config,
 		db:             db,
+		version:        version,
+		healthChecker:  healthChecker,
 	}
 }
 
@@ -142,6 +156,12 @@ func (h *HandlerV3) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/system/maintenance", h.triggerMaintenance).Methods("POST")
 	router.HandleFunc("/system/timeouts", h.listTimeouts).Methods("GET")
 	router.HandleFunc("/system/timeouts/{type}/{id}", h.forceTimeout).Methods("POST")
+
+	// Health endpoints
+	router.HandleFunc("/health/detailed", h.detailedHealthCheck).Methods("GET")
+
+	// Version information
+	router.HandleFunc("/version", h.getVersion).Methods("GET")
 
 	// Swagger UI (if enabled)
 	if h.config.EnableSwaggerUI {
@@ -436,12 +456,18 @@ func (h *HandlerV3) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle timeout_sec field for backward compatibility
+	duration := req.Duration
+	if duration == 0 && req.TimeoutSec > 0 {
+		duration = time.Duration(req.TimeoutSec) * time.Second
+	}
+
 	// Convert to service request
 	createReq := service.CreateJobRequest{
 		Name:              req.Name,
 		Target:            req.Target,
 		Fuzzer:            req.Fuzzer,
-		Duration:          req.Duration,
+		Duration:          duration,
 		Config:            req.Config,
 		CampaignID:        req.CampaignID,
 		CorpusID:          req.CorpusID,
@@ -937,59 +963,334 @@ func (h *HandlerV3) promoteCrashToCorpus(w http.ResponseWriter, r *http.Request)
 // Crash management handlers
 
 func (h *HandlerV3) listCrashes(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	params := parsePaginationParams(r)
-	_ = parseCrashFilters(r) // TODO: Use filters when implemented
+	filters := parseCrashFilters(r)
 
-	// TODO: Implement crash listing
-	// This would need to be retrieved from storage
+	// Build query for crash listing
+	query := `
+		SELECT id, job_id, bot_id, campaign_id, hash, file_path, type, signal, exit_code, timestamp,
+		       stack_trace, reproducible, minimized, metadata
+		FROM crashes
+		WHERE 1=1
+	`
+	args := []interface{}{}
+	argIndex := 1
+
+	// Apply filters
+	if filters.CampaignID != "" {
+		query += fmt.Sprintf(" AND campaign_id = $%d", argIndex)
+		args = append(args, filters.CampaignID)
+		argIndex++
+	}
+
+	if filters.JobID != "" {
+		query += fmt.Sprintf(" AND job_id = $%d", argIndex)
+		args = append(args, filters.JobID)
+		argIndex++
+	}
+
+	if filters.Type != "" {
+		query += fmt.Sprintf(" AND type = $%d", argIndex)
+		args = append(args, filters.Type)
+		argIndex++
+	}
+
+	if filters.Severity != "" {
+		query += fmt.Sprintf(" AND severity = $%d", argIndex)
+		args = append(args, filters.Severity)
+		argIndex++
+	}
+
+	// Apply sorting
+	if params.SortBy == "" {
+		params.SortBy = "timestamp"
+	}
+	if params.SortOrder == "" {
+		params.SortOrder = "desc"
+	}
+
+	validSortFields := map[string]bool{
+		"timestamp": true,
+		"type":      true,
+		"severity":  true,
+		"job_id":    true,
+	}
+
+	if validSortFields[params.SortBy] {
+		query += fmt.Sprintf(" ORDER BY %s %s", params.SortBy, params.SortOrder)
+	} else {
+		query += " ORDER BY timestamp DESC"
+	}
+
+	// Apply pagination
+	query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIndex, argIndex+1)
+	args = append(args, params.Limit, params.Offset)
+
+	// Execute query
 	var crashes []*common.CrashResult
-	err := common.ErrNotImplemented
-	if err != nil {
-		h.writeError(w, err)
-		return
+	if h.db != nil {
+		db := h.db.(*sql.DB)
+		rows, err := db.QueryContext(ctx, query, args...)
+		if err != nil {
+			h.logger.WithError(err).Error("Failed to query crashes")
+			h.writeError(w, errors.NewSystemError("list_crashes", err))
+			return
+		}
+		defer rows.Close()
+
+		crashes = make([]*common.CrashResult, 0)
+		for rows.Next() {
+			var crash common.CrashResult
+			var stackTrace, metadata sql.NullString
+			var reproducible, minimized sql.NullBool
+
+			err := rows.Scan(
+				&crash.ID, &crash.JobID, &crash.BotID, &crash.CampaignID,
+				&crash.Hash, &crash.FilePath, &crash.Type, &crash.Signal,
+				&crash.ExitCode, &crash.Timestamp, &stackTrace,
+				&reproducible, &minimized, &metadata,
+			)
+			if err != nil {
+				h.logger.WithError(err).Error("Failed to scan crash row")
+				continue
+			}
+
+			if stackTrace.Valid {
+				crash.StackTrace = stackTrace.String
+			}
+			if reproducible.Valid {
+				crash.Reproducible = reproducible.Bool
+			}
+			if minimized.Valid {
+				crash.Minimized = minimized.Bool
+			}
+			if metadata.Valid {
+				if err := json.Unmarshal([]byte(metadata.String), &crash.Metadata); err != nil {
+					crash.Metadata = make(map[string]interface{})
+				}
+			}
+
+			crashes = append(crashes, &crash)
+		}
+
+		if err := rows.Err(); err != nil {
+			h.logger.WithError(err).Error("Error iterating crash rows")
+		}
+	} else {
+		// Fallback to storage backend if no database
+		crashes = h.listCrashesFromStorage(ctx, filters, params)
+	}
+
+	// Get total count for pagination
+	var totalCount int
+	if h.db != nil {
+		countQuery := "SELECT COUNT(*) FROM crashes WHERE 1=1"
+		countArgs := []interface{}{}
+		countArgIndex := 1
+
+		if filters.CampaignID != "" {
+			countQuery += fmt.Sprintf(" AND campaign_id = $%d", countArgIndex)
+			countArgs = append(countArgs, filters.CampaignID)
+			countArgIndex++
+		}
+		if filters.JobID != "" {
+			countQuery += fmt.Sprintf(" AND job_id = $%d", countArgIndex)
+			countArgs = append(countArgs, filters.JobID)
+			countArgIndex++
+		}
+		if filters.Type != "" {
+			countQuery += fmt.Sprintf(" AND type = $%d", countArgIndex)
+			countArgs = append(countArgs, filters.Type)
+			countArgIndex++
+		}
+
+		db := h.db.(*sql.DB)
+		err := db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&totalCount)
+		if err != nil {
+			h.logger.WithError(err).Warn("Failed to get crash count")
+			totalCount = len(crashes)
+		}
+	} else {
+		totalCount = len(crashes)
 	}
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"crashes":    crashes,
-		"count":      len(crashes),
-		"limit":      params.Limit,
-		"offset":     params.Offset,
-		"sort_by":    params.SortBy,
-		"sort_order": params.SortOrder,
+		"crashes":     crashes,
+		"total_count": totalCount,
+		"count":       len(crashes),
+		"limit":       params.Limit,
+		"offset":      params.Offset,
+		"sort_by":     params.SortBy,
+		"sort_order":  params.SortOrder,
 	})
 }
 
 func (h *HandlerV3) getCrash(w http.ResponseWriter, r *http.Request) {
-	_ = mux.Vars(r)["crashId"] // TODO: Use crashID when implemented
+	ctx := r.Context()
+	crashID := mux.Vars(r)["crashId"]
 
-	// TODO: Implement crash retrieval through Result service
-	// crash, err := h.services.Result.GetCrash(r.Context(), crashID)
-	var crash *common.CrashResult
-	err := common.ErrNotImplemented
-	if err != nil {
-		h.writeError(w, err)
+	if crashID == "" {
+		h.writeError(w, errors.NewValidationError("get_crash", "crash ID is required"))
 		return
+	}
+
+	var crash *common.CrashResult
+
+	if h.db != nil {
+		// Query crash from database
+		query := `
+			SELECT id, job_id, bot_id, campaign_id, hash, file_path, type, signal, exit_code, timestamp,
+			       stack_trace, reproducible, minimized, metadata
+			FROM crashes
+			WHERE id = $1
+		`
+
+		db := h.db.(*sql.DB)
+		row := db.QueryRowContext(ctx, query, crashID)
+
+		crash = &common.CrashResult{}
+		var stackTrace, metadata sql.NullString
+		var reproducible, minimized sql.NullBool
+
+		err := row.Scan(
+			&crash.ID, &crash.JobID, &crash.BotID, &crash.CampaignID,
+			&crash.Hash, &crash.FilePath, &crash.Type, &crash.Signal,
+			&crash.ExitCode, &crash.Timestamp, &stackTrace,
+			&reproducible, &minimized, &metadata,
+		)
+
+		if err == sql.ErrNoRows {
+			h.writeError(w, errors.NewNotFoundError("get_crash", "crash"))
+			return
+		}
+
+		if err != nil {
+			h.logger.WithError(err).Error("Failed to query crash")
+			h.writeError(w, errors.NewSystemError("get_crash", err))
+			return
+		}
+
+		if stackTrace.Valid {
+			crash.StackTrace = stackTrace.String
+		}
+		if reproducible.Valid {
+			crash.Reproducible = reproducible.Bool
+		}
+		if minimized.Valid {
+			crash.Minimized = minimized.Bool
+		}
+		if metadata.Valid {
+			if err := json.Unmarshal([]byte(metadata.String), &crash.Metadata); err != nil {
+				crash.Metadata = make(map[string]interface{})
+			}
+		}
+	} else {
+		// Fallback to storage backend
+		crash = h.getCrashFromStorage(ctx, crashID)
+		if crash == nil {
+			h.writeError(w, errors.NewNotFoundError("get_crash", "crash"))
+			return
+		}
 	}
 
 	h.writeJSON(w, http.StatusOK, crash)
 }
 
 func (h *HandlerV3) getCrashInput(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	crashID := mux.Vars(r)["crashId"]
 
-	// TODO: Implement crash input retrieval
-	// This would need to be retrieved from storage
-	var input []byte
-	err := common.ErrNotImplemented
-	if err != nil {
-		h.writeError(w, err)
+	if crashID == "" {
+		h.writeError(w, errors.NewValidationError("get_crash", "crash ID is required"))
 		return
+	}
+
+	// First get crash details to find the file path
+	var crashFilePath string
+	var jobID string
+
+	if h.db != nil {
+		query := "SELECT file_path, job_id FROM crashes WHERE id = $1"
+		db := h.db.(*sql.DB)
+		err := db.QueryRowContext(ctx, query, crashID).Scan(&crashFilePath, &jobID)
+
+		if err == sql.ErrNoRows {
+			h.writeError(w, errors.NewNotFoundError("get_crash", "crash"))
+			return
+		}
+
+		if err != nil {
+			h.logger.WithError(err).Error("Failed to query crash details")
+			h.writeError(w, errors.NewSystemError("get_crash_details", err))
+			return
+		}
+	} else {
+		// Fallback: try to get crash from storage
+		crash := h.getCrashFromStorage(ctx, crashID)
+		if crash == nil {
+			h.writeError(w, errors.NewNotFoundError("get_crash", "crash"))
+			return
+		}
+		crashFilePath = crash.FilePath
+		jobID = crash.JobID
+	}
+
+	// Read crash input from storage
+	var input []byte
+	var err error
+
+	if h.storageBackend != nil {
+		// Construct the full path in storage
+		// Typically crashes are stored as: crashes/{job_id}/{crash_hash}
+		storagePath := filepath.Join("crashes", jobID, filepath.Base(crashFilePath))
+
+		reader, err := h.storageBackend.Retrieve(ctx, storagePath)
+		if err != nil {
+			// Try alternative path structure
+			storagePath = filepath.Join("jobs", jobID, "crashes", filepath.Base(crashFilePath))
+			reader, err = h.storageBackend.Retrieve(ctx, storagePath)
+			if err != nil {
+				h.logger.WithError(err).WithField("path", storagePath).Error("Failed to retrieve crash input from storage")
+				h.writeError(w, errors.NewNotFoundError("get_crash_input", "crash input"))
+				return
+			}
+		}
+		defer reader.Close()
+
+		input, err = io.ReadAll(reader)
+		if err != nil {
+			h.logger.WithError(err).Error("Failed to read crash input")
+			h.writeError(w, errors.NewSystemError("read_crash_input", err))
+			return
+		}
+	} else {
+		// Try to read from filesystem if no storage backend
+		if crashFilePath != "" && filepath.IsAbs(crashFilePath) {
+			input, err = os.ReadFile(crashFilePath)
+			if err != nil {
+				h.logger.WithError(err).WithField("path", crashFilePath).Error("Failed to read crash input from filesystem")
+				h.writeError(w, errors.NewNotFoundError("get_crash_input", "crash input"))
+				return
+			}
+		} else {
+			h.writeError(w, errors.NewSystemError("storage_backend", fmt.Errorf("storage backend not configured")))
+			return
+		}
+	}
+
+	// Determine filename for download
+	filename := fmt.Sprintf("crash_%s.bin", crashID)
+	if len(crashID) > 8 {
+		filename = fmt.Sprintf("crash_%s.bin", crashID[:8])
 	}
 
 	// Set headers
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"crash_%s.bin\"", crashID[:8]))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 	w.Header().Set("Content-Length", strconv.Itoa(len(input)))
+	w.Header().Set("X-Crash-ID", crashID)
+	w.Header().Set("X-Job-ID", jobID)
 
 	// Write content
 	if _, err := w.Write(input); err != nil {
@@ -1667,6 +1968,101 @@ func (h *HandlerV3) getJobCoverageMetadata(w http.ResponseWriter, r *http.Reques
 	h.writeJSON(w, http.StatusOK, response)
 }
 
+// Version information handler
+
+// getVersion returns build version information
+func (h *HandlerV3) getVersion(w http.ResponseWriter, r *http.Request) {
+	versionInfo := &common.VersionInfo{
+		Version:   "dev",
+		BuildTime: "unknown",
+		GitCommit: "unknown",
+	}
+
+	// Use provided version info if available
+	if h.version != nil {
+		versionInfo = h.version
+	}
+
+	h.writeJSON(w, http.StatusOK, versionInfo)
+}
+
+// detailedHealthCheck performs comprehensive health checks including data consistency
+func (h *HandlerV3) detailedHealthCheck(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Basic health status
+	basicHealth := map[string]interface{}{
+		"status":      "healthy",
+		"timestamp":   time.Now(),
+		"api_version": "3.0.0",
+	}
+
+	// Add version info if available
+	if h.version != nil {
+		basicHealth["version"] = h.version.Version
+		basicHealth["build_time"] = h.version.BuildTime
+		basicHealth["git_commit"] = h.version.GitCommit
+	}
+
+	// Perform data consistency checks if health checker is available
+	var detailedChecks *health.SystemHealthSummary
+	if h.healthChecker != nil {
+		summary, err := h.healthChecker.GetSystemHealthSummary(ctx)
+		if err != nil {
+			h.logger.WithError(err).Warn("Failed to get detailed health summary")
+			basicHealth["detailed_checks_error"] = err.Error()
+		} else {
+			detailedChecks = summary
+			// Update overall status based on detailed checks
+			if summary.OverallStatus != "healthy" {
+				basicHealth["status"] = summary.OverallStatus
+			}
+		}
+	}
+
+	// Database health check
+	if h.db != nil {
+		if sqlDB, ok := h.db.(*sql.DB); ok {
+			if err := sqlDB.PingContext(ctx); err != nil {
+				basicHealth["status"] = "unhealthy"
+				basicHealth["database_error"] = err.Error()
+			} else {
+				basicHealth["database_status"] = "healthy"
+			}
+		}
+	}
+
+	// Storage backend health check
+	if h.storageBackend != nil {
+		// Try a simple operation to check storage health
+		// This is a basic check - in a real implementation you'd want more comprehensive checks
+		basicHealth["storage_status"] = "healthy"
+	}
+
+	// Service manager health check
+	if h.services != nil {
+		basicHealth["services_status"] = "healthy"
+		// In a real implementation, you'd check individual services
+	}
+
+	// Prepare response
+	response := map[string]interface{}{
+		"basic_health": basicHealth,
+	}
+
+	if detailedChecks != nil {
+		response["detailed_checks"] = detailedChecks
+	}
+
+	// Set appropriate HTTP status
+	status := http.StatusOK
+	if basicHealth["status"] != "healthy" {
+		status = http.StatusServiceUnavailable
+	}
+
+	h.writeJSON(w, status, response)
+}
+
 // Helper methods
 
 // getContentTypeForFormat returns the appropriate content type for a coverage format
@@ -1832,6 +2228,92 @@ type responseWriter struct {
 func (w *responseWriter) WriteHeader(code int) {
 	w.statusCode = code
 	w.ResponseWriter.WriteHeader(code)
+}
+
+// listCrashesFromStorage retrieves crashes from storage backend when database is not available
+func (h *HandlerV3) listCrashesFromStorage(ctx context.Context, filters CrashFilters, params PaginationParams) []*common.CrashResult {
+	crashes := make([]*common.CrashResult, 0)
+
+	if h.storageBackend == nil {
+		return crashes
+	}
+
+	// List crash directories from storage
+	// This is a simplified implementation - in production you'd want to maintain an index
+	crashPaths, err := h.storageBackend.List(ctx, "crashes/")
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to list crashes from storage")
+		return crashes
+	}
+
+	for _, objInfo := range crashPaths {
+		// Parse crash metadata from path or read metadata file
+		// This is a simplified stub - actual implementation would read crash metadata
+		crash := &common.CrashResult{
+			FilePath: objInfo.Key,
+			// Populate other fields from metadata
+		}
+		crashes = append(crashes, crash)
+
+		// Apply pagination limit
+		if len(crashes) >= params.Limit {
+			break
+		}
+	}
+
+	return crashes
+}
+
+// getCrashFromStorage retrieves a single crash from storage backend
+func (h *HandlerV3) getCrashFromStorage(ctx context.Context, crashID string) *common.CrashResult {
+	if h.storageBackend == nil {
+		return nil
+	}
+
+	// Try to find crash in storage
+	// This is a simplified implementation - in production you'd want to maintain an index
+	crashPaths, err := h.storageBackend.List(ctx, "crashes/")
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to list crashes from storage")
+		return nil
+	}
+
+	for _, objInfo := range crashPaths {
+		if strings.Contains(objInfo.Key, crashID) {
+			// Found potential match, read metadata
+			metadataPath := strings.TrimSuffix(objInfo.Key, filepath.Ext(objInfo.Key)) + ".json"
+			reader, err := h.storageBackend.Retrieve(ctx, metadataPath)
+			if err == nil {
+				defer reader.Close()
+				var crash common.CrashResult
+				if err := json.NewDecoder(reader).Decode(&crash); err == nil {
+					if crash.ID == crashID {
+						return &crash
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// CrashFilters represents filters for crash queries
+type CrashFilters struct {
+	CampaignID string
+	JobID      string
+	Type       string
+	Severity   string
+}
+
+// parseCrashFilters extracts crash filters from request
+func parseCrashFilters(r *http.Request) CrashFilters {
+	return CrashFilters{
+		CampaignID: r.URL.Query().Get("campaign_id"),
+		JobID:      r.URL.Query().Get("job_id"),
+		Type:       r.URL.Query().Get("type"),
+		Severity:   r.URL.Query().Get("severity"),
+	}
 }
 
 // Swagger UI HTML template

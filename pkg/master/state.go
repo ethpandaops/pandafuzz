@@ -338,14 +338,41 @@ func (ps *PersistentState) DeleteJob(ctx context.Context, jobID string) error {
 }
 
 func (ps *PersistentState) ListJobs(ctx context.Context) ([]*common.Job, error) {
+	// Always fetch fresh data from database to ensure we have all jobs
+	// This fixes the phantom job issue where jobs exist in DB but not in cache
+	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
+		// Fetch all jobs from database
+		jobs, err := sqliteDB.ListJobs(ctx, 0, 0, "") // No limit, no offset, no status filter
+		if err != nil {
+			ps.logger.WithError(err).Warn("Failed to fetch jobs from database, falling back to cache")
+			// Fallback to cache if database query fails
+			ps.mu.RLock()
+			defer ps.mu.RUnlock()
+			cachedJobs := make([]*common.Job, 0, len(ps.jobs))
+			for _, job := range ps.jobs {
+				cachedJobs = append(cachedJobs, job)
+			}
+			return cachedJobs, nil
+		}
+
+		// Update cache with fresh data from database
+		ps.mu.Lock()
+		for _, job := range jobs {
+			ps.jobs[job.ID] = job
+		}
+		ps.mu.Unlock()
+
+		ps.logger.WithField("job_count", len(jobs)).Debug("Synchronized jobs from database")
+		return jobs, nil
+	}
+
+	// Fallback to cache for non-advanced databases
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
-
 	jobs := make([]*common.Job, 0, len(ps.jobs))
 	for _, job := range ps.jobs {
 		jobs = append(jobs, job)
 	}
-
 	return jobs, nil
 }
 
@@ -582,6 +609,57 @@ func (ps *PersistentState) findAvailableJobTx() (*common.Job, error) {
 		}
 	}
 	return nil, nil
+}
+
+// UpdateJobStatusToTimedOut updates a job status to timed out (for unassigned jobs)
+func (ps *PersistentState) UpdateJobStatusToTimedOut(ctx context.Context, jobID string) error {
+	return ps.retryManager.Execute(func() error {
+		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
+			ps.mu.Lock()
+			defer ps.mu.Unlock()
+
+			// Get job
+			job, exists := ps.jobs[jobID]
+			if !exists {
+				return common.NewValidationError("update_job_timeout", fmt.Errorf("job not found: %s", jobID))
+			}
+
+			// Only update if job is still pending
+			if job.Status != common.JobStatusPending {
+				ps.logger.WithFields(logrus.Fields{
+					"job_id": jobID,
+					"status": job.Status,
+				}).Debug("Job is not pending, skipping timeout status update")
+				return nil
+			}
+
+			// Update job status
+			now := time.Now()
+			job.Status = common.JobStatusFailed // Mark as failed due to timeout
+			job.CompletedAt = &now
+
+			// Add timeout metadata
+			if job.Metadata == nil {
+				job.Metadata = make(map[string]interface{})
+			}
+			job.Metadata["failure_reason"] = "timeout"
+			job.Metadata["timed_out_at"] = now.Format(time.RFC3339)
+
+			// Persist changes
+			if err := tx.Store(ctx, "job:"+jobID, job); err != nil {
+				return common.NewDatabaseError("save_job_timeout", err)
+			}
+
+			ps.stats.TransactionCount++
+
+			ps.logger.WithFields(logrus.Fields{
+				"job_id": jobID,
+				"status": job.Status,
+			}).Info("Job marked as timed out")
+
+			return nil
+		})
+	})
 }
 
 // Job completion with retry logic
@@ -1743,6 +1821,127 @@ func sortCorpusUpdatesByTimestamp(updates []*common.CorpusUpdate) {
 		for j := 0; j < n-i-1; j++ {
 			if updates[j].Timestamp.After(updates[j+1].Timestamp) {
 				updates[j], updates[j+1] = updates[j+1], updates[j]
+			}
+		}
+	}
+}
+
+// StartLeaseExpirySweep starts a goroutine that periodically checks for expired job leases
+func (ps *PersistentState) StartLeaseExpirySweep(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 15 * time.Second // Default to 15 seconds to reduce DB load
+	}
+
+	ps.logger.WithField("interval", interval).Info("Starting lease expiry sweep")
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				ps.sweepExpiredLeases(ctx)
+			case <-ctx.Done():
+				ps.logger.Info("Stopping lease expiry sweep")
+				return
+			}
+		}
+	}()
+}
+
+// sweepExpiredLeases checks for expired job leases and marks them as timed out
+func (ps *PersistentState) sweepExpiredLeases(ctx context.Context) {
+	now := time.Now()
+
+	// Query for jobs with expired leases
+	if executor, ok := ps.db.(interface {
+		Execute(ctx context.Context, query string, args ...any) (int64, error)
+		SelectAll(ctx context.Context, query string, args ...any) ([]map[string]any, error)
+	}); ok {
+		// First check for absolute timeout violations
+		// This ensures jobs don't run forever even if they keep heartbeating
+		absoluteTimeoutQuery := `UPDATE jobs SET 
+		                        status = 'timed_out',
+		                        assigned_bot = NULL,
+		                        lease_token = NULL,
+		                        lease_expires_at = NULL,
+		                        completed_at = ?
+		                        WHERE status IN ('assigned', 'starting', 'running')
+		                        AND timeout_at IS NOT NULL 
+		                        AND timeout_at <= ?`
+
+		rowsAffected, err := executor.Execute(ctx, absoluteTimeoutQuery, now, now)
+		if err != nil {
+			ps.logger.WithError(err).Error("Failed to enforce absolute timeouts")
+		} else if rowsAffected > 0 {
+			ps.logger.WithField("count", rowsAffected).Warn("Jobs timed out due to absolute timeout")
+		}
+
+		// Find expired leases AND legacy jobs without leases that are stale
+		// For backward compatibility: jobs with NULL lease_expires_at that have been assigned for > 45 seconds are considered stale
+		staleTime := now.Add(-45 * time.Second)
+		query := `SELECT id, assigned_bot FROM jobs 
+		          WHERE status IN ('assigned', 'starting') 
+		          AND ((lease_expires_at IS NOT NULL AND lease_expires_at <= ?) OR
+		               (lease_expires_at IS NULL AND started_at IS NOT NULL AND started_at <= ?))`
+
+		rows, err := executor.SelectAll(ctx, query, now, staleTime)
+		if err != nil {
+			ps.logger.WithError(err).Error("Failed to query expired leases")
+			return
+		}
+
+		if len(rows) == 0 {
+			return // No expired leases
+		}
+
+		ps.logger.WithField("count", len(rows)).Debug("Found expired leases")
+
+		// Mark each expired job as timed out
+		for _, row := range rows {
+			jobID, ok := row["id"].(string)
+			if !ok {
+				continue
+			}
+
+			var assignedBot *string
+			if bot, ok := row["assigned_bot"].(string); ok && bot != "" {
+				assignedBot = &bot
+			}
+
+			// Update job to timed_out status
+			updateQuery := `UPDATE jobs 
+			                SET status = 'timed_out', 
+			                    assigned_bot = NULL,
+			                    lease_token = NULL,
+			                    lease_expires_at = NULL,
+			                    completed_at = ?
+			                WHERE id = ? AND status IN ('assigned', 'starting')`
+
+			rowsAffected, err := executor.Execute(ctx, updateQuery, now, jobID)
+			if err != nil {
+				ps.logger.WithError(err).WithField("job_id", jobID).Error("Failed to mark job as timed out")
+				continue
+			}
+
+			if rowsAffected > 0 {
+				ps.logger.WithFields(logrus.Fields{
+					"job_id": jobID,
+					"bot_id": assignedBot,
+				}).Warn("Job lease expired, marked as timed out")
+
+				// Update bot status if it was assigned
+				if assignedBot != nil {
+					botQuery := `UPDATE bots SET status = 'idle', current_job = NULL WHERE id = ? AND current_job = ?`
+					executor.Execute(ctx, botQuery, *assignedBot, jobID)
+
+					// Update cache
+					ps.UpdateBotInCacheForJob(*assignedBot, nil, common.BotStatusIdle)
+				}
+
+				// Update job cache
+				ps.UpdateJobStatusInCache(jobID, common.JobStatusTimedOut, &now)
 			}
 		}
 	}

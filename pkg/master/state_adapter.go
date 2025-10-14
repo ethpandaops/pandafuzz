@@ -2,7 +2,9 @@ package master
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -171,6 +173,7 @@ func (a *StateStoreAdapter) AtomicJobAssignmentOptimized(ctx context.Context, bo
 		SelectOne(ctx context.Context, query string, args ...any) (map[string]any, error)
 	}); ok {
 		var assignedJob *common.Job
+		var leaseToken string
 
 		err := db.Transaction(ctx, func(tx common.Transaction) error {
 			// Find and lock an available job in a single query
@@ -178,13 +181,20 @@ func (a *StateStoreAdapter) AtomicJobAssignmentOptimized(ctx context.Context, bo
 				SelectOne(ctx context.Context, query string, args ...any) (map[string]any, error)
 				Execute(ctx context.Context, query string, args ...any) (int64, error)
 			}); ok {
-				// Select available job with row lock
+				// Select available job with row lock, also check for expired leases
+				now := time.Now()
+				// For backward compatibility: jobs with NULL lease_expires_at that have been assigned for > 45 seconds are considered stale
+				staleTime := now.Add(-45 * time.Second)
 				query := `SELECT id, name, target, fuzzer, config FROM jobs 
-				          WHERE status = 'pending' AND timeout_at > ? 
+				          WHERE (status = 'pending' OR 
+				                (status IN ('assigned', 'starting') AND 
+				                 ((lease_expires_at IS NOT NULL AND lease_expires_at <= ?) OR
+				                  (lease_expires_at IS NULL AND started_at IS NOT NULL AND started_at <= ?))))
+				                AND timeout_at > ? 
 				          ORDER BY created_at ASC 
 				          LIMIT 1 FOR UPDATE`
 
-				row, err := executor.SelectOne(ctx, query, time.Now())
+				row, err := executor.SelectOne(ctx, query, now, staleTime, now)
 				if err != nil {
 					if err == sql.ErrNoRows {
 						return errors.NewNotFoundError("job_assignment", "available job")
@@ -194,11 +204,20 @@ func (a *StateStoreAdapter) AtomicJobAssignmentOptimized(ctx context.Context, bo
 
 				// Parse job from row
 				jobID := row["id"].(string)
-				now := time.Now()
 
-				// Update job assignment
-				updateQuery := `UPDATE jobs SET status = 'assigned', assigned_bot = ?, started_at = ? WHERE id = ?`
-				if _, err := executor.Execute(ctx, updateQuery, botID, now, jobID); err != nil {
+				// Generate secure lease token
+				leaseToken = generateSecureToken()
+				leaseExpiresAt := now.Add(45 * time.Second) // 45 seconds to ACK (accounts for network delays)
+
+				// Update job assignment with lease
+				updateQuery := `UPDATE jobs SET 
+				                status = 'assigned', 
+				                assigned_bot = ?, 
+				                started_at = ?,
+				                lease_token = ?,
+				                lease_expires_at = ?
+				                WHERE id = ?`
+				if _, err := executor.Execute(ctx, updateQuery, botID, now, leaseToken, leaseExpiresAt, jobID); err != nil {
 					return err
 				}
 
@@ -220,14 +239,16 @@ func (a *StateStoreAdapter) AtomicJobAssignmentOptimized(ctx context.Context, bo
 
 				// Build job object
 				assignedJob = &common.Job{
-					ID:          jobID,
-					Name:        row["name"].(string),
-					Target:      row["target"].(string),
-					Fuzzer:      row["fuzzer"].(string),
-					Status:      common.JobStatusAssigned,
-					AssignedBot: &botID,
-					StartedAt:   &now,
-					WorkDir:     fmt.Sprintf("job_%s", jobID), // Relative path for bot to resolve
+					ID:             jobID,
+					Name:           row["name"].(string),
+					Target:         row["target"].(string),
+					Fuzzer:         row["fuzzer"].(string),
+					Status:         common.JobStatusAssigned,
+					AssignedBot:    &botID,
+					StartedAt:      &now,
+					WorkDir:        fmt.Sprintf("job_%s", jobID), // Relative path for bot to resolve
+					LeaseToken:     &leaseToken,
+					LeaseExpiresAt: &leaseExpiresAt,
 				}
 
 				// Update caches
@@ -306,4 +327,14 @@ func (a *StateStoreAdapter) GetStorage() common.Storage {
 	}
 	// Return nil if not a Storage implementation
 	return nil
+}
+
+// generateSecureToken generates a cryptographically secure random token
+func generateSecureToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp-based token if crypto/rand fails
+		return fmt.Sprintf("lease_%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
 }

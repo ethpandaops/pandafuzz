@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  pandafuzz-master:
+    image: pandafuzz/master:latest
+    build:
+      context: ../../../
+      dockerfile: Dockerfile
+      target: master
+    ports:
+      - "8080:8080"
+    environment:
+      - PANDAFUZZ_CONFIG=/app/master.yaml
+    volumes:
+      - ../../../master.yaml:/app/master.yaml:ro
+      - ../../../storage:/app/storage
+      - ../../../test-resources:/test-resources:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - pandafuzz-e2e
+
+  pandafuzz-bot:
+    image: pandafuzz/bot:latest
+    build:
+      context: ../../../
+      dockerfile: Dockerfile
+      target: bot
+    environment:
+      - PANDAFUZZ_CONFIG=/app/bot.yaml
+    volumes:
+      - ../../../bot.yaml:/app/bot.yaml:ro
+      - ../../../storage:/app/storage
+      - ../../../test-resources:/test-resources:ro
+    depends_on:
+      pandafuzz-master:
+        condition: service_healthy
+    networks:
+      - pandafuzz-e2e
+    
+  e2e-tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    environment:
+      - PANDAFUZZ_API_URL=http://pandafuzz-master:8080/api/v1
+      - CI=true
+    volumes:
+      - ./test-results:/app/test-results
+      - ./playwright-report:/app/playwright-report
+    depends_on:
+      pandafuzz-master:
+        condition: service_healthy
+    networks:
+      - pandafuzz-e2e
+    profiles:
+      - test
+
+networks:
+  pandafuzz-e2e:
+    driver: bridge
+
+volumes:
+  pandafuzz-storage:
+    driver: local

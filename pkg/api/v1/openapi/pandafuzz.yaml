@@ -1237,6 +1237,42 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+    post:
+      tags: [crashes]
+      summary: Report a crash
+      description: Report a new crash discovered during fuzzing
+      operationId: createCrash
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrashRequest'
+      responses:
+        '201':
+          description: Crash successfully created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CrashSubmitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Duplicate crash detected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CrashSubmitResponse'
+        '413':
+          description: Request entity too large (input_data exceeds 10MB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
 
   /crashes/{crashId}:
     parameters:

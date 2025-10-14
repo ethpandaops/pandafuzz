@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
+	"github.com/sirupsen/logrus"
 )
 
 // handleJobCreateWithUpload handles job creation with binary upload
@@ -35,6 +36,13 @@ func (s *Server) handleJobCreateWithUpload(w http.ResponseWriter, r *http.Reques
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid job metadata JSON", err)
 		return
 	}
+
+	// Debug log to check if coverage is being requested
+	s.logger.WithFields(logrus.Fields{
+		"enable_coverage": req.EnableCoverage,
+		"coverage_format": req.CoverageFormat,
+		"name":            req.Name,
+	}).Info("DEBUG: Job creation request parsed")
 
 	// Validate required fields
 	if req.Name == "" || req.Fuzzer == "" {

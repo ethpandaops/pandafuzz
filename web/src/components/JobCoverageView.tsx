@@ -18,6 +18,7 @@ import {
 } from '@mui/icons-material';
 import { CoverageReport } from '../types/coverage';
 import coverageAPI from '../api/coverage';
+import { formatDateTime } from '../utils/dateFormat';
 
 interface JobCoverageViewProps {
   jobId: string;
@@ -107,9 +108,6 @@ const JobCoverageView: React.FC<JobCoverageViewProps> = ({ jobId, onError }) => 
     }
   };
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleString();
-  };
 
   if (loading) {
     return (
@@ -202,7 +200,7 @@ const JobCoverageView: React.FC<JobCoverageViewProps> = ({ jobId, onError }) => 
                 </TableCell>
                 <TableCell>
                   <Typography variant="body2">
-                    {formatDate(report.created_at)}
+                    {formatDateTime(report.created_at)}
                   </Typography>
                 </TableCell>
                 <TableCell align="center">

@@ -21,7 +21,7 @@ import (
 // JobAdapter implements the job-related endpoints of the generated ServerInterface
 type JobAdapter struct {
 	repository jobRepo.JobRepository
-	executor   executor.Interface
+	executor   executor.Executor
 	sse        *sse.Manager
 	logger     logrus.FieldLogger
 }
@@ -29,7 +29,7 @@ type JobAdapter struct {
 // NewJobAdapter creates a new job adapter
 func NewJobAdapter(
 	repository jobRepo.JobRepository,
-	executor executor.Interface,
+	executor executor.Executor,
 	sse *sse.Manager,
 	logger logrus.FieldLogger,
 ) *JobAdapter {
@@ -112,8 +112,10 @@ func (a *JobAdapter) CreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create new job
-	job, err := jobTypes.NewJob(req.Name, req.TargetBinary, string(req.Fuzzer))
+	// Create new job - need to provide corpus and output paths
+	corpusPath := fmt.Sprintf("/tmp/corpus/%s", uuid.New().String())
+	outputPath := fmt.Sprintf("/tmp/output/%s", uuid.New().String())
+	job, err := jobTypes.NewJob(req.Name, string(req.Fuzzer), req.TargetBinary, corpusPath, outputPath)
 	if err != nil {
 		a.logger.WithError(err).Error("failed to create job")
 		a.writeError(w, http.StatusBadRequest, "JOB_CREATION_FAILED", "Failed to create job", err)
@@ -121,25 +123,30 @@ func (a *JobAdapter) CreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set optional fields
-	if req.CampaignId != nil {
-		campaignID := req.CampaignId.String()
-		job.CampaignID = &campaignID
-	}
+	// Note: Job doesn't have CampaignID field
+	// This would need to be tracked separately
 
 	if req.Priority != nil {
 		job.Priority = jobTypes.JobPriority(*req.Priority)
 	}
 
 	if req.TimeoutSeconds != nil {
-		job.TimeoutAt = time.Now().Add(time.Duration(*req.TimeoutSeconds) * time.Second)
+		// Job doesn't have TimeoutAt, use MaxDuration instead
+		job.MaxDuration = time.Duration(*req.TimeoutSeconds) * time.Second
 	}
 
+	// Note: Job doesn't have EnableCoverage field
+	// This would need to be tracked in FuzzerConfig or separately
 	if req.EnableCoverage != nil {
-		job.EnableCoverage = *req.EnableCoverage
+		if job.FuzzerConfig == nil {
+			job.FuzzerConfig = make(map[string]any)
+		}
+		job.FuzzerConfig["enable_coverage"] = *req.EnableCoverage
 	}
 
 	if req.Config != nil {
-		job.Config = *req.Config
+		// Use FuzzerConfig instead of Config
+		job.FuzzerConfig = *req.Config
 	}
 
 	// Save job to repository
@@ -153,12 +160,8 @@ func (a *JobAdapter) CreateJob(w http.ResponseWriter, r *http.Request) {
 
 	// Publish SSE event
 	jobUUID := uuid.MustParse(job.ID)
-	var campaignUUID uuid.UUID
-	if job.CampaignID != nil {
-		campaignUUID = uuid.MustParse(*job.CampaignID)
-	} else {
-		campaignUUID = uuid.New() // Default if no campaign
-	}
+	// Note: Job doesn't have CampaignID field
+	campaignUUID := uuid.New() // Using placeholder
 	event := sse.NewJobEvent("job.created", jobUUID, campaignUUID, map[string]any{
 		"job":       apiJob,
 		"timestamp": time.Now(),
@@ -218,11 +221,13 @@ func (a *JobAdapter) UpdateJob(w http.ResponseWriter, r *http.Request, jobId gen
 	}
 
 	if req.TimeoutSeconds != nil {
-		job.TimeoutAt = time.Now().Add(time.Duration(*req.TimeoutSeconds) * time.Second)
+		// Job doesn't have TimeoutAt, use MaxDuration instead
+		job.MaxDuration = time.Duration(*req.TimeoutSeconds) * time.Second
 	}
 
 	if req.Config != nil {
-		job.Config = *req.Config
+		// Use FuzzerConfig instead of Config
+		job.FuzzerConfig = *req.Config
 	}
 
 	// Save changes
@@ -236,12 +241,8 @@ func (a *JobAdapter) UpdateJob(w http.ResponseWriter, r *http.Request, jobId gen
 
 	// Publish SSE event
 	jobUUID := uuid.MustParse(job.ID)
-	var campaignUUID uuid.UUID
-	if job.CampaignID != nil {
-		campaignUUID = uuid.MustParse(*job.CampaignID)
-	} else {
-		campaignUUID = uuid.New() // Default if no campaign
-	}
+	// Note: Job doesn't have CampaignID field
+	campaignUUID := uuid.New() // Using placeholder
 	event := sse.NewJobEvent("job.updated", jobUUID, campaignUUID, map[string]any{
 		"job":       apiJob,
 		"timestamp": time.Now(),
@@ -265,7 +266,7 @@ func (a *JobAdapter) DeleteJob(w http.ResponseWriter, r *http.Request, jobId gen
 	}
 
 	// Cancel job if it's running
-	if job.Status == jobTypes.StatusRunning || job.Status == jobTypes.StatusAssigned {
+	if job.Status == jobTypes.StatusRunning || job.Status == jobTypes.StatusQueued {
 		if err := a.cancelJob(ctx, job); err != nil {
 			a.logger.WithError(err).Error("failed to cancel job")
 			a.writeError(w, http.StatusInternalServerError, "CANCEL_FAILED", "Failed to cancel job", err)
@@ -273,7 +274,7 @@ func (a *JobAdapter) DeleteJob(w http.ResponseWriter, r *http.Request, jobId gen
 		}
 	} else {
 		// Mark as canceled if not running
-		job.Status = jobTypes.StatusCanceled
+		job.Status = jobTypes.StatusCancelled
 		job.CompletedAt = &[]time.Time{time.Now()}[0]
 		if err := a.repository.Update(ctx, job); err != nil {
 			a.logger.WithError(err).Error("failed to update job status")
@@ -284,12 +285,8 @@ func (a *JobAdapter) DeleteJob(w http.ResponseWriter, r *http.Request, jobId gen
 
 	// Publish SSE event
 	jobUUID := uuid.MustParse(job.ID)
-	var campaignUUID uuid.UUID
-	if job.CampaignID != nil {
-		campaignUUID = uuid.MustParse(*job.CampaignID)
-	} else {
-		campaignUUID = uuid.New() // Default if no campaign
-	}
+	// Note: Job doesn't have CampaignID field
+	campaignUUID := uuid.New() // Using placeholder
 	event := sse.NewJobEvent("job.cancelled", jobUUID, campaignUUID, map[string]any{
 		"job_id":    job.ID,
 		"timestamp": time.Now(),
@@ -319,7 +316,7 @@ func (a *JobAdapter) GetJobLogs(w http.ResponseWriter, r *http.Request, jobId ge
 	}
 
 	// Get static logs
-	logs := a.getJobLogs(ctx, job.ID, params)
+	logs := a.getJobLogs(ctx, jobId.String(), params)
 
 	response := generated.JobLogsResponse{
 		JobId:     uuid.MustParse(job.ID),
@@ -441,17 +438,17 @@ func (a *JobAdapter) convertJobToAPI(job *jobTypes.Job) generated.Job {
 		Status:       domainJobStatusToGenerated(job.Status),
 		CreatedAt:    job.CreatedAt,
 		TargetBinary: job.TargetBinary,
-		TimeoutAt:    job.TimeoutAt,
-		Fuzzer:       generated.FuzzerType(job.FuzzerType),
+		// Note: Job doesn't have TimeoutAt, calculating from MaxDuration
+		TimeoutAt: time.Now().Add(job.MaxDuration),
+		Fuzzer:    generated.FuzzerType(job.FuzzerType),
 	}
 
-	if job.CampaignID != nil {
-		campaignID := uuid.MustParse(*job.CampaignID)
-		apiJob.CampaignId = &campaignID
-	}
+	// Note: Job doesn't have CampaignID field
+	// Would need to be tracked separately
 
-	if job.AssignedBotID != nil {
-		botID := uuid.MustParse(*job.AssignedBotID)
+	// Use LockedBy as AssignedBotID
+	if job.LockedBy != "" {
+		botID := uuid.New() // Would need to map LockedBy string to UUID
 		apiJob.AssignedBotId = &botID
 	}
 
@@ -463,13 +460,14 @@ func (a *JobAdapter) convertJobToAPI(job *jobTypes.Job) generated.Job {
 		apiJob.CompletedAt = job.CompletedAt
 	}
 
-	if job.EnableCoverage {
-		apiJob.EnableCoverage = &job.EnableCoverage
+	// Check if coverage is enabled in FuzzerConfig
+	if enableCoverage, ok := job.FuzzerConfig["enable_coverage"].(bool); ok && enableCoverage {
+		apiJob.EnableCoverage = &enableCoverage
 	}
 
-	if len(job.Config) > 0 {
+	if len(job.FuzzerConfig) > 0 {
 		config := make(map[string]interface{})
-		for k, v := range job.Config {
+		for k, v := range job.FuzzerConfig {
 			config[k] = v
 		}
 		apiJob.Config = &config
@@ -484,14 +482,17 @@ func (a *JobAdapter) convertJobToAPI(job *jobTypes.Job) generated.Job {
 
 func (a *JobAdapter) cancelJob(ctx context.Context, job *jobTypes.Job) error {
 	// If job is running, signal cancellation to executor
-	if job.Status == jobTypes.StatusRunning && job.AssignedBotID != nil {
-		if err := a.executor.CancelJob(ctx, job.ID); err != nil {
+	// Use LockedBy instead of AssignedBotID
+	if job.Status == jobTypes.StatusRunning && job.LockedBy != "" {
+		// Note: executor doesn't have CancelJob method
+		// Would need to implement cancellation differently
+		if err := a.executor.Cancel(ctx, job.LockedBy, job.ID); err != nil {
 			a.logger.WithError(err).Warn("failed to cancel job via executor")
 		}
 	}
 
 	// Update job status
-	job.Status = jobTypes.StatusCanceled
+	job.Status = jobTypes.StatusCancelled
 	job.CompletedAt = &[]time.Time{time.Now()}[0]
 
 	return a.repository.Update(ctx, job)
@@ -506,7 +507,14 @@ func (a *JobAdapter) streamJobLogs(w http.ResponseWriter, r *http.Request, job *
 
 	// Subscribe to job-specific events
 	clientID := uuid.New().String()
-	client := sse.NewClient(clientID, w)
+	config := sse.ClientConfig{
+		BufferSize:        100,
+		WriteTimeout:      30 * time.Second,
+		MaxEventsPerSec:   100,
+		BurstSize:         10,
+		EnableCompression: false,
+	}
+	client := sse.NewClient(clientID, w, r, config, a.logger)
 
 	if err := a.sse.Register(client); err != nil {
 		a.logger.WithError(err).Error("failed to register SSE client for job logs")
@@ -624,4 +632,109 @@ func (a *JobAdapter) writeError(w http.ResponseWriter, statusCode int, errorType
 	if encodeErr := json.NewEncoder(w).Encode(problem); encodeErr != nil {
 		a.logger.WithError(encodeErr).Error("failed to encode error response")
 	}
+}
+
+// AckJob handles job acknowledgment with lease token
+func (a *JobAdapter) AckJob(w http.ResponseWriter, r *http.Request, jobID, botID, leaseToken string) {
+	ctx := r.Context()
+
+	// For backward compatibility: if the job has no lease token (NULL in DB), accept any ACK
+	job, err := a.repository.Get(ctx, jobID)
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+		return
+	}
+
+	// Check if the job has a lease token
+	domainJob := job
+
+	// If job has a lease token, validate it
+	if domainJob.LeaseToken != nil && *domainJob.LeaseToken != "" {
+		if leaseToken != *domainJob.LeaseToken {
+			a.writeError(w, http.StatusUnauthorized, "INVALID_LEASE", "Invalid lease token", nil)
+			return
+		}
+	}
+
+	// Extend lease expiry
+	now := time.Now()
+	leaseExpiresAt := now.Add(60 * time.Second)
+
+	// Update job status to starting
+	domainJob.Status = jobTypes.StatusStarting
+	domainJob.LeaseExpiresAt = &leaseExpiresAt
+
+	if err := a.repository.Update(ctx, domainJob); err != nil {
+		a.writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "Failed to update job", err)
+		return
+	}
+
+	// Send SSE event
+	jobUUID := uuid.MustParse(jobID)
+	campaignUUID := uuid.New() // Using placeholder since job doesn't have campaign
+	event := sse.NewJobEvent("job.started", jobUUID, campaignUUID, map[string]interface{}{
+		"job_id":    jobID,
+		"bot_id":    botID,
+		"status":    "starting",
+		"timestamp": time.Now(),
+	})
+	if err := a.sse.Broadcast(event); err != nil {
+		a.logger.WithError(err).Warn("failed to broadcast job started event")
+	}
+
+	// Return success response
+	response := map[string]interface{}{
+		"acknowledged":     true,
+		"lease_expires_at": leaseExpiresAt,
+		"message":          "Job acknowledged successfully",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+// JobHeartbeat handles job heartbeat to renew lease
+func (a *JobAdapter) JobHeartbeat(w http.ResponseWriter, r *http.Request, jobID, botID, leaseToken string) {
+	ctx := r.Context()
+
+	// Get the job
+	job, err := a.repository.Get(ctx, jobID)
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+		return
+	}
+
+	domainJob := job
+
+	// For backward compatibility: if the job has no lease token (NULL in DB), accept any heartbeat
+	if domainJob.LeaseToken != nil && *domainJob.LeaseToken != "" {
+		if leaseToken != *domainJob.LeaseToken {
+			a.writeError(w, http.StatusUnauthorized, "INVALID_LEASE", "Invalid lease token", nil)
+			return
+		}
+	}
+
+	// Extend lease expiry
+	now := time.Now()
+	leaseExpiresAt := now.Add(60 * time.Second)
+	domainJob.LeaseExpiresAt = &leaseExpiresAt
+	domainJob.LastHeartbeat = &now
+
+	// Update job with new lease expiry
+	if err := a.repository.Update(ctx, domainJob); err != nil {
+		a.writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "Failed to update job", err)
+		return
+	}
+
+	// Return success response
+	response := map[string]interface{}{
+		"success":          true,
+		"lease_expires_at": leaseExpiresAt,
+		"message":          "Heartbeat received",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }

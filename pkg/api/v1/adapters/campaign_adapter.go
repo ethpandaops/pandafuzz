@@ -13,14 +13,14 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/api/v1/generated"
 	"github.com/ethpandaops/pandafuzz/pkg/api/v1/sse"
+	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/domain/campaign/repository"
-	campaignService "github.com/ethpandaops/pandafuzz/pkg/domain/campaign/service"
 	campaignTypes "github.com/ethpandaops/pandafuzz/pkg/domain/campaign/types"
 )
 
 // CampaignAdapter implements the campaign-related endpoints of the generated ServerInterface
 type CampaignAdapter struct {
-	service    *campaignService.Service
+	service    common.CampaignService
 	repository repository.CampaignRepository
 	sse        *sse.Manager
 	logger     logrus.FieldLogger
@@ -28,7 +28,7 @@ type CampaignAdapter struct {
 
 // NewCampaignAdapter creates a new campaign adapter
 func NewCampaignAdapter(
-	service *campaignService.Service,
+	service common.CampaignService,
 	repository repository.CampaignRepository,
 	sse *sse.Manager,
 	logger logrus.FieldLogger,
@@ -112,50 +112,63 @@ func (a *CampaignAdapter) CreateCampaign(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Create new campaign
-	campaign, err := campaignTypes.NewCampaign(req.Name, req.TargetBinary)
+	// Create new campaign with domain types
+	description := ""
+	if req.Description != nil {
+		description = *req.Description
+	}
+
+	campaignID := uuid.New().String()
+	campaign, err := campaignTypes.NewCampaign(campaignID, req.Name, description)
 	if err != nil {
 		a.logger.WithError(err).Error("failed to create campaign")
 		a.writeError(w, http.StatusBadRequest, "CAMPAIGN_CREATION_FAILED", "Failed to create campaign", err)
 		return
 	}
 
-	// Set optional fields
-	if req.Description != nil {
-		campaign.Description = *req.Description
+	// Create common.Campaign for service with all fields
+	commonCampaign := &common.Campaign{
+		ID:           campaign.ID,
+		Name:         campaign.Name,
+		Description:  campaign.Description,
+		TargetBinary: req.TargetBinary,
+		Status:       common.CampaignStatusPending,
+		CreatedAt:    campaign.CreatedAt,
+		UpdatedAt:    campaign.UpdatedAt,
 	}
 
+	// Set optional fields on common campaign
 	if req.MaxJobs != nil {
-		campaign.MaxJobs = *req.MaxJobs
+		commonCampaign.MaxJobs = *req.MaxJobs
 	}
 
 	if req.MaxDurationSeconds != nil {
-		campaign.MaxDurationSeconds = *req.MaxDurationSeconds
+		commonCampaign.MaxDuration = time.Duration(*req.MaxDurationSeconds) * time.Second
 	}
 
 	if req.AutoRestart != nil {
-		campaign.AutoRestart = *req.AutoRestart
+		commonCampaign.AutoRestart = *req.AutoRestart
 	}
 
 	if req.SharedCorpus != nil {
-		campaign.SharedCorpus = *req.SharedCorpus
+		commonCampaign.SharedCorpus = *req.SharedCorpus
 	}
 
 	if req.Tags != nil {
-		campaign.Tags = *req.Tags
+		commonCampaign.Tags = *req.Tags
 	}
 
 	// Save campaign using service
-	if err := a.service.CreateCampaign(ctx, campaign); err != nil {
+	if err := a.service.Create(ctx, commonCampaign); err != nil {
 		a.logger.WithError(err).Error("failed to save campaign")
 		a.writeError(w, http.StatusInternalServerError, "SAVE_FAILED", "Failed to save campaign", err)
 		return
 	}
 
-	apiCampaign := a.convertCampaignToAPI(campaign)
+	apiCampaign := a.convertCommonCampaignToAPI(commonCampaign)
 
 	// Publish SSE event
-	campaignUUID := uuid.MustParse(campaign.ID)
+	campaignUUID := uuid.MustParse(commonCampaign.ID)
 	event := sse.NewCampaignEvent("campaign.created", campaignUUID, map[string]any{
 		"campaign":  apiCampaign,
 		"timestamp": time.Now(),
@@ -192,15 +205,15 @@ func (a *CampaignAdapter) UpdateCampaign(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Get existing campaign
-	campaign, err := a.repository.FindByID(ctx, campaignId.String())
+	// Get existing campaign from service (returns common.Campaign)
+	campaign, err := a.service.Get(ctx, campaignId.String())
 	if err != nil {
 		a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
 		return
 	}
 
 	// Check if campaign can be updated
-	if campaign.Status == campaignTypes.StateRunning {
+	if campaign.Status == common.CampaignStatusRunning {
 		a.writeError(w, http.StatusConflict, "INVALID_STATUS", "Cannot update running campaign", nil)
 		return
 	}
@@ -219,7 +232,7 @@ func (a *CampaignAdapter) UpdateCampaign(w http.ResponseWriter, r *http.Request,
 	}
 
 	if req.MaxDurationSeconds != nil {
-		campaign.MaxDurationSeconds = *req.MaxDurationSeconds
+		campaign.MaxDuration = time.Duration(*req.MaxDurationSeconds) * time.Second
 	}
 
 	if req.AutoRestart != nil {
@@ -234,14 +247,23 @@ func (a *CampaignAdapter) UpdateCampaign(w http.ResponseWriter, r *http.Request,
 		campaign.Tags = *req.Tags
 	}
 
-	// Save changes
-	if err := a.repository.Update(ctx, campaign); err != nil {
+	// Save changes using service Update method
+	updates := common.CampaignUpdates{
+		Name:         &campaign.Name,
+		Description:  &campaign.Description,
+		MaxJobs:      &campaign.MaxJobs,
+		MaxDuration:  &campaign.MaxDuration,
+		AutoRestart:  &campaign.AutoRestart,
+		SharedCorpus: &campaign.SharedCorpus,
+		Tags:         campaign.Tags,
+	}
+	if err := a.service.Update(ctx, campaign.ID, updates); err != nil {
 		a.logger.WithError(err).Error("failed to update campaign")
 		a.writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "Failed to update campaign", err)
 		return
 	}
 
-	apiCampaign := a.convertCampaignToAPI(campaign)
+	apiCampaign := a.convertCommonCampaignToAPI(campaign)
 
 	// Publish SSE event
 	campaignUUID := uuid.MustParse(campaign.ID)
@@ -268,13 +290,13 @@ func (a *CampaignAdapter) DeleteCampaign(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Check if campaign can be deleted
-	if campaign.Status == campaignTypes.StateRunning {
+	if campaign.Status == campaignTypes.StateActive {
 		a.writeError(w, http.StatusConflict, "INVALID_STATUS", "Cannot delete running campaign", nil)
 		return
 	}
 
 	// Delete campaign using service
-	if err := a.service.DeleteCampaign(ctx, campaign.ID); err != nil {
+	if err := a.service.Delete(ctx, campaign.ID); err != nil {
 		a.logger.WithError(err).Error("failed to delete campaign")
 		a.writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "Failed to delete campaign", err)
 		return
@@ -305,13 +327,13 @@ func (a *CampaignAdapter) StartCampaign(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Check if campaign can be started
-	if campaign.Status == campaignTypes.StateRunning {
+	if campaign.Status == campaignTypes.StateActive {
 		a.writeError(w, http.StatusConflict, "ALREADY_RUNNING", "Campaign is already running", nil)
 		return
 	}
 
 	// Start campaign using service
-	if err := a.service.StartCampaign(ctx, campaign.ID); err != nil {
+	if err := a.service.RestartCampaign(ctx, campaign.ID); err != nil {
 		a.logger.WithError(err).Error("failed to start campaign")
 		a.writeError(w, http.StatusInternalServerError, "START_FAILED", "Failed to start campaign", err)
 		return
@@ -357,7 +379,7 @@ func (a *CampaignAdapter) StopCampaign(w http.ResponseWriter, r *http.Request, c
 	}
 
 	// Check if campaign is running
-	if campaign.Status != campaignTypes.StateRunning {
+	if campaign.Status != campaignTypes.StateActive {
 		a.writeError(w, http.StatusConflict, "NOT_RUNNING", "Campaign is not running", nil)
 		return
 	}
@@ -368,7 +390,9 @@ func (a *CampaignAdapter) StopCampaign(w http.ResponseWriter, r *http.Request, c
 	}
 
 	// Stop campaign using service
-	if err := a.service.StopCampaign(ctx, campaign.ID, reason); err != nil {
+	pausedStatus := common.CampaignStatusPaused
+	updates := common.CampaignUpdates{Status: &pausedStatus}
+	if err := a.service.Update(ctx, campaign.ID, updates); err != nil {
 		a.logger.WithError(err).Error("failed to stop campaign")
 		a.writeError(w, http.StatusInternalServerError, "STOP_FAILED", "Failed to stop campaign", err)
 		return
@@ -417,10 +441,12 @@ func (a *CampaignAdapter) GetCampaignStats(w http.ResponseWriter, r *http.Reques
 // Helper methods
 
 func (a *CampaignAdapter) convertCampaignToAPI(campaign *campaignTypes.Campaign) generated.Campaign {
+	// Basic conversion from domain Campaign type
+	// Note: Domain Campaign is minimal, many fields need to come from service
 	apiCampaign := generated.Campaign{
 		Id:           uuid.MustParse(campaign.ID),
 		Name:         campaign.Name,
-		TargetBinary: campaign.TargetBinary,
+		TargetBinary: "", // Domain type doesn't have this, set empty
 		Status:       campaignStatusToGenerated(campaign.Status),
 		CreatedAt:    campaign.CreatedAt,
 	}
@@ -429,8 +455,24 @@ func (a *CampaignAdapter) convertCampaignToAPI(campaign *campaignTypes.Campaign)
 		apiCampaign.Description = &campaign.Description
 	}
 
-	if campaign.StartedAt != nil {
-		apiCampaign.StartedAt = campaign.StartedAt
+	// Domain Campaign doesn't have these fields
+	// They would need to come from common.Campaign via service
+
+	return apiCampaign
+}
+
+func (a *CampaignAdapter) convertCommonCampaignToAPI(campaign *common.Campaign) generated.Campaign {
+	// Full conversion from common.Campaign type
+	apiCampaign := generated.Campaign{
+		Id:           uuid.MustParse(campaign.ID),
+		Name:         campaign.Name,
+		TargetBinary: campaign.TargetBinary,
+		Status:       commonCampaignStatusToGenerated(campaign.Status),
+		CreatedAt:    campaign.CreatedAt,
+	}
+
+	if campaign.Description != "" {
+		apiCampaign.Description = &campaign.Description
 	}
 
 	if campaign.CompletedAt != nil {
@@ -441,8 +483,9 @@ func (a *CampaignAdapter) convertCampaignToAPI(campaign *campaignTypes.Campaign)
 		apiCampaign.MaxJobs = &campaign.MaxJobs
 	}
 
-	if campaign.MaxDurationSeconds > 0 {
-		apiCampaign.MaxDurationSeconds = &campaign.MaxDurationSeconds
+	if campaign.MaxDuration > 0 {
+		seconds := int(campaign.MaxDuration.Seconds())
+		apiCampaign.MaxDurationSeconds = &seconds
 	}
 
 	if campaign.AutoRestart {
@@ -484,36 +527,51 @@ func (a *CampaignAdapter) getCampaignStats(ctx context.Context, campaign *campai
 func campaignStatusToGenerated(status campaignTypes.State) generated.CampaignStatus {
 	switch status {
 	case campaignTypes.StateDraft:
-		return generated.Draft
-	case campaignTypes.StateRunning:
-		return generated.Active
+		return "draft"
+	case campaignTypes.StateActive:
+		return "active"
 	case campaignTypes.StatePaused:
-		return generated.Paused
+		return "paused"
 	case campaignTypes.StateCompleted:
-		return generated.Completed
-	case campaignTypes.StateCanceled:
-		return generated.Cancelled
-	case campaignTypes.StateArchived:
-		return generated.Archived
+		return "completed"
 	default:
-		return generated.Draft
+		return "draft"
+	}
+}
+
+func commonCampaignStatusToGenerated(status common.CampaignStatus) generated.CampaignStatus {
+	switch status {
+	case common.CampaignStatusPending:
+		return "draft"
+	case common.CampaignStatusRunning:
+		return "active"
+	case common.CampaignStatusCompleted:
+		return "completed"
+	case common.CampaignStatusFailed:
+		return "completed" // Map failed to completed
+	case common.CampaignStatusPaused:
+		return "paused"
+	case common.CampaignStatusCancelled:
+		return "cancelled"
+	default:
+		return "draft"
 	}
 }
 
 func generatedToCampaignStatus(status generated.CampaignStatus) campaignTypes.State {
 	switch status {
-	case generated.Draft:
+	case "draft":
 		return campaignTypes.StateDraft
-	case generated.Active:
-		return campaignTypes.StateRunning
-	case generated.Paused:
+	case "active":
+		return campaignTypes.StateActive
+	case "paused":
 		return campaignTypes.StatePaused
-	case generated.Completed:
+	case "completed":
 		return campaignTypes.StateCompleted
-	case generated.Cancelled:
-		return campaignTypes.StateCanceled
-	case generated.Archived:
-		return campaignTypes.StateArchived
+	case "cancelled":
+		return campaignTypes.StateCompleted // Map cancelled to completed since no cancelled state
+	case "archived":
+		return campaignTypes.StateCompleted // Map archived to completed since no archived state
 	default:
 		return campaignTypes.StateDraft
 	}

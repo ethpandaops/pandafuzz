@@ -37,6 +37,7 @@ type Agent struct {
 	running         bool
 	stats           AgentStats
 	lastHeartbeat   time.Time
+	classifier      *JobStatusClassifier
 
 	// API server for master polling
 	apiServer         *APIServer
@@ -144,6 +145,9 @@ func NewAgent(botConfig *common.BotConfig, logger *logrus.Logger) (*Agent, error
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Create job status classifier
+	classifier := NewJobStatusClassifier(logger)
+
 	return &Agent{
 		config:          botConfig,
 		client:          client,
@@ -151,6 +155,7 @@ func NewAgent(botConfig *common.BotConfig, logger *logrus.Logger) (*Agent, error
 		executor:        executor,
 		ctx:             ctx,
 		cancel:          cancel,
+		classifier:      classifier,
 		resourceMonitor: resourceMonitor,
 		cleanupManager:  cleanupManager,
 		resultCollector: resultCollector,
@@ -421,10 +426,26 @@ func (a *Agent) run() {
 func (a *Agent) processWorkCycle() {
 	a.mu.RLock()
 	hasJob := a.currentJob != nil
+	var recoveryTimeout time.Time
+	if hasJob && a.currentJob.RecoveryTimeout != nil {
+		recoveryTimeout = *a.currentJob.RecoveryTimeout
+	}
 	a.mu.RUnlock()
 
 	// First check if we have any pending acknowledgments to retry
 	a.retryPendingAcknowledgments()
+
+	// Check for stuck job recovery timeout
+	if hasJob && !recoveryTimeout.IsZero() && time.Now().After(recoveryTimeout) {
+		a.mu.RLock()
+		job := a.currentJob
+		a.mu.RUnlock()
+		if job != nil {
+			a.logger.WithField("job_id", job.ID).Error("Job recovery timeout reached, forcing cleanup")
+			a.recoverFromStuckJob(job)
+			return
+		}
+	}
 
 	if hasJob {
 		// Continue working on current job
@@ -571,6 +592,20 @@ func (a *Agent) requestNewJob() {
 		return
 	}
 
+	// Check if job has a lease token (new lease-based system)
+	if job.LeaseToken != nil && *job.LeaseToken != "" {
+		// ACK the job with the lease token
+		err := a.client.AckJobWithToken(a.config.ID, job.ID, *job.LeaseToken)
+		if err != nil {
+			a.logger.WithError(err).WithField("job_id", job.ID).Error("Failed to acknowledge job with lease")
+			// Don't proceed if we can't ACK the job
+			return
+		}
+
+		// Start heartbeat goroutine
+		go a.sendJobHeartbeats(job)
+	}
+
 	a.mu.Lock()
 	a.currentJob = job
 	a.mu.Unlock()
@@ -583,6 +618,7 @@ func (a *Agent) requestNewJob() {
 		"job_status": job.Status,
 		"work_dir":   job.WorkDir,
 		"timeout_at": job.TimeoutAt,
+		"has_lease":  job.LeaseToken != nil,
 	}).Info("Bot received new job from master")
 
 	// Update API server immediately to reflect we have the job
@@ -725,6 +761,18 @@ func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 		"mode":       fileInfo.Mode(),
 	}).Info("Binary download verified successfully")
 
+	// Validate the binary before execution
+	validator := NewBinaryValidator(a.logger)
+	if err := validator.ValidateFuzzerBinary(localBinaryPath, job.Fuzzer); err != nil {
+		a.logger.WithError(err).WithFields(logrus.Fields{
+			"job_id": job.ID,
+			"binary": localBinaryPath,
+			"fuzzer": job.Fuzzer,
+		}).Error("Binary validation failed")
+		a.completeCurrentJob(false, fmt.Sprintf("Binary validation failed: %v - ensure binary is properly instrumented for %s", err, job.Fuzzer))
+		return
+	}
+
 	// Update job target to local path
 	job.Target = localBinaryPath
 
@@ -736,7 +784,7 @@ func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 		return
 	}
 
-	// Check if job should use corpus collection
+	// Check if job should use corpus collection - THIS IS THE PRIMARY CORPUS SOURCE
 	if job.CollectionID != nil && *job.CollectionID != "" {
 		a.logger.WithFields(logrus.Fields{
 			"job_id":        job.ID,
@@ -747,6 +795,14 @@ func (a *Agent) prepareAndExecuteJob(job *common.Job) {
 		if err := a.downloadCorpusCollection(*job.CollectionID, inputDir); err != nil {
 			a.logger.WithError(err).Error("Failed to download corpus collection")
 			// Continue anyway - corpus initialization failure is not fatal
+		} else {
+			// Log successful download for debugging
+			files, _ := os.ReadDir(inputDir)
+			a.logger.WithFields(logrus.Fields{
+				"job_id":        job.ID,
+				"collection_id": *job.CollectionID,
+				"files_count":   len(files),
+			}).Info("Corpus collection downloaded successfully")
 		}
 	} else if job.UseCampaignCorpus && job.CampaignID != nil && *job.CampaignID != "" {
 		// Check if job should use campaign corpus
@@ -811,7 +867,6 @@ func (a *Agent) executeJob(job *common.Job) {
 
 	a.logger.WithField("job_id", job.ID).Info("Starting job execution")
 
-	var success bool
 	var message string
 	var err error
 
@@ -819,81 +874,88 @@ func (a *Agent) executeJob(job *common.Job) {
 	switch job.Type {
 	case common.JobTypeMinimization:
 		// Handle minimization job
-		success, message, err = a.executeMinimizationJob(job)
+		_, message, err = a.executeMinimizationJob(job)
 	case common.JobTypeReproduction:
 		// Handle reproduction job
-		success, message, err = a.executeReproductionJob(job)
+		_, message, err = a.executeReproductionJob(job)
 	default:
 		// Default to fuzzing job
-		success, message, err = a.executor.ExecuteJob(job)
+		_, message, err = a.executor.ExecuteJob(job)
 	}
 
 	duration := time.Since(startTime)
 	a.stats.LastJobDuration = duration
 
-	if err != nil {
-		a.logger.WithError(err).WithField("job_id", job.ID).Error("Job execution failed")
-		a.stats.JobsFailed++
+	// Always check for crashes first, regardless of error status
+	crashesFound := a.checkAndReportCrashes(job)
 
-		// Check for crashes even when job fails - crashes might still have been found
-		crashesFound := a.checkAndReportCrashes(job)
-		if crashesFound > 0 {
-			a.logger.WithFields(logrus.Fields{
-				"job_id":  job.ID,
-				"crashes": crashesFound,
-			}).Info("Crashes found and reported despite job failure")
-			// Update the error message to include crash count
-			err = fmt.Errorf("%v (but found %d crashes)", err, crashesFound)
+	// Use the classifier to determine the proper job outcome
+	var expectedDuration time.Duration
+	if job.Config.Duration > 0 {
+		expectedDuration = job.Config.Duration
+	}
+
+	outcome := a.classifier.ClassifyJobOutcome(
+		job.ID,
+		err,
+		duration,
+		crashesFound,
+		expectedDuration,
+	)
+
+	// Override the success flag based on the classifier's decision
+	jobSuccess := outcome.Success
+
+	// Use the classifier's message if it provides better context
+	if outcome.Message != "" {
+		if crashesFound > 0 && !strings.Contains(outcome.Message, "crash") {
+			// Ensure crash count is in the message
+			message = fmt.Sprintf("%s (found %d crashes)", outcome.Message, crashesFound)
+		} else {
+			message = outcome.Message
 		}
+	} else if message == "" {
+		message = "Job completed"
+	}
 
-		// Clean up the fuzzer instance even on error
-		if cleanupErr := a.executor.CleanupJob(job.ID); cleanupErr != nil {
-			a.logger.WithError(cleanupErr).WithField("job_id", job.ID).Warn("Failed to cleanup job after error")
-		}
+	// Give some time for crash reports to be processed if we found crashes
+	if crashesFound > 0 {
+		time.Sleep(1 * time.Second)
+	}
 
-		a.completeCurrentJob(false, fmt.Sprintf("Execution failed: %v", err))
-	} else if success {
+	// Clean up the fuzzer instance
+	if cleanupErr := a.executor.CleanupJob(job.ID); cleanupErr != nil {
+		a.logger.WithError(cleanupErr).WithField("job_id", job.ID).Warn("Failed to cleanup job")
+	}
+
+	// Log and complete based on final status
+	if jobSuccess {
 		a.logger.WithFields(logrus.Fields{
-			"job_id":   job.ID,
-			"duration": duration,
-			"message":  message,
+			"job_id":     job.ID,
+			"duration":   duration,
+			"message":    message,
+			"crashes":    crashesFound,
+			"end_reason": outcome.Reason,
 		}).Info("Job completed successfully")
-
-		// Check for crashes BEFORE completing the job
-		// This ensures crashes are reported while job is still active
-		crashesFound := a.checkAndReportCrashes(job)
-		if crashesFound > 0 {
-			a.logger.WithFields(logrus.Fields{
-				"job_id":  job.ID,
-				"crashes": crashesFound,
-			}).Info("Crashes found and reported")
-			message = fmt.Sprintf("%s (found %d crashes)", message, crashesFound)
-
-			// Give some time for crash reports to be processed
-			time.Sleep(1 * time.Second)
-		}
-
-		// Clean up the fuzzer instance after crash detection
-		if err := a.executor.CleanupJob(job.ID); err != nil {
-			a.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to cleanup job")
-		}
-
 		a.stats.JobsCompleted++
 		a.completeCurrentJob(true, message)
 	} else {
 		a.logger.WithFields(logrus.Fields{
-			"job_id":   job.ID,
-			"duration": duration,
-			"message":  message,
-		}).Warn("Job completed with issues")
+			"job_id":     job.ID,
+			"duration":   duration,
+			"message":    message,
+			"crashes":    crashesFound,
+			"end_reason": outcome.Reason,
+			"error":      err,
+		}).Error("Job failed")
 		a.stats.JobsFailed++
 
-		// Clean up the fuzzer instance even on failure
-		if err := a.executor.CleanupJob(job.ID); err != nil {
-			a.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to cleanup job")
+		// Use the classifier's message for better error reporting
+		failureMessage := outcome.Message
+		if failureMessage == "" && err != nil {
+			failureMessage = fmt.Sprintf("Execution failed: %v", err)
 		}
-
-		a.completeCurrentJob(false, message)
+		a.completeCurrentJob(false, failureMessage)
 	}
 }
 
@@ -907,21 +969,24 @@ func (a *Agent) continueCurrentJob() {
 		return
 	}
 
+	// Check if the fuzzer executor still has this job running
+	if !a.executor.IsJobRunning(job.ID) {
+		a.logger.WithField("job_id", job.ID).Warn("Job is no longer running in executor but bot still thinks it's active")
+		// Force cleanup and recovery
+		a.recoverFromStuckJob(job)
+		return
+	}
+
 	// Check if job has timed out
 	if time.Now().After(job.TimeoutAt) {
 		a.logger.WithField("job_id", job.ID).Warn("Job has timed out")
 
-		// Check for crashes even when job times out
-		crashesFound := a.checkAndReportCrashes(job)
-		if crashesFound > 0 {
-			a.logger.WithFields(logrus.Fields{
-				"job_id":  job.ID,
-				"crashes": crashesFound,
-			}).Info("Crashes found and reported despite job timeout")
-			a.completeCurrentJob(false, fmt.Sprintf("Job timeout (but found %d crashes)", crashesFound))
-		} else {
-			a.completeCurrentJob(false, "Job timeout")
-		}
+		// Just stop the fuzzer - the executeJob function will handle completion
+		// with the proper classification based on crashes found
+		a.executor.StopJob(job.ID)
+
+		// Don't complete the job here - let executeJob handle it with the classifier
+		// This prevents duplicate completion and ensures proper status classification
 		return
 	}
 
@@ -934,17 +999,72 @@ func (a *Agent) continueCurrentJob() {
 	} else if masterJob == nil || masterJob.ID != job.ID {
 		// Master has no job for us or a different job
 		a.logger.WithField("job_id", job.ID).Warn("Job no longer assigned by master")
+		// Stop the fuzzer before completing
+		a.executor.StopJob(job.ID)
 		a.completeCurrentJob(false, "Job cancelled or reassigned")
 		return
-	} else if masterJob.Status == common.JobStatusCancelled {
-		// Job has been explicitly cancelled
-		a.logger.WithField("job_id", job.ID).Info("Job has been cancelled by master")
-		a.completeCurrentJob(false, "Job cancelled by master")
+	} else if masterJob.Status == common.JobStatusCancelled || masterJob.Status == common.JobStatusCompleted || masterJob.Status == common.JobStatusFailed {
+		// Job has been explicitly cancelled or already completed/failed on master
+		a.logger.WithFields(logrus.Fields{
+			"job_id":        job.ID,
+			"master_status": masterJob.Status,
+		}).Info("Job status changed on master, clearing local state")
+		// Stop the fuzzer and clear job
+		a.executor.StopJob(job.ID)
+		a.executor.CleanupJob(job.ID)
+		// Clear current job without trying to complete it again
+		a.mu.Lock()
+		a.currentJob = nil
+		a.mu.Unlock()
 		return
 	}
 
 	// Continue monitoring the job
 	a.logger.WithField("job_id", job.ID).Debug("Continuing job execution")
+}
+
+// sendJobHeartbeats sends periodic heartbeats for a job with a lease
+func (a *Agent) sendJobHeartbeats(job *common.Job) {
+	if job.LeaseToken == nil || *job.LeaseToken == "" {
+		return // No lease to maintain
+	}
+
+	ticker := time.NewTicker(20 * time.Second) // Send heartbeat every 20 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			// Check if job is still current
+			a.mu.RLock()
+			currentJob := a.currentJob
+			a.mu.RUnlock()
+
+			if currentJob == nil || currentJob.ID != job.ID {
+				// Job is no longer current, stop heartbeats
+				a.logger.WithField("job_id", job.ID).Debug("Stopping heartbeats, job no longer current")
+				return
+			}
+
+			// Send heartbeat
+			newExpiry, err := a.client.SendHeartbeatWithToken(a.config.ID, job.ID, *job.LeaseToken)
+			if err != nil {
+				a.logger.WithError(err).WithField("job_id", job.ID).Error("Failed to send job heartbeat")
+				// If we can't renew the lease, we should probably stop the job
+				// But let's give it a few tries first
+				continue
+			}
+
+			a.logger.WithFields(logrus.Fields{
+				"job_id":           job.ID,
+				"lease_expires_at": newExpiry,
+			}).Debug("Job lease renewed")
+
+		case <-a.ctx.Done():
+			// Agent is shutting down
+			return
+		}
+	}
 }
 
 // completeCurrentJob completes the current job
@@ -1001,7 +1121,14 @@ func (a *Agent) completeCurrentJob(success bool, message string) {
 			a.apiServer.MarkJobPendingCompletion(job.ID, success, message, "")
 		}
 
-		// Don't clear the current job yet - wait for master acknowledgment via polling
+		// Set a recovery timeout - if master doesn't acknowledge within 2 minutes, force clear
+		a.mu.Lock()
+		if a.currentJob != nil && a.currentJob.ID == job.ID {
+			// Mark job for recovery check
+			recoveryTime := time.Now().Add(2 * time.Minute)
+			a.currentJob.RecoveryTimeout = &recoveryTime
+		}
+		a.mu.Unlock()
 		return
 	}
 
@@ -1700,6 +1827,37 @@ func (a *Agent) monitorResourceAlerts() {
 			}
 		}
 	}
+}
+
+// recoverFromStuckJob forcefully cleans up a stuck job
+func (a *Agent) recoverFromStuckJob(job *common.Job) {
+	a.logger.WithField("job_id", job.ID).Error("Recovering from stuck job")
+
+	// Force stop the fuzzer if it's still running
+	if a.executor.IsJobRunning(job.ID) {
+		a.executor.StopJob(job.ID)
+	}
+
+	// Clean up the fuzzer instance
+	if err := a.executor.CleanupJob(job.ID); err != nil {
+		a.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to cleanup job during recovery")
+	}
+
+	// Clear the current job
+	a.mu.Lock()
+	a.currentJob = nil
+	a.mu.Unlock()
+
+	// Update stats
+	a.stats.JobsFailed++
+	a.stats.CurrentStatus = "idle"
+
+	// Update API server cache if available
+	if a.apiServer != nil {
+		a.apiServer.MarkJobCompleted(job.ID, false, "Job recovered from stuck state", "Bot forced recovery due to timeout or zombie process")
+	}
+
+	a.logger.WithField("job_id", job.ID).Info("Successfully recovered from stuck job")
 }
 
 // downloadCorpusCollection downloads all files from a corpus collection to the specified directory

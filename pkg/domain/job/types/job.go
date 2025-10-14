@@ -44,6 +44,11 @@ type Job struct {
 	LockedAt      *time.Time `json:"locked_at,omitempty"`       // When the job was locked
 	LockExpiresAt *time.Time `json:"lock_expires_at,omitempty"` // When the lock expires
 
+	// Lease management fields
+	LeaseToken     *string    `json:"lease_token,omitempty"`      // Secure token for lease validation
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"` // When the lease expires
+	LastHeartbeat  *time.Time `json:"last_heartbeat,omitempty"`   // Last heartbeat from assigned bot
+
 	// Queue tracking
 	QueuedAt     *time.Time `json:"queued_at,omitempty"` // When the job was added to queue
 	DequeueCount int        `json:"dequeue_count"`       // Number of times dequeued

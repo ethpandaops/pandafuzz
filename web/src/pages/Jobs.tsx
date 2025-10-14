@@ -35,12 +35,14 @@ import {
   Schedule as PendingIcon,
   PlayArrow as RunningIcon,
   Refresh as RefreshIcon,
+  RestoreFromTrash as RecoverIcon,
 } from '@mui/icons-material';
 import api from '../api/client';
 import { Job, JobStatus, JobPriority, Bot, JobCoverageConfig } from '../types';
 import { SortableTableHeader, useSort } from '../components/SortableTableHeader';
 import JobCreationForm, { JobFormData } from '../components/JobCreationForm';
 import JobCoverageView from '../components/JobCoverageView';
+import { formatDateTime, formatDuration as formatDurationUtil, formatTime } from '../utils/dateFormat';
 import TabContext from '@mui/lab/TabContext';
 import TabList from '@mui/lab/TabList';
 import TabPanel from '@mui/lab/TabPanel';
@@ -80,6 +82,8 @@ function Jobs() {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [jobToDelete, setJobToDelete] = useState<Job | null>(null);
+  const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
+  const [recoveryLoading, setRecoveryLoading] = useState(false);
   const [logsDialogOpen, setLogsDialogOpen] = useState(false);
   const [logsJob, setLogsJob] = useState<Job | null>(null);
   const [jobLogs, setJobLogs] = useState<any>(null);
@@ -282,6 +286,29 @@ function Jobs() {
     }
   };
 
+  const handleRecoverJobs = async () => {
+    try {
+      setRecoveryLoading(true);
+      const result = await api.recoverOrphanedJobs();
+      setRecoveryDialogOpen(false);
+      setSnackbar({
+        open: true,
+        message: `${result.message} (${result.recovered_count} jobs recovered)`,
+        severity: result.recovered_count > 0 ? 'success' : 'info',
+      });
+      // Refresh job list to show recovered jobs
+      fetchJobs(false);
+    } catch (err) {
+      setSnackbar({
+        open: true,
+        message: err instanceof Error ? err.message : 'Failed to recover jobs',
+        severity: 'error',
+      });
+    } finally {
+      setRecoveryLoading(false);
+    }
+  };
+
   const handleViewLogs = async (job: Job) => {
     setLogsJob(job);
     setLogsDialogOpen(true);
@@ -300,12 +327,7 @@ function Jobs() {
 
   const formatDuration = (start?: string, end?: string) => {
     if (!start) return '-';
-    const startDate = new Date(start);
-    const endDate = end ? new Date(end) : new Date();
-    const diffMs = endDate.getTime() - startDate.getTime();
-    const hours = Math.floor(diffMs / 3600000);
-    const minutes = Math.floor((diffMs % 3600000) / 60000);
-    return `${hours}h ${minutes}m`;
+    return formatDurationUtil(start, end);
   };
 
   if (loading && jobs.length === 0) {
@@ -329,16 +351,26 @@ function Jobs() {
             <CircularProgress size={20} sx={{ opacity: 0.5 }} />
           )}
         </Box>
-        <Button
-          variant="contained"
-          startIcon={<AddIcon />}
-          onClick={() => {
-            setCreateDialogOpen(true);
-            setError(null);
-          }}
-        >
-          New Job
-        </Button>
+        <Box display="flex" gap={2}>
+          <Button
+            variant="outlined"
+            startIcon={<RecoverIcon />}
+            onClick={() => setRecoveryDialogOpen(true)}
+            color="warning"
+          >
+            Recover Jobs
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={<AddIcon />}
+            onClick={() => {
+              setCreateDialogOpen(true);
+              setError(null);
+            }}
+          >
+            New Job
+          </Button>
+        </Box>
       </Box>
 
       <TableContainer component={Paper}>
@@ -618,7 +650,7 @@ function Jobs() {
                     Created
                   </Typography>
                   <Typography variant="body1" gutterBottom>
-                    {new Date(selectedJob.created_at).toLocaleString()}
+                    {formatDateTime(selectedJob.created_at)}
                   </Typography>
                 </Grid>
                 <Grid item xs={6}>
@@ -626,7 +658,7 @@ function Jobs() {
                     Timeout
                   </Typography>
                   <Typography variant="body1" gutterBottom>
-                    {new Date(selectedJob.timeout_at).toLocaleString()}
+                    {formatDateTime(selectedJob.timeout_at)}
                   </Typography>
                 </Grid>
                 {selectedJob.assigned_bot && (
@@ -727,7 +759,7 @@ function Jobs() {
               {jobLogs.logs.map((log: any, index: number) => (
                 <Box key={index} mb={0.5}>
                   <span style={{ color: '#666' }}>
-                    [{new Date(log.timestamp).toLocaleTimeString()}]
+                    [{formatTime(log.timestamp)}]
                   </span>{' '}
                   <span
                     style={{
@@ -798,7 +830,7 @@ function Jobs() {
                 const logText = jobLogs.logs
                   .map(
                     (log: any) =>
-                      `[${new Date(log.timestamp).toLocaleString()}] [${log.level}] [${log.source}] ${log.message}`
+                      `[${formatDateTime(log.timestamp)}] [${log.level}] [${log.source}] ${log.message}`
                   )
                   .join('\n');
                 const blob = new Blob([logText], { type: 'text/plain' });
@@ -816,6 +848,48 @@ function Jobs() {
         </DialogActions>
       </Dialog>
       
+      {/* Job Recovery Confirmation Dialog */}
+      <Dialog
+        open={recoveryDialogOpen}
+        onClose={() => !recoveryLoading && setRecoveryDialogOpen(false)}
+      >
+        <DialogTitle>Recover Orphaned Jobs</DialogTitle>
+        <DialogContent>
+          <Typography paragraph>
+            This action will recover jobs that may have been orphaned due to bot disconnections 
+            or system issues. Orphaned jobs will be reset to pending status and made available 
+            for reassignment.
+          </Typography>
+          <Typography variant="body2" color="textSecondary">
+            <strong>Note:</strong> This operation is safe to run and will only affect jobs that 
+            are genuinely orphaned (assigned to bots that are no longer active).
+          </Typography>
+          {recoveryLoading && (
+            <Box display="flex" alignItems="center" gap={2} mt={2}>
+              <CircularProgress size={20} />
+              <Typography variant="body2">Recovering jobs...</Typography>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button 
+            onClick={() => setRecoveryDialogOpen(false)}
+            disabled={recoveryLoading}
+          >
+            Cancel
+          </Button>
+          <Button 
+            onClick={handleRecoverJobs} 
+            color="warning"
+            variant="contained"
+            disabled={recoveryLoading}
+            startIcon={recoveryLoading ? <CircularProgress size={16} /> : <RecoverIcon />}
+          >
+            {recoveryLoading ? 'Recovering...' : 'Recover Jobs'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Snackbar for notifications */}
       <Snackbar
         open={snackbar.open}
