@@ -3,6 +3,8 @@ data/
 configs/
 .idea/
 .claude/
+AGENTS.md
+work/
 
 # Playwright test artifacts
 playwright-report/
