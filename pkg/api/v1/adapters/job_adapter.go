@@ -547,13 +547,13 @@ func (a *JobAdapter) getJobLogs(ctx context.Context, jobID string, params genera
 		Timestamp time.Time                          `json:"timestamp"`
 	}{
 		{
-			Level:     generated.Info,
+			Level:     "info",
 			Message:   fmt.Sprintf("Job %s started", jobID),
 			Source:    &[]string{"job_manager"}[0],
 			Timestamp: time.Now().Add(-5 * time.Minute),
 		},
 		{
-			Level:     generated.Info,
+			Level:     "info",
 			Message:   "Fuzzing in progress...",
 			Source:    &[]string{"fuzzer"}[0],
 			Timestamp: time.Now().Add(-2 * time.Minute),

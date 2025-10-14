@@ -112,6 +112,18 @@ docker-compose-down:
 docker-compose-logs:
 	@docker-compose logs -f
 
+## fresh-test: Full reset - stop containers, prune Docker, rebuild and run corpus test
+fresh-test:
+	@echo "Performing full Docker cleanup and rebuild..."
+	@docker compose down
+	@docker system prune -a -f
+	@docker volume prune -a -f
+	@docker compose up -d
+	@echo "Waiting for services to be ready..."
+	@sleep 10
+	@echo "Running corpus tests..."
+	@./scripts/run-test-with-corpus.sh
+
 ## clean: Clean build artifacts
 clean:
 	@echo "Cleaning..."

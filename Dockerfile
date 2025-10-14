@@ -81,8 +81,17 @@ COPY go.sum* ./
 # Download dependencies - if go.sum is incomplete, this will download missing ones
 RUN go mod download all
 
+# Install oapi-codegen for API code generation
+RUN go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest
+
 # Copy source code
 COPY . .
+
+# Generate API code before building
+RUN mkdir -p pkg/api/v1/generated && \
+    /go/bin/oapi-codegen -generate "types" -package generated -o pkg/api/v1/generated/types.gen.go pkg/api/v1/openapi/pandafuzz.yaml && \
+    /go/bin/oapi-codegen -generate "chi-server" -package generated -o pkg/api/v1/generated/server.gen.go pkg/api/v1/openapi/pandafuzz.yaml && \
+    /go/bin/oapi-codegen -generate "spec" -package generated -o pkg/api/v1/generated/spec.gen.go pkg/api/v1/openapi/pandafuzz.yaml
 
 # Get version info
 ARG VERSION=dev

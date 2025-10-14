@@ -3341,6 +3341,101 @@ components:
         metadata:
           $ref: '#/components/schemas/Metadata'
 
+    CrashRequest:
+      type: object
+      required:
+        - job_id
+        - bot_id
+        - campaign_id
+        - hash
+        - type
+        - input_size_bytes
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          description: ID of the job that discovered the crash
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        bot_id:
+          type: string
+          format: uuid
+          description: ID of the bot that discovered the crash
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        campaign_id:
+          type: string
+          format: uuid
+          description: ID of the campaign where crash was discovered
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        hash:
+          type: string
+          description: SHA256 hash of the crash-inducing input
+          example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        type:
+          $ref: '#/components/schemas/CrashType'
+        severity:
+          $ref: '#/components/schemas/CrashSeverity'
+        input_size_bytes:
+          type: integer
+          minimum: 0
+          description: Size of the crash-inducing input in bytes
+          example: 512
+        signal:
+          type: integer
+          description: Signal number that caused the crash
+          example: 11
+        exit_code:
+          type: integer
+          description: Exit code of the crashed process
+          example: -11
+        stack_trace:
+          type: string
+          description: Stack trace of the crash
+        output:
+          type: string
+          description: Output/stderr from the crashed process
+        input_base64:
+          type: string
+          format: byte
+          description: Base64-encoded crash input data
+        reproducible:
+          type: boolean
+          description: Whether the crash is reproducible
+          default: false
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    CrashSubmitResponse:
+      type: object
+      required:
+        - id
+        - is_unique
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the submitted crash
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        is_unique:
+          type: boolean
+          description: Whether this crash is unique (not a duplicate)
+          example: true
+        duplicate_of:
+          type: string
+          format: uuid
+          nullable: true
+          description: ID of the crash this is a duplicate of
+          example: null
+        status:
+          type: string
+          enum: [created, duplicate, error]
+          description: Status of the crash submission
+          example: "created"
+        message:
+          type: string
+          description: Additional information about the submission
+          example: "Crash successfully created"
+
     CrashListResponse:
       type: object
       required:

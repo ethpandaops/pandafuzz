@@ -739,6 +739,10 @@ func (a *BotAdapter) ListCrashes(w http.ResponseWriter, r *http.Request, params 
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+func (a *BotAdapter) CreateCrash(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 func (a *BotAdapter) GetCrash(w http.ResponseWriter, r *http.Request, crashId generated.CrashIdParam, params generated.GetCrashParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
