@@ -1,0 +1,387 @@
+{
+  "job_creation_afl": {
+    "summary": "Create AFL++ fuzzing job",
+    "description": "Example request to create a new AFL++ fuzzing job with coverage enabled",
+    "value": {
+      "name": "HTTP Parser Security Test - AFL++",
+      "description": "Comprehensive security testing of HTTP request parser using AFL++ with AddressSanitizer",
+      "target_binary": "/opt/targets/http_parser",
+      "fuzzer_type": "afl++",
+      "config": {
+        "duration": "2h",
+        "resource_limits": {
+          "memory_limit": 2147483648,
+          "cpu_cores": 4,
+          "disk_space": 10737418240
+        },
+        "fuzzer_args": ["-m", "none", "-t", "5000", "-i", "/data/seeds", "-o", "/data/output"],
+        "dictionary_path": "/data/dictionaries/http.dict",
+        "seed_corpus": [
+          "/data/seeds/http_request_basic.txt",
+          "/data/seeds/http_request_headers.txt",
+          "/data/seeds/http_request_post.txt"
+        ],
+        "environment_variables": {
+          "ASAN_OPTIONS": "detect_odr_violation=0:abort_on_error=1",
+          "AFL_SKIP_CPUFREQ": "1",
+          "AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES": "1"
+        },
+        "working_directory": "/tmp/fuzz_http_parser",
+        "output_directory": "/data/outputs/job_afl_http",
+        "enable_coverage": true,
+        "coverage_format": "json",
+        "sanitizers": ["asan", "ubsan"],
+        "minimize_crashes": true,
+        "deduplicate_crashes": true
+      },
+      "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+      "priority": 8,
+      "tags": ["security", "http", "parser", "afl++"],
+      "metadata": {
+        "source": "security_team",
+        "target_version": "2.1.0",
+        "test_category": "buffer_overflow"
+      }
+    }
+  },
+
+  "job_creation_libfuzzer": {
+    "summary": "Create LibFuzzer job with custom harness",
+    "description": "Example LibFuzzer job with specific memory limits and timeout settings",
+    "value": {
+      "name": "JSON Parser LibFuzzer Test",
+      "description": "LibFuzzer-based testing of JSON parsing library with custom test harness",
+      "target_binary": "/opt/targets/json_fuzzer_harness",
+      "fuzzer_type": "libfuzzer",
+      "config": {
+        "duration": "4h",
+        "resource_limits": {
+          "memory_limit": 1073741824,
+          "cpu_cores": 2,
+          "disk_space": 5368709120
+        },
+        "fuzzer_args": [
+          "-max_len=65536",
+          "-timeout=10",
+          "-rss_limit_mb=1024",
+          "-print_final_stats=1"
+        ],
+        "seed_corpus": [
+          "/data/json_corpus/basic.json",
+          "/data/json_corpus/nested.json",
+          "/data/json_corpus/arrays.json"
+        ],
+        "environment_variables": {
+          "MSAN_OPTIONS": "print_stats=1:halt_on_error=1"
+        },
+        "enable_coverage": true,
+        "coverage_format": "html",
+        "sanitizers": ["msan"]
+      },
+      "priority": 6,
+      "tags": ["json", "parser", "libfuzzer", "msan"],
+      "metadata": {
+        "harness_version": "1.2.0",
+        "compiler": "clang-15"
+      }
+    }
+  },
+
+  "job_running_response": {
+    "summary": "Job currently executing",
+    "description": "Example of a job that is actively running on a bot",
+    "value": {
+      "id": "550e8400-e29b-41d4-a716-446655440001",
+      "name": "HTTP Parser Security Test - AFL++",
+      "description": "Comprehensive security testing of HTTP request parser using AFL++ with AddressSanitizer",
+      "target_binary": "/opt/targets/http_parser",
+      "fuzzer_type": "afl++",
+      "status": "running",
+      "config": {
+        "duration": "2h",
+        "resource_limits": {
+          "memory_limit": 2147483648,
+          "cpu_cores": 4,
+          "disk_space": 10737418240
+        },
+        "fuzzer_args": ["-m", "none", "-t", "5000"],
+        "enable_coverage": true,
+        "coverage_format": "json",
+        "sanitizers": ["asan", "ubsan"]
+      },
+      "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+      "bot_id": "550e8400-e29b-41d4-a716-446655440000",
+      "priority": 8,
+      "created_at": "2023-12-01T10:30:00Z",
+      "assigned_at": "2023-12-01T10:35:00Z",
+      "started_at": "2023-12-01T10:36:00Z",
+      "completed_at": null,
+      "timeout_at": "2023-12-01T12:36:00Z",
+      "progress": {
+        "percent_complete": 65.5,
+        "executions_total": 2500000,
+        "executions_per_second": 1250.75,
+        "crashes_found": 8,
+        "unique_crashes": 5,
+        "coverage_edges": 15420,
+        "corpus_size": 1250,
+        "corpus_bytes": 52428800,
+        "last_new_path": "2023-12-01T11:45:30Z",
+        "last_crash": "2023-12-01T11:30:15Z",
+        "updated_at": "2023-12-01T11:50:00Z"
+      },
+      "tags": ["security", "http", "parser", "afl++"],
+      "metadata": {
+        "source": "security_team",
+        "target_version": "2.1.0"
+      }
+    }
+  },
+
+  "job_completed_response": {
+    "summary": "Successfully completed job",
+    "description": "Example of a job that completed successfully with results",
+    "value": {
+      "id": "550e8400-e29b-41d4-a716-446655440003",
+      "name": "JSON Parser LibFuzzer Test",
+      "description": "LibFuzzer-based testing of JSON parsing library",
+      "target_binary": "/opt/targets/json_fuzzer_harness",
+      "fuzzer_type": "libfuzzer",
+      "status": "completed",
+      "config": {
+        "duration": "1h",
+        "resource_limits": {
+          "memory_limit": 1073741824,
+          "cpu_cores": 2
+        },
+        "enable_coverage": true,
+        "sanitizers": ["msan"]
+      },
+      "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+      "bot_id": "550e8400-e29b-41d4-a716-446655440010",
+      "priority": 6,
+      "created_at": "2023-12-01T09:00:00Z",
+      "assigned_at": "2023-12-01T09:05:00Z",
+      "started_at": "2023-12-01T09:06:00Z",
+      "completed_at": "2023-12-01T10:06:30Z",
+      "timeout_at": "2023-12-01T10:06:00Z",
+      "progress": {
+        "percent_complete": 100,
+        "executions_total": 1750000,
+        "executions_per_second": 485.5,
+        "crashes_found": 3,
+        "unique_crashes": 2,
+        "coverage_edges": 12650,
+        "corpus_size": 875,
+        "corpus_bytes": 31457280,
+        "updated_at": "2023-12-01T10:06:30Z"
+      },
+      "results": {
+        "exit_code": 0,
+        "execution_time": "1h0m30s",
+        "total_executions": 1750000,
+        "average_exec_per_second": 485.5,
+        "crashes_total": 3,
+        "crashes_unique": 2,
+        "coverage_final": 12650,
+        "corpus_final_size": 875,
+        "corpus_final_bytes": 31457280,
+        "peak_memory_usage": 536870912,
+        "disk_usage": 1073741824
+      },
+      "tags": ["json", "parser", "libfuzzer"],
+      "metadata": {
+        "harness_version": "1.2.0"
+      }
+    }
+  },
+
+  "job_failed_response": {
+    "summary": "Failed job with error details",
+    "description": "Example of a job that failed during execution",
+    "value": {
+      "id": "550e8400-e29b-41d4-a716-446655440004",
+      "name": "Binary Parser Honggfuzz Test",
+      "description": "Honggfuzz testing of binary protocol parser",
+      "target_binary": "/opt/targets/binary_parser",
+      "fuzzer_type": "honggfuzz",
+      "status": "failed",
+      "config": {
+        "duration": "30m",
+        "resource_limits": {
+          "memory_limit": 1073741824,
+          "cpu_cores": 2
+        }
+      },
+      "campaign_id": null,
+      "bot_id": "550e8400-e29b-41d4-a716-446655440020",
+      "priority": 4,
+      "created_at": "2023-12-01T13:00:00Z",
+      "assigned_at": "2023-12-01T13:05:00Z",
+      "started_at": "2023-12-01T13:06:00Z",
+      "completed_at": "2023-12-01T13:15:30Z",
+      "timeout_at": "2023-12-01T13:36:00Z",
+      "progress": {
+        "percent_complete": 25.0,
+        "executions_total": 125000,
+        "executions_per_second": 0,
+        "crashes_found": 0,
+        "unique_crashes": 0,
+        "coverage_edges": 2500,
+        "corpus_size": 50,
+        "corpus_bytes": 2097152,
+        "updated_at": "2023-12-01T13:15:30Z"
+      },
+      "results": {
+        "exit_code": 1,
+        "execution_time": "9m30s",
+        "total_executions": 125000,
+        "average_exec_per_second": 219.3,
+        "crashes_total": 0,
+        "crashes_unique": 0,
+        "coverage_final": 2500,
+        "corpus_final_size": 50,
+        "corpus_final_bytes": 2097152,
+        "peak_memory_usage": 268435456,
+        "disk_usage": 536870912,
+        "error_message": "Target binary crashed during initialization: Segmentation fault",
+        "warnings": [
+          "Low execution rate detected",
+          "No new coverage in 5 minutes"
+        ]
+      },
+      "tags": ["binary", "parser", "honggfuzz"],
+      "metadata": {
+        "failure_reason": "target_initialization_failure"
+      }
+    }
+  },
+
+  "job_list_response": {
+    "summary": "Paginated job list with filters",
+    "description": "Response showing multiple jobs with different statuses and fuzzers",
+    "value": {
+      "jobs": [
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440001",
+          "name": "HTTP Parser Security Test - AFL++",
+          "target_binary": "/opt/targets/http_parser",
+          "fuzzer_type": "afl++",
+          "status": "running",
+          "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+          "bot_id": "550e8400-e29b-41d4-a716-446655440000",
+          "priority": 8,
+          "created_at": "2023-12-01T10:30:00Z",
+          "started_at": "2023-12-01T10:36:00Z",
+          "timeout_at": "2023-12-01T12:36:00Z",
+          "progress": {
+            "percent_complete": 65.5,
+            "crashes_found": 8,
+            "coverage_edges": 15420
+          }
+        },
+        {
+          "id": "550e8400-e29b-41d4-a716-446655440003",
+          "name": "JSON Parser LibFuzzer Test",
+          "target_binary": "/opt/targets/json_fuzzer_harness",
+          "fuzzer_type": "libfuzzer",
+          "status": "completed",
+          "campaign_id": "550e8400-e29b-41d4-a716-446655440002",
+          "bot_id": "550e8400-e29b-41d4-a716-446655440010",
+          "priority": 6,
+          "created_at": "2023-12-01T09:00:00Z",
+          "completed_at": "2023-12-01T10:06:30Z",
+          "progress": {
+            "percent_complete": 100,
+            "crashes_found": 3,
+            "coverage_edges": 12650
+          }
+        }
+      ],
+      "pagination": {
+        "limit": 50,
+        "offset": 0,
+        "total": 127,
+        "has_more": true
+      },
+      "filters": {
+        "status": ["running", "completed"],
+        "fuzzer_type": ["afl++", "libfuzzer"],
+        "campaign_id": "550e8400-e29b-41d4-a716-446655440002"
+      }
+    }
+  },
+
+  "job_logs_response": {
+    "summary": "Job execution logs",
+    "description": "Recent log entries from job execution with different severity levels",
+    "value": {
+      "job_id": "550e8400-e29b-41d4-a716-446655440001",
+      "logs": [
+        {
+          "timestamp": "2023-12-01T11:45:30.123Z",
+          "level": "info",
+          "message": "New path discovered: increases coverage by 15 edges",
+          "source": "afl_engine",
+          "job_id": "550e8400-e29b-41d4-a716-446655440001",
+          "context": {
+            "new_edges": "15",
+            "total_edges": "15420"
+          }
+        },
+        {
+          "timestamp": "2023-12-01T11:30:15.456Z",
+          "level": "warn",
+          "message": "Crash detected: timeout after 5000ms",
+          "source": "fuzzer_engine",
+          "job_id": "550e8400-e29b-41d4-a716-446655440001",
+          "context": {
+            "crash_type": "timeout",
+            "timeout_ms": "5000"
+          }
+        },
+        {
+          "timestamp": "2023-12-01T11:20:45.789Z",
+          "level": "info",
+          "message": "Execution rate: 1250.75 exec/sec (stable)",
+          "source": "performance_monitor",
+          "job_id": "550e8400-e29b-41d4-a716-446655440001",
+          "context": {
+            "exec_rate": "1250.75",
+            "trend": "stable"
+          }
+        }
+      ],
+      "total_entries": 1247,
+      "pagination": {
+        "limit": 1000,
+        "offset": 0,
+        "total": 1247,
+        "has_more": false
+      }
+    }
+  },
+
+  "job_action_pause": {
+    "summary": "Pause job request",
+    "description": "Request to pause a running job for maintenance",
+    "value": {
+      "action": "pause",
+      "reason": "System maintenance required - upgrading kernel",
+      "scheduled_at": "2023-12-01T15:00:00Z"
+    }
+  },
+
+  "job_action_response": {
+    "summary": "Job action completed",
+    "description": "Response after successfully pausing a job",
+    "value": {
+      "job_id": "550e8400-e29b-41d4-a716-446655440001",
+      "action": "pause",
+      "status": "completed",
+      "performed_at": "2023-12-01T15:00:00Z",
+      "message": "Job paused successfully, state saved",
+      "new_job_status": "paused"
+    }
+  }
+}

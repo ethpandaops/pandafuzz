@@ -1,0 +1,870 @@
+# Crash resource schemas for PandaFuzz API v1
+# Manages crash discovery, analysis, and deduplication
+
+Crash:
+  type: object
+  description: A crash discovered during fuzzing execution
+  required:
+    - id
+    - job_id
+    - bot_id
+    - crash_type
+    - signal
+    - discovered_at
+    - input_hash
+    - stack_hash
+    - is_unique
+    - reproducible
+  properties:
+    id:
+      type: string
+      format: uuid
+      description: Unique crash identifier
+      example: "550e8400-e29b-41d4-a716-446655440040"
+    job_id:
+      type: string
+      format: uuid
+      description: Job that discovered this crash
+      example: "550e8400-e29b-41d4-a716-446655440001"
+    bot_id:
+      type: string
+      format: uuid
+      description: Bot that found this crash
+      example: "550e8400-e29b-41d4-a716-446655440000"
+    campaign_id:
+      type: string
+      format: uuid
+      nullable: true
+      description: Associated campaign ID
+      example: "550e8400-e29b-41d4-a716-446655440002"
+    crash_type:
+      $ref: '#/CrashType'
+    signal:
+      type: integer
+      minimum: 1
+      maximum: 64
+      description: Signal number that caused the crash
+      example: 11
+    exit_code:
+      type: integer
+      minimum: -128
+      maximum: 255
+      description: Process exit code
+      example: -11
+    discovered_at:
+      type: string
+      format: date-time
+      description: When the crash was discovered
+      example: "2023-12-01T11:30:15Z"
+    execution_time_us:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Execution time until crash in microseconds
+      example: 5000000
+    input_file:
+      $ref: '#/CrashInput'
+    stack_trace:
+      $ref: '#/StackTrace'
+    input_hash:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: SHA256 hash of the crash input
+      example: "f1e2d3c4b5a6978812345678901234567890abcdef1234567890abcdef123456"
+    stack_hash:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: Hash of the stack trace for deduplication
+      example: "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
+    signature:
+      $ref: '#/CrashSignature'
+    is_unique:
+      type: boolean
+      description: Whether this crash is unique (not a duplicate)
+      example: true
+    duplicate_of:
+      type: string
+      format: uuid
+      nullable: true
+      description: Original crash ID if this is a duplicate
+      example: null
+    duplicate_count:
+      type: integer
+      minimum: 0
+      description: Number of times this crash has been seen
+      example: 1
+    reproducible:
+      $ref: '#/ReproducibilityInfo'
+    severity:
+      $ref: '#/CrashSeverity'
+    analysis:
+      $ref: '#/CrashAnalysis'
+    minimization:
+      $ref: '#/MinimizationInfo'
+    exploitation:
+      $ref: '#/ExploitabilityInfo'
+    tags:
+      type: array
+      description: Classification tags for the crash
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+        maxLength: 50
+      maxItems: 30
+      example: ["heap-overflow", "critical", "asan-detected"]
+    metadata:
+      type: object
+      description: Additional crash metadata
+      additionalProperties:
+        type: string
+      maxProperties: 50
+      example:
+        asan_report: "available"
+        compiler_version: "gcc-11.3.0"
+        target_version: "2.1.0"
+
+CrashType:
+  type: string
+  enum:
+    - segfault
+    - abort
+    - assertion
+    - timeout
+    - oom
+    - stack_overflow
+    - heap_corruption
+    - use_after_free
+    - double_free
+    - buffer_overflow
+    - integer_overflow
+    - division_by_zero
+    - null_pointer
+    - sanitizer_error
+    - other
+  description: Type of crash based on signal and context
+  example: "segfault"
+
+CrashInput:
+  type: object
+  description: Input that triggered the crash
+  required:
+    - size
+    - hash
+    - stored_path
+  properties:
+    size:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Size of the crash input in bytes
+      example: 2048
+    hash:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: SHA256 hash of the input data
+      example: "f1e2d3c4b5a6978812345678901234567890abcdef1234567890abcdef123456"
+    stored_path:
+      type: string
+      maxLength: 500
+      description: Path where the crash input is stored
+      example: "/data/crashes/job_550e8400/crash_001.bin"
+    preview:
+      type: string
+      format: byte
+      maxLength: 1000
+      description: Base64-encoded preview of the input (first 512 bytes)
+      example: "R0VUIiAvIEhUVFAvMS4xDQpIb3N0Og=="
+    content_type:
+      type: string
+      maxLength: 100
+      description: MIME type of the input if detectable
+      example: "text/plain"
+    generation_info:
+      type: object
+      description: How this input was generated
+      properties:
+        parent_corpus_id:
+          type: string
+          format: uuid
+          description: Parent corpus entry ID
+        mutation_info:
+          type: object
+          description: Mutation details if applicable
+          properties:
+            mutator:
+              type: string
+            operation:
+              type: string
+            offset:
+              type: integer
+        fuzzer_cycle:
+          type: integer
+          minimum: 0
+          description: Fuzzer cycle when this was generated
+
+StackTrace:
+  type: object
+  description: Stack trace information from the crash
+  required:
+    - frames
+    - hash
+  properties:
+    frames:
+      type: array
+      description: Stack frames from the crash
+      items:
+        $ref: '#/StackFrame'
+      maxItems: 1000
+    hash:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: Hash of the stack trace for deduplication
+      example: "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
+    symbolicated:
+      type: boolean
+      description: Whether stack trace has been symbolicated
+      example: true
+    raw_output:
+      type: string
+      maxLength: 10000
+      description: Raw stack trace output from debugger
+      example: "#0  0x00007f8b8c0a1234 in vulnerable_function (input=0x...) at parser.c:42"
+    crash_pc:
+      type: string
+      pattern: '^0x[a-f0-9]+$'
+      description: Program counter at crash
+      example: "0x00007f8b8c0a1234"
+    crash_address:
+      type: string
+      pattern: '^0x[a-f0-9]+$'
+      nullable: true
+      description: Memory address that caused the crash
+      example: "0x0000000000000000"
+
+StackFrame:
+  type: object
+  description: Single frame in a stack trace
+  required:
+    - frame_number
+    - address
+  properties:
+    frame_number:
+      type: integer
+      minimum: 0
+      description: Frame number in the stack (0 = top)
+      example: 0
+    address:
+      type: string
+      pattern: '^0x[a-f0-9]+$'
+      description: Memory address of the frame
+      example: "0x00007f8b8c0a1234"
+    function_name:
+      type: string
+      maxLength: 200
+      nullable: true
+      description: Function name if available
+      example: "vulnerable_function"
+    file_name:
+      type: string
+      maxLength: 500
+      nullable: true
+      description: Source file name if available
+      example: "parser.c"
+    line_number:
+      type: integer
+      minimum: 1
+      nullable: true
+      description: Line number in source file
+      example: 42
+    column_number:
+      type: integer
+      minimum: 1
+      nullable: true
+      description: Column number in source file
+      example: 15
+    module_name:
+      type: string
+      maxLength: 200
+      nullable: true
+      description: Module or library name
+      example: "libparser.so.1"
+    module_offset:
+      type: string
+      pattern: '^0x[a-f0-9]+$'
+      nullable: true
+      description: Offset within the module
+      example: "0x1234"
+
+CrashSignature:
+  type: object
+  description: Signature for crash deduplication and classification
+  required:
+    - primary_hash
+    - function_hash
+    - location_hash
+  properties:
+    primary_hash:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: Primary hash for deduplication
+      example: "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
+    function_hash:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: Hash based on top function names
+      example: "b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567a"
+    location_hash:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: Hash based on crash location
+      example: "c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567ab2"
+    top_function:
+      type: string
+      maxLength: 200
+      nullable: true
+      description: Top function in stack trace
+      example: "vulnerable_function"
+    crash_location:
+      type: string
+      maxLength: 500
+      nullable: true
+      description: Primary crash location
+      example: "parser.c:42"
+    signature_version:
+      type: integer
+      minimum: 1
+      description: Version of signature algorithm used
+      example: 2
+
+ReproducibilityInfo:
+  type: object
+  description: Information about crash reproducibility
+  required:
+    - is_reproducible
+    - confidence_score
+    - attempts_made
+    - successful_attempts
+  properties:
+    is_reproducible:
+      type: boolean
+      description: Whether the crash is consistently reproducible
+      example: true
+    confidence_score:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 1
+      description: Confidence in reproducibility (0-1)
+      example: 0.95
+    attempts_made:
+      type: integer
+      minimum: 0
+      description: Total reproduction attempts
+      example: 10
+    successful_attempts:
+      type: integer
+      minimum: 0
+      description: Successful reproduction attempts
+      example: 9
+    last_reproduced_at:
+      type: string
+      format: date-time
+      nullable: true
+      description: When crash was last successfully reproduced
+      example: "2023-12-01T12:15:30Z"
+    reproduction_rate:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 1
+      description: Success rate of reproduction attempts
+      example: 0.9
+    variability:
+      type: string
+      enum: [consistent, intermittent, flaky, unreproducible]
+      description: Consistency of crash reproduction
+      example: "consistent"
+    environment_dependent:
+      type: boolean
+      description: Whether reproduction depends on specific environment
+      example: false
+
+CrashSeverity:
+  type: string
+  enum:
+    - critical
+    - high
+    - medium
+    - low
+    - info
+  description: Severity level of the crash
+  example: "high"
+
+CrashAnalysis:
+  type: object
+  description: Automated analysis results for the crash
+  properties:
+    exploitability:
+      $ref: '#/ExploitabilityInfo'
+    sanitizer_reports:
+      type: array
+      description: Sanitizer reports (ASAN, MSAN, etc.)
+      items:
+        $ref: '#/SanitizerReport'
+      maxItems: 10
+    classification:
+      type: object
+      description: Automated crash classification
+      properties:
+        category:
+          type: string
+          enum: [memory_safety, logic_error, resource_exhaustion, concurrency, other]
+        subcategory:
+          type: string
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+    impact_assessment:
+      type: object
+      description: Potential impact analysis
+      properties:
+        data_corruption_risk:
+          type: string
+          enum: [none, low, medium, high, critical]
+        privilege_escalation_risk:
+          type: string
+          enum: [none, low, medium, high, critical]
+        denial_of_service_risk:
+          type: string
+          enum: [none, low, medium, high, critical]
+        information_disclosure_risk:
+          type: string
+          enum: [none, low, medium, high, critical]
+    similar_crashes:
+      type: array
+      description: References to similar crashes
+      items:
+        type: object
+        properties:
+          crash_id:
+            type: string
+            format: uuid
+          similarity_score:
+            type: number
+            format: float
+            minimum: 0
+            maximum: 1
+          similarity_type:
+            type: string
+            enum: [stack_trace, input_pattern, function_path, signal_type]
+      maxItems: 20
+
+ExploitabilityInfo:
+  type: object
+  description: Analysis of crash exploitability potential
+  properties:
+    score:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 10
+      description: Exploitability score (0-10, higher = more exploitable)
+      example: 7.5
+    classification:
+      type: string
+      enum: [unexploitable, unlikely, possible, probable, exploitable]
+      description: Exploitability classification
+      example: "probable"
+    factors:
+      type: array
+      description: Factors affecting exploitability
+      items:
+        type: object
+        properties:
+          factor:
+            type: string
+            enum: [controlled_write, controlled_jump, heap_corruption, stack_corruption, format_string, integer_overflow]
+          present:
+            type: boolean
+          confidence:
+            type: number
+            format: float
+            minimum: 0
+            maximum: 1
+      maxItems: 20
+    mitigations:
+      type: array
+      description: Security mitigations in effect
+      items:
+        type: string
+        enum: [aslr, dep, stack_canary, fortify_source, pie, relro, sanitizers]
+      uniqueItems: true
+    analysis_version:
+      type: string
+      description: Version of exploitability analysis
+      example: "1.2.0"
+
+MinimizationInfo:
+  type: object
+  description: Information about crash input minimization
+  properties:
+    minimized:
+      type: boolean
+      description: Whether the crash input has been minimized
+      example: true
+    original_size:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Original input size in bytes
+      example: 8192
+    minimized_size:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Minimized input size in bytes
+      example: 512
+    reduction_ratio:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 1
+      description: Size reduction ratio (0-1)
+      example: 0.9375
+    minimization_time:
+      $ref: 'common.yaml#/Duration'
+      description: Time taken for minimization
+      example: "2m30s"
+    minimizer_used:
+      type: string
+      maxLength: 50
+      description: Tool used for minimization
+      example: "afl-tmin"
+    minimized_input_path:
+      type: string
+      maxLength: 500
+      description: Path to minimized input file
+      example: "/data/crashes/job_550e8400/crash_001_min.bin"
+    minimization_attempts:
+      type: integer
+      minimum: 0
+      description: Number of minimization attempts made
+      example: 150
+    successful_reductions:
+      type: integer
+      minimum: 0
+      description: Number of successful size reductions
+      example: 25
+
+SanitizerReport:
+  type: object
+  description: Report from a memory safety sanitizer
+  required:
+    - sanitizer_type
+    - report_text
+    - severity
+  properties:
+    sanitizer_type:
+      type: string
+      enum: [asan, msan, tsan, ubsan, cfi, safestack]
+      description: Type of sanitizer that generated the report
+      example: "asan"
+    severity:
+      type: string
+      enum: [error, warning, note]
+      description: Severity of the sanitizer finding
+      example: "error"
+    report_text:
+      type: string
+      maxLength: 5000
+      description: Full sanitizer report text
+      example: "ERROR: AddressSanitizer: heap-buffer-overflow on address 0x..."
+    error_type:
+      type: string
+      maxLength: 100
+      description: Specific error type from sanitizer
+      example: "heap-buffer-overflow"
+    memory_address:
+      type: string
+      pattern: '^0x[a-f0-9]+$'
+      nullable: true
+      description: Memory address involved in the error
+      example: "0x7f8b8c0a1234"
+    allocation_info:
+      type: object
+      description: Information about memory allocation
+      properties:
+        allocation_site:
+          type: string
+          maxLength: 500
+        allocation_thread:
+          type: string
+        allocation_size:
+          type: integer
+          format: int64
+        allocation_stack:
+          type: array
+          items:
+            type: string
+          maxItems: 50
+
+CrashRequest:
+  type: object
+  description: Request to create a crash record
+  required:
+    - job_id
+    - bot_id
+    - crash_type
+    - signal
+    - input_data
+  properties:
+    job_id:
+      type: string
+      format: uuid
+      description: Job that discovered the crash
+      example: "550e8400-e29b-41d4-a716-446655440001"
+    bot_id:
+      type: string
+      format: uuid
+      description: Bot that found the crash
+      example: "550e8400-e29b-41d4-a716-446655440000"
+    crash_type:
+      $ref: '#/CrashType'
+    signal:
+      type: integer
+      minimum: 1
+      maximum: 64
+      description: Signal that caused the crash
+      example: 11
+    exit_code:
+      type: integer
+      minimum: -128
+      maximum: 255
+      description: Process exit code
+      example: -11
+    execution_time_us:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Execution time until crash
+      example: 5000000
+    input_data:
+      type: string
+      format: byte
+      maxLength: 10485760
+      description: Base64-encoded crash input (max 10MB)
+      example: "R0VUIiAvIEhUVFAvMS4xDQpIb3N0Og=="
+    stack_trace_raw:
+      type: string
+      maxLength: 10000
+      description: Raw stack trace output
+      example: "#0  0x00007f8b8c0a1234 in vulnerable_function..."
+    sanitizer_output:
+      type: string
+      maxLength: 5000
+      description: Output from sanitizers if available
+      example: "ERROR: AddressSanitizer: heap-buffer-overflow..."
+    environment_info:
+      type: object
+      description: Environment information
+      additionalProperties:
+        type: string
+      maxProperties: 20
+    tags:
+      type: array
+      description: Initial classification tags
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+        maxLength: 50
+      maxItems: 20
+    metadata:
+      type: object
+      description: Additional crash metadata
+      additionalProperties:
+        type: string
+      maxProperties: 30
+
+CrashListResponse:
+  type: object
+  description: Paginated list of crashes
+  required:
+    - crashes
+    - pagination
+  properties:
+    crashes:
+      type: array
+      items:
+        $ref: '#/Crash'
+    pagination:
+      $ref: 'common.yaml#/Pagination'
+    filters:
+      type: object
+      description: Applied filters
+      properties:
+        crash_type:
+          type: array
+          items:
+            $ref: '#/CrashType'
+        severity:
+          type: array
+          items:
+            $ref: '#/CrashSeverity'
+        job_id:
+          type: string
+          format: uuid
+        campaign_id:
+          type: string
+          format: uuid
+        unique_only:
+          type: boolean
+        reproducible_only:
+          type: boolean
+        discovered_after:
+          type: string
+          format: date-time
+        discovered_before:
+          type: string
+          format: date-time
+        tags:
+          type: array
+          items:
+            type: string
+    statistics:
+      type: object
+      description: Summary statistics
+      properties:
+        total_crashes:
+          type: integer
+        unique_crashes:
+          type: integer
+        crash_type_breakdown:
+          type: object
+          additionalProperties:
+            type: integer
+        severity_breakdown:
+          type: object
+          additionalProperties:
+            type: integer
+        exploitability_breakdown:
+          type: object
+          additionalProperties:
+            type: integer
+
+CrashSubmitResponse:
+  type: object
+  description: Response to crash submission
+  required:
+    - crash_id
+    - is_unique
+    - duplicate_of
+    - processed_at
+  properties:
+    crash_id:
+      type: string
+      format: uuid
+      description: Assigned crash identifier
+      example: "550e8400-e29b-41d4-a716-446655440040"
+    is_unique:
+      type: boolean
+      description: Whether this crash is unique
+      example: true
+    duplicate_of:
+      type: string
+      format: uuid
+      nullable: true
+      description: Original crash ID if duplicate
+      example: null
+    duplicate_count:
+      type: integer
+      minimum: 1
+      description: Total count including this occurrence
+      example: 1
+    processed_at:
+      type: string
+      format: date-time
+      description: When the crash was processed
+      example: "2023-12-01T11:30:30Z"
+    analysis_scheduled:
+      type: boolean
+      description: Whether detailed analysis was scheduled
+      example: true
+    minimization_scheduled:
+      type: boolean
+      description: Whether input minimization was scheduled
+      example: true
+    warnings:
+      type: array
+      description: Processing warnings
+      items:
+        type: string
+        maxLength: 500
+      maxItems: 10
+
+CrashAnalysisRequest:
+  type: object
+  description: Request for crash analysis
+  required:
+    - crash_id
+    - analysis_type
+  properties:
+    crash_id:
+      type: string
+      format: uuid
+      description: Crash to analyze
+      example: "550e8400-e29b-41d4-a716-446655440040"
+    analysis_type:
+      type: array
+      description: Types of analysis to perform
+      items:
+        type: string
+        enum: [exploitability, deduplication, minimization, symbolication, classification]
+      minItems: 1
+      uniqueItems: true
+      example: ["exploitability", "minimization"]
+    priority:
+      type: integer
+      minimum: 1
+      maximum: 10
+      default: 5
+      description: Analysis priority
+    options:
+      type: object
+      description: Analysis-specific options
+      properties:
+        timeout:
+          $ref: 'common.yaml#/Duration'
+        resource_limits:
+          $ref: 'common.yaml#/ResourceLimits'
+        force_reanalysis:
+          type: boolean
+          default: false
+
+CrashActionRequest:
+  type: object
+  description: Request to perform action on crash
+  required:
+    - action
+  properties:
+    action:
+      type: string
+      enum: [analyze, minimize, symbolicate, reproduce, promote_to_corpus, mark_exploitable, archive]
+      description: Action to perform
+      example: "minimize"
+    priority:
+      type: integer
+      minimum: 1
+      maximum: 10
+      default: 5
+      description: Action priority
+    options:
+      type: object
+      description: Action-specific options
+      additionalProperties: true
+    reason:
+      type: string
+      maxLength: 500
+      description: Reason for the action
+      example: "High-priority security issue requiring immediate analysis"

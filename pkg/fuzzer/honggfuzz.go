@@ -209,6 +209,38 @@ func (hf *Honggfuzz) Initialize() error {
 		}
 	}
 
+	// Copy seed files if seed directory is provided
+	if hf.config.SeedDirectory != "" {
+		seedFiles, err := os.ReadDir(hf.config.SeedDirectory)
+		if err == nil {
+			for _, file := range seedFiles {
+				if !file.IsDir() {
+					srcPath := filepath.Join(hf.config.SeedDirectory, file.Name())
+					dstPath := filepath.Join(hf.corpusDir, file.Name())
+					if data, err := os.ReadFile(srcPath); err == nil {
+						if err := os.WriteFile(dstPath, data, 0644); err == nil {
+							hf.logger.WithField("file", file.Name()).Debug("Copied seed file to corpus")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Ensure corpus directory has at least one seed file for honggfuzz
+	// Honggfuzz requires an input directory with at least one file to start
+	corpusFiles, err := os.ReadDir(hf.corpusDir)
+	if err != nil || len(corpusFiles) == 0 {
+		hf.logger.Info("Creating initial seed file for Honggfuzz corpus")
+		// Create a minimal seed file
+		seedFile := filepath.Join(hf.corpusDir, "seed_0")
+		if err := os.WriteFile(seedFile, []byte("test"), 0644); err != nil {
+			hf.logger.WithError(err).Warn("Failed to create seed file")
+		} else {
+			hf.logger.WithField("file", seedFile).Debug("Created initial seed file")
+		}
+	}
+
 	// Check for Honggfuzz installation
 	if _, err := exec.LookPath("honggfuzz"); err != nil {
 		return &FuzzerError{
@@ -292,6 +324,28 @@ func (hf *Honggfuzz) Start(ctx context.Context) error {
 	hf.status = StatusStarting
 	hf.ctx, hf.cancel = context.WithCancel(ctx)
 
+	// Check if target binary exists and is executable
+	if _, err := os.Stat(hf.config.Target); err != nil {
+		hf.status = StatusError
+		return &FuzzerError{
+			Type:    ErrTargetNotFound,
+			Message: fmt.Sprintf("target binary not found or not accessible: %s - %v", hf.config.Target, err),
+			Fuzzer:  hf.Name(),
+			Code:    14,
+		}
+	}
+
+	// Check if target is executable
+	if info, err := os.Stat(hf.config.Target); err == nil {
+		mode := info.Mode()
+		if !mode.IsRegular() || mode.Perm()&0111 == 0 {
+			hf.logger.WithFields(logrus.Fields{
+				"target": hf.config.Target,
+				"mode":   mode.String(),
+			}).Warn("Target binary may not be executable")
+		}
+	}
+
 	// Build Honggfuzz command
 	args := hf.buildHonggfuzzArgs()
 
@@ -302,8 +356,30 @@ func (hf *Honggfuzz) Start(ctx context.Context) error {
 		"workdir": hf.outputDir,
 	}).Info("Starting HongFuzz with command")
 
-	hf.cmd = exec.CommandContext(hf.ctx, "honggfuzz", args...)
+	// Check if honggfuzz binary exists first
+	honggfuzzPath, err := exec.LookPath("honggfuzz")
+	if err != nil {
+		hf.status = StatusError
+		return &FuzzerError{
+			Type:    ErrTargetNotFound,
+			Message: fmt.Sprintf("honggfuzz binary not found in PATH: %v", err),
+			Fuzzer:  hf.Name(),
+			Code:    13,
+		}
+	}
+
+	hf.logger.WithFields(logrus.Fields{
+		"binary_path": honggfuzzPath,
+		"args_count":  len(args),
+		"workdir":     hf.outputDir,
+	}).Info("Found honggfuzz binary")
+
+	hf.cmd = exec.CommandContext(hf.ctx, honggfuzzPath, args...)
 	hf.cmd.Dir = hf.outputDir
+	// Set process group to enable killing all child processes
+	hf.cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
 
 	// Set environment variables for network fuzzing if configured
 	if hongFuzzConfig, ok := hf.config.FuzzerOptions["honggfuzz_config"].(*HongFuzzConfig); ok {
@@ -354,6 +430,14 @@ func (hf *Honggfuzz) Start(ctx context.Context) error {
 		}
 	}
 
+	// Log the process PID for tracking
+	hf.logger.WithFields(logrus.Fields{
+		"pid":     hf.cmd.Process.Pid,
+		"command": "honggfuzz",
+		"args":    args,
+		"workdir": hf.outputDir,
+	}).Info("Honggfuzz process started")
+
 	hf.status = StatusRunning
 	hf.stats.StartTime = time.Now()
 
@@ -363,6 +447,7 @@ func (hf *Honggfuzz) Start(ctx context.Context) error {
 		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Starting HongFuzz\n", timestamp, "info", "fuzzer")
 		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Command: honggfuzz %s\n", timestamp, "info", "fuzzer", strings.Join(args, " "))
 		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Working directory: %s\n", timestamp, "info", "fuzzer", hf.outputDir)
+		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Process PID: %d\n", timestamp, "info", "fuzzer", hf.cmd.Process.Pid)
 	}
 
 	// Set environment to ensure output is not buffered
@@ -407,7 +492,26 @@ func (hf *Honggfuzz) Start(ctx context.Context) error {
 	hf.wg.Add(1)
 	go hf.monitorProcess()
 
-	hf.logger.WithField("pid", hf.cmd.Process.Pid).Info("Honggfuzz started")
+	// Immediately check if process is still alive
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		if hf.cmd.Process != nil {
+			// Check if process is still running
+			err := hf.cmd.Process.Signal(syscall.Signal(0))
+			if err != nil {
+				hf.logger.WithError(err).Error("Honggfuzz process died immediately after starting")
+				// Try to capture any early exit output
+				if hf.config.OutputWriter != nil {
+					timestamp := time.Now().Format("15:04:05")
+					fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Honggfuzz process died immediately: %v\n", timestamp, "error", "fuzzer", err)
+				}
+			} else {
+				hf.logger.WithField("pid", hf.cmd.Process.Pid).Debug("Honggfuzz process is still running after 500ms")
+			}
+		}
+	}()
+
+	hf.logger.WithField("pid", hf.cmd.Process.Pid).Info("Honggfuzz monitoring started")
 
 	return nil
 }
@@ -725,7 +829,7 @@ func (hf *Honggfuzz) GetCrashes() ([]*common.CrashResult, error) {
 
 					crash := &common.CrashResult{
 						ID:          file.Name(),
-						JobID:       hf.config.Target,
+						JobID:       hf.config.JobID, // Use actual job ID from config
 						BotID:       hf.botID,
 						Timestamp:   info.ModTime(),
 						FilePath:    crashPath,
@@ -734,6 +838,7 @@ func (hf *Honggfuzz) GetCrashes() ([]*common.CrashResult, error) {
 						Type:        crashType,
 						Input:       crashData,
 						InputBase64: base64.StdEncoding.EncodeToString(crashData),
+						IsUnique:    true, // Mark as unique for now
 					}
 
 					hf.logger.WithFields(logrus.Fields{
@@ -799,7 +904,7 @@ func (hf *Honggfuzz) GetCrashes() ([]*common.CrashResult, error) {
 				if !duplicate {
 					crash := &common.CrashResult{
 						ID:          file.Name(),
-						JobID:       hf.config.Target,
+						JobID:       hf.config.JobID, // Use actual job ID from config
 						BotID:       hf.botID,
 						Timestamp:   info.ModTime(),
 						FilePath:    crashPath,
@@ -808,6 +913,7 @@ func (hf *Honggfuzz) GetCrashes() ([]*common.CrashResult, error) {
 						Type:        crashType,
 						Input:       crashData,
 						InputBase64: base64.StdEncoding.EncodeToString(crashData),
+						IsUnique:    true, // Mark as unique for now
 					}
 
 					hf.logger.WithFields(logrus.Fields{
@@ -947,10 +1053,13 @@ func (hf *Honggfuzz) validateConfig(config FuzzConfig) error {
 func (hf *Honggfuzz) buildHonggfuzzArgs() []string {
 	args := []string{}
 
-	// Input directory
-	if hf.config.SeedDirectory != "" {
-		args = append(args, "--input", hf.config.SeedDirectory)
+	// Input directory - ALWAYS required for honggfuzz
+	// Use seed directory if provided, otherwise use corpus directory
+	inputDir := hf.config.SeedDirectory
+	if inputDir == "" {
+		inputDir = hf.corpusDir
 	}
+	args = append(args, "--input", inputDir)
 
 	// Output/crash directory
 	args = append(args, "--output", hf.crashDir)
@@ -964,12 +1073,25 @@ func (hf *Honggfuzz) buildHonggfuzzArgs() []string {
 	// Memory limit
 	args = append(args, "--rlimit_rss", fmt.Sprintf("%d", hf.config.MemoryLimit))
 
-	// Timeout
+	// Timeout (per-test timeout)
 	timeoutSec := int(hf.config.Timeout.Seconds())
 	if timeoutSec < 1 {
 		timeoutSec = 1
 	}
 	args = append(args, "--timeout", strconv.Itoa(timeoutSec))
+
+	// Total runtime duration (-T flag)
+	if hf.config.Duration > 0 {
+		// Convert duration to seconds for honggfuzz
+		runtimeSec := int(hf.config.Duration.Seconds())
+		if runtimeSec > 0 {
+			args = append(args, "-T", strconv.Itoa(runtimeSec))
+			hf.logger.WithFields(logrus.Fields{
+				"runtime_seconds": runtimeSec,
+				"duration":        hf.config.Duration,
+			}).Debug("Setting honggfuzz runtime duration")
+		}
+	}
 
 	// Dictionary
 	if hf.config.Dictionary != "" {
@@ -1077,6 +1199,13 @@ func (hf *Honggfuzz) buildHonggfuzzArgs() []string {
 func (hf *Honggfuzz) monitorOutput(pipe io.Reader, name string) {
 	defer hf.wg.Done()
 
+	// Add recover to handle pipe closure gracefully
+	defer func() {
+		if r := recover(); r != nil {
+			hf.logger.WithField("panic", r).Warn("Recovered from panic in monitorOutput")
+		}
+	}()
+
 	// Write that we started monitoring
 	if hf.config.OutputWriter != nil {
 		timestamp := time.Now().Format("15:04:05")
@@ -1130,10 +1259,15 @@ func (hf *Honggfuzz) monitorOutput(pipe io.Reader, name string) {
 
 	// Check for scanner errors
 	if err := scanner.Err(); err != nil {
-		hf.logger.WithError(err).WithField("stream", name).Error("Scanner error in monitorOutput")
-		if hf.config.OutputWriter != nil {
-			timestamp := time.Now().Format("15:04:05")
-			fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Scanner error on %s: %v\n", timestamp, "error", "fuzzer", name, err)
+		// Only log as error if not due to context cancellation or file closure
+		if hf.ctx.Err() == nil && !strings.Contains(err.Error(), "file already closed") && !strings.Contains(err.Error(), "bad file descriptor") {
+			hf.logger.WithError(err).WithField("stream", name).Error("Scanner error in monitorOutput")
+			if hf.config.OutputWriter != nil {
+				timestamp := time.Now().Format("15:04:05")
+				fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Scanner error on %s: %v\n", timestamp, "error", "fuzzer", name, err)
+			}
+		} else {
+			hf.logger.WithField("stream", name).Debug("Scanner stopped due to pipe closure or context cancellation")
 		}
 	}
 
@@ -1222,33 +1356,92 @@ func (hf *Honggfuzz) parseOutputStats(line string) {
 func (hf *Honggfuzz) monitorProcess() {
 	defer hf.wg.Done()
 
+	// Get process PID for logging
+	pid := -1
+	if hf.cmd.Process != nil {
+		pid = hf.cmd.Process.Pid
+	}
+
+	hf.logger.WithField("pid", pid).Info("Starting to monitor Honggfuzz process")
+
 	// Log process start
 	if hf.config.OutputWriter != nil {
 		timestamp := time.Now().Format("15:04:05")
-		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Monitoring HongFuzz process\n", timestamp, "info", "fuzzer")
+		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Monitoring HongFuzz process (PID: %d)\n", timestamp, "info", "fuzzer", pid)
 	}
 
-	// Wait for process to exit
-	err := hf.cmd.Wait()
+	// Create a channel to signal when process exits
+	processDone := make(chan error, 1)
+	go func() {
+		// Wait for process to exit
+		err := hf.cmd.Wait()
+		processDone <- err
+	}()
 
-	// Log process exit
-	if hf.config.OutputWriter != nil {
-		timestamp := time.Now().Format("15:04:05")
-		fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] HongFuzz process exited\n", timestamp, "info", "fuzzer")
-		if err != nil {
-			fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Exit error: %v\n", timestamp, "error", "fuzzer", err)
+	// Monitor with timeout to prevent hanging on zombies
+	var processErr error
+	select {
+	case err := <-processDone:
+		processErr = err
+
+		// Get exit code if available
+		exitCode := -1
+		if exitError, ok := err.(*exec.ExitError); ok {
+			if status, ok := exitError.Sys().(syscall.WaitStatus); ok {
+				exitCode = status.ExitStatus()
+			}
+		}
+
+		hf.logger.WithFields(logrus.Fields{
+			"pid":       pid,
+			"error":     err,
+			"exit_code": exitCode,
+		}).Error("Honggfuzz process exited")
+
+		// Process exited
+		if hf.config.OutputWriter != nil {
+			timestamp := time.Now().Format("15:04:05")
+			fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] HongFuzz process exited (PID: %d, exit_code: %d)\n", timestamp, "error", "fuzzer", pid, exitCode)
+			if err != nil {
+				fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] Exit error: %v\n", timestamp, "error", "fuzzer", err)
+			}
+		}
+	case <-hf.ctx.Done():
+		// Context cancelled, force cleanup
+		if hf.cmd.Process != nil {
+			// Try to kill the process group to ensure all children are cleaned up
+			if err := syscall.Kill(-hf.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+				hf.logger.WithError(err).Debug("Failed to kill process group")
+			}
+			// Also kill the process directly
+			hf.cmd.Process.Kill()
+		}
+		// Wait briefly for cleanup
+		select {
+		case err := <-processDone:
+			processErr = err
+			// Process cleaned up
+		case <-time.After(2 * time.Second):
+			// Force reap the zombie
+			if hf.cmd.Process != nil {
+				hf.cmd.Process.Release()
+			}
+		}
+		if hf.config.OutputWriter != nil {
+			timestamp := time.Now().Format("15:04:05")
+			fmt.Fprintf(hf.config.OutputWriter, "[%s] [%s] [%s] HongFuzz process force cleaned\n", timestamp, "info", "fuzzer")
 		}
 	}
 
 	hf.mu.Lock()
 	defer hf.mu.Unlock()
 
-	if err != nil {
+	if processErr != nil {
 		exitCode := -1
 		if hf.cmd.ProcessState != nil {
 			exitCode = hf.cmd.ProcessState.ExitCode()
 		}
-		hf.logger.WithError(err).WithFields(logrus.Fields{
+		hf.logger.WithError(processErr).WithFields(logrus.Fields{
 			"exit_code": exitCode,
 			"pid":       hf.cmd.Process.Pid,
 		}).Warn("Honggfuzz process exited with error")
@@ -1261,10 +1454,10 @@ func (hf *Honggfuzz) monitorProcess() {
 
 		hf.status = StatusError
 		if hf.eventHandler != nil {
-			hf.eventHandler.OnError(hf, err)
+			hf.eventHandler.OnError(hf, processErr)
 		}
 		// Emit error event through base fuzzer
-		hf.EmitErrorEvent(hf.ctx, hf.config.Target, err)
+		hf.EmitErrorEvent(hf.ctx, hf.config.Target, processErr)
 	} else {
 		exitCode := 0
 		if hf.cmd.ProcessState != nil {

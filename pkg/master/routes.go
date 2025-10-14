@@ -7,9 +7,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/infrastructure/persistence/sqlite"
 	apiv3 "github.com/ethpandaops/pandafuzz/pkg/master/api_v3"
 	"github.com/ethpandaops/pandafuzz/pkg/master/repository"
@@ -18,6 +21,72 @@ import (
 
 // setupRouter configures the HTTP router with all routes and middleware
 func (s *Server) setupRouter() error {
+	// Create Chi router if API v1 is initialized, otherwise use Gorilla mux
+	if s.apiV1 != nil {
+		s.setupChiRouter()
+	} else {
+		s.setupMuxRouter()
+	}
+
+	s.logger.Info("HTTP router configured with all routes")
+	return nil
+}
+
+// setupChiRouter configures the Chi router with API v1 integration
+func (s *Server) setupChiRouter() error {
+	s.chiRouter = chi.NewRouter()
+
+	// Add Chi middleware
+	s.chiRouter.Use(middleware.Logger)
+	s.chiRouter.Use(middleware.Recoverer)
+
+	// Add custom middleware
+	if s.config.Server.EnableCORS {
+		s.chiRouter.Use(s.corsMiddlewareForChi())
+	}
+
+	// Add rate limiting if configured
+	if s.config.Server.RateLimitRPS > 0 {
+		s.chiRouter.Use(s.rateLimitMiddlewareForChi())
+	}
+
+	// Health and metrics endpoints (direct on Chi router)
+	s.chiRouter.Get("/health", s.handleHealth)
+	s.chiRouter.Get("/status", s.handleStatus)
+
+	// Prometheus metrics endpoint
+	if s.config.Monitoring.Enabled {
+		s.chiRouter.Handle("/metrics", promhttp.Handler())
+	} else {
+		s.chiRouter.Get("/metrics", s.handleMetrics)
+	}
+
+	// Mount API v1 routes
+	if s.apiV1 != nil {
+		s.chiRouter.Mount("/api/v1", s.apiV1.GetRouter())
+		s.logger.Info("API v1 routes mounted on Chi router")
+	}
+
+	// API v2 routes (backwards compatibility) - mount as subrouter
+	s.chiRouter.Route("/api/v2", func(r chi.Router) {
+		// Convert mux routes to chi - for now, we'll create a basic fallback
+		s.logger.Info("API v2 routes will be handled through backwards compatibility")
+		// TODO: Implement v2 route conversion or keep them on separate mux
+	})
+
+	// API v3 routes (if they exist)
+	s.chiRouter.Route("/api/v3", func(r chi.Router) {
+		s.setupAPIv3RoutesOnChi(r)
+	})
+
+	// Serve static files for web UI
+	s.setupStaticFileServingOnChi()
+
+	return nil
+}
+
+// setupMuxRouter configures the Gorilla mux router (fallback)
+func (s *Server) setupMuxRouter() error {
 	s.router = mux.NewRouter()
 
 	// Add standard middleware
@@ -84,7 +153,6 @@ func (s *Server) setupRouter() error {
 	// Serve static files for web UI
 	s.setupStaticFileServing()
 
-	s.logger.Info("HTTP router configured with all routes")
 	return nil
 }
 
@@ -140,8 +208,15 @@ func (s *Server) setupAPIv3Routes() {
 	config.EnableBackwardsCompatibility = false // We have separate v2 routes
 	config.EnableDeprecationWarnings = false
 
+	// Create version info
+	versionInfo := &common.VersionInfo{
+		Version:   s.version,
+		BuildTime: s.buildTime,
+		GitCommit: s.gitCommit,
+	}
+
 	// Create integration
-	integration := apiv3.NewIntegration(s.services, coverageRepo, s.storageBackend, s.state.db, s.logger, config)
+	integration := apiv3.NewIntegration(s.services, coverageRepo, s.storageBackend, s.state.db, s.logger, config, versionInfo)
 
 	// Register routes
 	integration.RegisterRoutes(s.router)
@@ -180,6 +255,7 @@ func (s *Server) setupAPIRoutes(router *mux.Router) {
 	router.HandleFunc("/jobs/available-corpora", s.handleListAvailableCorpora).Methods("GET")
 	router.HandleFunc("/jobs/{id}", s.handleJobGet).Methods("GET")
 	router.HandleFunc("/jobs/{id}/cancel", s.handleJobCancel).Methods("PUT")
+	router.HandleFunc("/jobs/{id}/status", s.handleJobStatusUpdate).Methods("PUT")
 	router.HandleFunc("/jobs/{id}/coverage", s.handleGetCoverageReport).Methods("GET")
 	router.HandleFunc("/jobs/{id}/coverage/raw", s.handleGetRawCoverageFiles).Methods("GET")
 	router.HandleFunc("/jobs/{id}/coverage/raw/{fileType}", s.handleDownloadRawCoverageFile).Methods("GET")
@@ -365,4 +441,139 @@ func (h *spaFileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Serve the requested file
 	h.fileServer.ServeHTTP(w, r)
+}
+
+// corsMiddlewareForChi returns CORS middleware for Chi router
+func (s *Server) corsMiddlewareForChi() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-CSRF-Token")
+
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// rateLimitMiddlewareForChi returns rate limiting middleware for Chi router
+func (s *Server) rateLimitMiddlewareForChi() func(http.Handler) http.Handler {
+	// For now, this is a simple implementation
+	// In production, you'd want to use a proper rate limiter
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// TODO: Implement proper rate limiting
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// setupAPIv3RoutesOnChi configures API v3 routes on Chi router
+func (s *Server) setupAPIv3RoutesOnChi(r chi.Router) {
+	s.logger.Info("Setting up API v3 routes on Chi router")
+
+	// Check that we're using SQLiteStorage
+	if _, ok := s.state.db.(*storage.SQLiteStorage); !ok {
+		s.logger.Error("Database is not SQLiteStorage, API v3 coverage features will not be available")
+		return
+	}
+
+	// Create a new SQLite connection for the coverage repository
+	dbPath := s.config.Database.Path
+	if dbPath == "" {
+		dbPath = "pandafuzz.db"
+	}
+
+	connConfig := sqlite.ConnectionConfig{
+		FilePath:              dbPath,
+		MaxOpenConnections:    10,
+		MaxIdleConnections:    10,
+		ConnectionMaxIdleTime: 5 * time.Minute,
+		ConnectionMaxLifetime: time.Hour,
+		EnableForeignKeys:     true,
+		EnableWAL:             true,
+		BusyTimeout:           5000,
+		CacheSize:             -2000,
+	}
+
+	sqliteConn, err := sqlite.NewConnection(connConfig, s.logger)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to create SQLite connection for coverage repository")
+		return
+	}
+
+	// Create coverage repository adapter for v1 table
+	coverageRepo, err := repository.NewCoverageRepositoryV1Adapter(sqliteConn, nil, s.logger)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to create coverage repository adapter")
+		return
+	}
+
+	// Create integration config
+	config := apiv3.DefaultIntegrationConfig()
+	config.EnableCORS = true
+	config.AllowedOrigins = []string{"*"}
+	config.EnableBackwardsCompatibility = false
+	config.EnableDeprecationWarnings = false
+
+	// Create version info
+	versionInfo := &common.VersionInfo{
+		Version:   s.version,
+		BuildTime: s.buildTime,
+		GitCommit: s.gitCommit,
+	}
+
+	// Create integration
+	integration := apiv3.NewIntegration(s.services, coverageRepo, s.storageBackend, s.state.db, s.logger, config, versionInfo)
+
+	// Convert the mux routes to chi routes
+	// For now, we'll create a simple handler that bridges to the existing integration
+	// Since Integration doesn't have GetRouter(), we need to register routes differently
+	// For now, skip API v3 on Chi router
+	// r.Mount("/", integration.GetHandler())
+	s.logger.Warn("API v3 routes not registered on Chi router - requires migration")
+	_ = integration // Avoid unused variable warning
+}
+
+// setupStaticFileServingOnChi configures static file serving for Chi router
+func (s *Server) setupStaticFileServingOnChi() {
+	// Check if web UI directory exists
+	webStaticDir := "./web/static"
+	if _, err := os.Stat(webStaticDir); os.IsNotExist(err) {
+		s.logger.WithField("dir", webStaticDir).Warn("Web UI static directory not found, skipping static file serving")
+		return
+	}
+
+	// Serve CSS files
+	cssDir := "./web/css"
+	if _, err := os.Stat(cssDir); err == nil {
+		cssFileServer := http.FileServer(http.Dir(cssDir))
+		s.chiRouter.Mount("/css", http.StripPrefix("/css", cssFileServer))
+	}
+
+	// Serve JS files
+	jsDir := "./web/js"
+	if _, err := os.Stat(jsDir); err == nil {
+		jsFileServer := http.FileServer(http.Dir(jsDir))
+		s.chiRouter.Mount("/js", http.StripPrefix("/js", jsFileServer))
+	}
+
+	// Create file server for static HTML files
+	fileServer := http.FileServer(http.Dir(webStaticDir))
+
+	// SPA handler - serves HTML files
+	spaHandler := &spaFileHandler{
+		staticPath: webStaticDir,
+		fileServer: fileServer,
+	}
+
+	// Serve static HTML files - catch-all for everything not matched above
+	s.chiRouter.Get("/*", spaHandler.ServeHTTP)
+
+	s.logger.WithField("dir", webStaticDir).Info("Static file serving configured for web UI on Chi router")
 }

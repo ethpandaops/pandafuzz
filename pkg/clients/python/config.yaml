@@ -1,0 +1,10 @@
+packageName: pandafuzz
+packageVersion: 1.0.0
+projectName: PandaFuzz Python Client
+clientPackage: pandafuzz
+packageUrl: https://github.com/ethpandaops/pandafuzz
+packageCompany: ethPandaOps
+packageAuthor: ethPandaOps Team
+packageEmail: support@ethpandaops.io
+generateSourceCodeOnly: false
+library: urllib3

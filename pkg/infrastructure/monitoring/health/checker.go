@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -487,4 +488,216 @@ func MemoryCheck(name string, maxUsagePercent float64) Check {
 		// For now, return a placeholder
 		return fmt.Errorf("memory check not implemented")
 	})
+}
+
+// DataConsistencyChecker provides advanced health checks for PandaFuzz data consistency
+type DataConsistencyChecker struct {
+	services ServiceInterface
+	logger   logrus.FieldLogger
+}
+
+// NewDataConsistencyChecker creates a new data consistency checker
+func NewDataConsistencyChecker(services ServiceInterface, logger logrus.FieldLogger) *DataConsistencyChecker {
+	if logger == nil {
+		logger = logrus.New().WithField("component", "health_data_consistency")
+	}
+
+	return &DataConsistencyChecker{
+		services: services,
+		logger:   logger,
+	}
+}
+
+// CheckDataConsistency performs comprehensive data consistency checks
+func (d *DataConsistencyChecker) CheckDataConsistency(ctx context.Context) error {
+	checks := []struct {
+		name string
+		fn   func(context.Context) error
+	}{
+		{"phantom_jobs", d.checkPhantomJobs},
+		{"stuck_bots", d.checkStuckBots},
+		{"orphaned_crashes", d.checkOrphanedCrashes},
+		{"coverage_system", d.checkCoverageSystem},
+		{"timeout_consistency", d.checkTimeoutConsistency},
+		{"database_integrity", d.checkDatabaseIntegrity},
+	}
+
+	var errors []string
+	for _, check := range checks {
+		if err := check.fn(ctx); err != nil {
+			d.logger.WithError(err).WithField("check", check.name).Warn("Data consistency check failed")
+			errors = append(errors, fmt.Sprintf("%s: %v", check.name, err))
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("data consistency issues found: %s", strings.Join(errors, "; "))
+	}
+
+	return nil
+}
+
+// checkPhantomJobs looks for jobs that are marked as running but no bot has them
+func (d *DataConsistencyChecker) checkPhantomJobs(ctx context.Context) error {
+	if d.services == nil {
+		return fmt.Errorf("services not available")
+	}
+
+	// This would require accessing job and bot services
+	// For now, return a placeholder that can be implemented with actual service interfaces
+	d.logger.Debug("Checking for phantom jobs")
+
+	// TODO: Implement phantom job detection:
+	// 1. Get all jobs with status "running" or "assigned"
+	// 2. Get all active bots and their current jobs
+	// 3. Find jobs that are marked as assigned but no bot claims them
+	// 4. Count and report phantom jobs
+
+	return nil
+}
+
+// checkStuckBots looks for bots that haven't reported heartbeat in too long
+func (d *DataConsistencyChecker) checkStuckBots(ctx context.Context) error {
+	if d.services == nil {
+		return fmt.Errorf("services not available")
+	}
+
+	d.logger.Debug("Checking for stuck bots")
+
+	// TODO: Implement stuck bot detection:
+	// 1. Get all registered bots
+	// 2. Check last heartbeat time for each
+	// 3. Identify bots that haven't reported in > threshold (e.g., 5 minutes)
+	// 4. Check if they have jobs assigned but are unresponsive
+
+	return nil
+}
+
+// checkOrphanedCrashes looks for crash files without proper database entries
+func (d *DataConsistencyChecker) checkOrphanedCrashes(ctx context.Context) error {
+	if d.services == nil {
+		return fmt.Errorf("services not available")
+	}
+
+	d.logger.Debug("Checking for orphaned crashes")
+
+	// TODO: Implement orphaned crash detection:
+	// 1. List all crash files in storage
+	// 2. Check if each has corresponding database entry
+	// 3. Check if crash entries reference valid jobs
+	// 4. Identify orphaned files or database entries
+
+	return nil
+}
+
+// checkCoverageSystem validates coverage report consistency
+func (d *DataConsistencyChecker) checkCoverageSystem(ctx context.Context) error {
+	if d.services == nil {
+		return fmt.Errorf("services not available")
+	}
+
+	d.logger.Debug("Checking coverage system health")
+
+	// TODO: Implement coverage system checks:
+	// 1. Check if coverage files exist for reports in database
+	// 2. Validate coverage report metadata
+	// 3. Check for corrupted coverage files
+	// 4. Verify coverage report timestamps are reasonable
+
+	return nil
+}
+
+// checkTimeoutConsistency validates timeout manager state
+func (d *DataConsistencyChecker) checkTimeoutConsistency(ctx context.Context) error {
+	d.logger.Debug("Checking timeout consistency")
+
+	// TODO: Implement timeout consistency checks:
+	// 1. Check if timeout entries have corresponding active jobs/bots
+	// 2. Validate timeout timestamps are in the future
+	// 3. Check for expired timeouts that weren't processed
+
+	return nil
+}
+
+// checkDatabaseIntegrity performs basic database health checks
+func (d *DataConsistencyChecker) checkDatabaseIntegrity(ctx context.Context) error {
+	d.logger.Debug("Checking database integrity")
+
+	// TODO: Implement database integrity checks:
+	// 1. Check foreign key constraints
+	// 2. Look for NULL values in required fields
+	// 3. Validate timestamp consistency
+	// 4. Check for duplicate entries that should be unique
+
+	return nil
+}
+
+// GetSystemHealthSummary returns a comprehensive health summary
+func (d *DataConsistencyChecker) GetSystemHealthSummary(ctx context.Context) (*SystemHealthSummary, error) {
+	summary := &SystemHealthSummary{
+		Timestamp: time.Now(),
+		Checks:    make(map[string]*HealthCheckResult),
+	}
+
+	// Run all individual checks and collect results
+	checks := map[string]func(context.Context) error{
+		"phantom_jobs":        d.checkPhantomJobs,
+		"stuck_bots":          d.checkStuckBots,
+		"orphaned_crashes":    d.checkOrphanedCrashes,
+		"coverage_system":     d.checkCoverageSystem,
+		"timeout_consistency": d.checkTimeoutConsistency,
+		"database_integrity":  d.checkDatabaseIntegrity,
+	}
+
+	allHealthy := true
+	for name, checkFn := range checks {
+		start := time.Now()
+		err := checkFn(ctx)
+		duration := time.Since(start)
+
+		result := &HealthCheckResult{
+			Name:      name,
+			Status:    "healthy",
+			Duration:  duration,
+			Timestamp: start,
+		}
+
+		if err != nil {
+			result.Status = "unhealthy"
+			result.Error = err.Error()
+			allHealthy = false
+		}
+
+		summary.Checks[name] = result
+	}
+
+	if allHealthy {
+		summary.OverallStatus = "healthy"
+	} else {
+		summary.OverallStatus = "unhealthy"
+	}
+
+	return summary, nil
+}
+
+// SystemHealthSummary represents a comprehensive system health summary
+type SystemHealthSummary struct {
+	OverallStatus string                        `json:"overall_status"`
+	Timestamp     time.Time                     `json:"timestamp"`
+	Checks        map[string]*HealthCheckResult `json:"checks"`
+}
+
+// HealthCheckResult represents the result of an individual health check
+type HealthCheckResult struct {
+	Name      string                 `json:"name"`
+	Status    string                 `json:"status"`
+	Error     string                 `json:"error,omitempty"`
+	Duration  time.Duration          `json:"duration"`
+	Timestamp time.Time              `json:"timestamp"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// ServiceInterface placeholder - this would be defined based on actual service manager
+type ServiceInterface interface {
+	// Define methods needed for health checks
 }

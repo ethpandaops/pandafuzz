@@ -95,23 +95,6 @@ func parseCampaignFilters(r *http.Request) *common.CampaignFilters {
 }
 
 // parseCrashFilters parses crash filters from request
-func parseCrashFilters(r *http.Request) *service.CrashFilter {
-	filters := &service.CrashFilter{}
-
-	if campaignID := r.URL.Query().Get("campaignId"); campaignID != "" {
-		filters.CampaignID = campaignID
-	}
-
-	if jobID := r.URL.Query().Get("jobId"); jobID != "" {
-		filters.JobID = jobID
-	}
-
-	if unique := r.URL.Query().Get("unique"); unique == "true" {
-		filters.UniqueOnly = true
-	}
-
-	return filters
-}
 
 // Bot filtering and pagination
 

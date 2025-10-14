@@ -146,6 +146,15 @@ func (s *jobService) CreateJob(ctx context.Context, req CreateJobRequest) (*comm
 		CoverageFormat:    req.CoverageFormat,
 	}
 
+	// Debug log to verify coverage settings
+	s.logger.WithFields(logrus.Fields{
+		"job_id":              jobID,
+		"enable_coverage":     req.EnableCoverage,
+		"coverage_format":     req.CoverageFormat,
+		"job_enable_coverage": job.EnableCoverage,
+		"job_coverage_format": job.CoverageFormat,
+	}).Info("DEBUG: Creating job with coverage settings")
+
 	// Save job with context
 	if err := s.state.SaveJobWithRetry(job); err != nil {
 		return nil, errors.Wrap(errors.ErrorTypeDatabase, "create_job", "Failed to save job", err)

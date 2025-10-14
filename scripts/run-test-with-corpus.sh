@@ -7,7 +7,7 @@ set -e
 
 # Get script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-
+export AFL_PATH=/usr/local/lib/afl
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -143,7 +143,7 @@ EOF
         TEST_BINARY="$TEMP_BUILD_DIR/afl_test"
         echo -e "${GREEN}✓ Created AFL++ test binary: ${TEST_BINARY}${NC}"
 
-    else
+    elif [[ "$FUZZER_TYPE" == "libfuzzer" ]]; then
         # Create a LibFuzzer test program based on LLVM documentation
         cat > libfuzzer_test.cpp << 'EOF'
 #include <stdint.h>
@@ -158,31 +158,38 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
     // Handle empty input
     if (Size == 0) return 0;
     
-    // Print for debugging (usually not done in production)
-    fprintf(stderr, "Input size: %zu\n", Size);
-    
     // Check for various crash conditions
     if (Size >= 5) {
         if (memcmp(Data, "CRASH", 5) == 0) {
             fprintf(stderr, "Found CRASH pattern, triggering null pointer dereference\n");
+            fflush(stderr);
             int *p = nullptr;
-            *p = 42;  // Null pointer dereference
+            *p = 42;  // Null pointer dereference - will cause SIGSEGV
         }
         
         if (memcmp(Data, "ABORT", 5) == 0) {
-            fprintf(stderr, "Found ABORT pattern\n");
-            abort();
+            fprintf(stderr, "Found ABORT pattern, calling abort()\n");
+            fflush(stderr);
+            abort();  // Will cause SIGABRT
         }
         
         if (Size >= 4 && memcmp(Data, "SEGV", 4) == 0) {
-            fprintf(stderr, "Found SEGV pattern\n");
-            raise(SIGSEGV);
+            fprintf(stderr, "Found SEGV pattern, raising SIGSEGV\n");
+            fflush(stderr);
+            raise(SIGSEGV);  // Will cause SIGSEGV
+        }
+        
+        if (memcmp(Data, "HFUZZ", 5) == 0) {
+            fprintf(stderr, "Found HFUZZ pattern, triggering crash\n");
+            fflush(stderr);
+            __builtin_trap();  // Guaranteed crash
         }
     }
     
     // Buffer overflow vulnerability
     if (Size > 50) {
-        fprintf(stderr, "Large input detected\n");
+        fprintf(stderr, "Large input (size %zu), triggering buffer overflow\n", Size);
+        fflush(stderr);
         char small[10];
         memcpy(small, Data, Size);  // Buffer overflow
     }
@@ -238,10 +245,18 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size);
 // Main function for standalone execution
 int main(int argc, char *argv[]) {
     // Check if help is requested (to pass LibFuzzer binary check)
-    if (argc > 1 && strcmp(argv[1], "-help=1") == 0) {
-        printf("libFuzzer standalone binary (g++ compiled)\n");
-        printf("This is a libFuzzer-compatible test binary\n");
-        return 0;
+    // Check ALL arguments for help flag, not just argv[1]
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-help=1") == 0 || 
+            strcmp(argv[i], "--help=1") == 0 ||
+            strcmp(argv[i], "-help") == 0 || 
+            strcmp(argv[i], "--help") == 0) {
+            printf("libFuzzer standalone binary (g++ compiled)\n");
+            printf("This is a libFuzzer-compatible test binary\n");
+            printf("LLVMFuzzerTestOneInput available\n");
+            printf("-max_total_time=N\n");
+            return 0;
+        }
     }
     
     // For PandaFuzz, the binary will be called with corpus directories as arguments
@@ -332,10 +347,18 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
 // Main function for standalone execution
 int main(int argc, char *argv[]) {
     // Check if help is requested (to pass LibFuzzer binary check)
-    if (argc > 1 && strcmp(argv[1], "-help=1") == 0) {
-        printf("libFuzzer standalone binary (g++ compiled)\n");
-        printf("This is a libFuzzer-compatible test binary\n");
-        return 0;
+    // Check ALL arguments for help flag, not just argv[1]
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-help=1") == 0 || 
+            strcmp(argv[i], "--help=1") == 0 ||
+            strcmp(argv[i], "-help") == 0 || 
+            strcmp(argv[i], "--help") == 0) {
+            printf("libFuzzer standalone binary (g++ compiled)\n");
+            printf("This is a libFuzzer-compatible test binary\n");
+            printf("LLVMFuzzerTestOneInput available\n");
+            printf("-max_total_time=N\n");
+            return 0;
+        }
     }
     
     // For PandaFuzz, the binary will be called with corpus directories as arguments
@@ -380,21 +403,22 @@ int main(int argc, char **argv) {
     unsigned char buf[256] = {0};
     ssize_t n = 0;
 
-    // HongFuzz passes filename as argument
-    if (argc > 1) {
-        fprintf(stderr, "Reading from file: %s\n", argv[1]);
-        int fd = open(argv[1], O_RDONLY);
-        if (fd >= 0) {
-            n = read(fd, buf, sizeof(buf) - 1);
-            close(fd);
-            fprintf(stderr, "Read %ld bytes\n", n);
-        } else {
-            fprintf(stderr, "Failed to open file\n");
-            return 1;
-        }
+    // HongFuzz passes filename as argument - REQUIRE it
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+        fprintf(stderr, "This binary is designed for Honggfuzz file mode\n");
+        return 2;  // Exit with error if no file provided
+    }
+    
+    fprintf(stderr, "Reading from file: %s\n", argv[1]);
+    int fd = open(argv[1], O_RDONLY);
+    if (fd >= 0) {
+        n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        fprintf(stderr, "Read %ld bytes\n", n);
     } else {
-        // Fallback to stdin for testing
-        n = read(0, buf, sizeof(buf) - 1);
+        fprintf(stderr, "Failed to open file: %s\n", argv[1]);
+        return 1;
     }
 
     if (n > 0) {
@@ -579,13 +603,41 @@ except:
     echo -e "Binary size: $((BINARY_SIZE / 1024)) KB"
 
     # Create job metadata for upload
-    JOB_METADATA=$(cat <<EOF
+    if [[ "$FUZZER_TYPE" == "afl++" ]]; then
+        # AFL++ needs DumbMode for non-instrumented binaries
+        JOB_METADATA=$(cat <<EOF
 {
   "name": "$FUZZER_TYPE Test $(date +%s)",
   "fuzzer": "$FUZZER_TYPE",
   "type": "fuzzing",
   "duration": 40000000000,
   "collection_id": "${COLLECTION_ID}",
+  "enable_coverage": true,
+  "coverage_format": "lcov",
+  "config": {
+    "duration": 40000000000,
+    "memory_limit": 512,
+    "timeout": 1000000000,
+    "afl_plus_plus_options": {
+      "dumb_mode": true,
+      "input_dir": "/tmp/input",
+      "output_dir": "/tmp/output"
+    }
+  }
+}
+EOF
+)
+    else
+        # LibFuzzer and Honggfuzz
+        JOB_METADATA=$(cat <<EOF
+{
+  "name": "$FUZZER_TYPE Test $(date +%s)",
+  "fuzzer": "$FUZZER_TYPE",
+  "type": "fuzzing",
+  "duration": 40000000000,
+  "collection_id": "${COLLECTION_ID}",
+  "enable_coverage": true,
+  "coverage_format": "lcov",
   "config": {
     "duration": 40000000000,
     "memory_limit": 512,
@@ -594,6 +646,7 @@ except:
 }
 EOF
 )
+    fi
 
     echo -e "${YELLOW}Uploading binary and creating job...${NC}"
 

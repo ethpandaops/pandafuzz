@@ -320,10 +320,15 @@ func (tm *TimeoutManager) handleJobTimeout(jobID string) error {
 			Reason:    "Execution timeout",
 		}
 
-		// Update job status to timed out
+		// Update job status based on current state
 		if job.AssignedBot != nil {
-			// Complete the job as failed to free up the bot
+			// Job was assigned to a bot, complete it as failed to free up the bot
 			if err := tm.state.CompleteJobWithRetry(context.Background(), jobID, *job.AssignedBot, false); err != nil {
+				return err
+			}
+		} else if job.Status == common.JobStatusPending {
+			// Job was never assigned, mark it as timed out directly
+			if err := tm.state.UpdateJobStatusToTimedOut(context.Background(), jobID); err != nil {
 				return err
 			}
 		}

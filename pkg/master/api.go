@@ -859,6 +859,93 @@ func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) {
 	s.writeJSONResponse(w, response)
 }
 
+// handleJobStatusUpdate handles job status updates from bots
+func (s *Server) handleJobStatusUpdate(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	jobID := vars["id"]
+
+	if jobID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Job ID is required", nil)
+		return
+	}
+
+	// Parse request body
+	var request struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", err)
+		return
+	}
+
+	// Validate status
+	validStatuses := map[string]bool{
+		"running":   true,
+		"starting":  true,
+		"completed": true,
+		"failed":    true,
+	}
+	if !validStatuses[request.Status] {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid status", nil)
+		return
+	}
+
+	// Add timeout for database operations
+	ctx, cancel := context.WithTimeout(r.Context(), s.config.Timeouts.DatabaseOp)
+	defer cancel()
+
+	// Get job
+	job, err := s.state.GetJob(ctx, jobID)
+	if err != nil {
+		if err == context.DeadlineExceeded {
+			s.writeErrorResponse(w, http.StatusGatewayTimeout, "Database operation timed out", err)
+			return
+		}
+		s.writeErrorResponse(w, http.StatusNotFound, "Job not found", err)
+		return
+	}
+
+	// Update job status based on the request
+	switch request.Status {
+	case "running":
+		job.Status = common.JobStatusRunning
+		if job.StartedAt == nil {
+			now := time.Now()
+			job.StartedAt = &now
+		}
+	case "starting":
+		job.Status = common.JobStatusStarting
+		if job.StartedAt == nil {
+			now := time.Now()
+			job.StartedAt = &now
+		}
+	case "completed":
+		job.Status = common.JobStatusCompleted
+		now := time.Now()
+		job.CompletedAt = &now
+	case "failed":
+		job.Status = common.JobStatusFailed
+		now := time.Now()
+		job.CompletedAt = &now
+	}
+
+	// Update job in database - use UpdateJobStatusInCache which handles persistence
+	s.state.UpdateJobStatusInCache(jobID, job.Status, job.CompletedAt)
+
+	s.logger.WithFields(logrus.Fields{
+		"job_id": jobID,
+		"status": request.Status,
+	}).Info("Job status updated")
+
+	response := map[string]any{
+		"status":    request.Status,
+		"timestamp": time.Now(),
+		"job_id":    jobID,
+	}
+
+	s.writeJSONResponse(w, response)
+}
+
 // handleJobLogs handles job log retrieval
 func (s *Server) handleJobLogs(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)

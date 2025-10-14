@@ -213,6 +213,17 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 		return false, msg, err
 	}
 
+	// IMPORTANT: Report job has started to master to transition from "assigned" to "running"
+	// This is critical for Honggfuzz and other fuzzers to show proper status
+	fje.logger.WithField("job_id", job.ID).Info("Reporting job started to master")
+	if reporter, ok := fje.resultHandler.(interface {
+		ReportJobStarted(jobID string) error
+	}); ok {
+		if err := reporter.ReportJobStarted(job.ID); err != nil {
+			fje.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to report job started to master")
+		}
+	}
+
 	// Wait for fuzzer to complete or context to be done
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -260,7 +271,8 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 			} else {
 				msg := fmt.Sprintf("%s job was cancelled", job.Fuzzer)
 				fje.logger.WithField("job_id", job.ID).Info(msg)
-				return false, msg, nil
+				// Return success=true for cancelled jobs (they were stopped intentionally)
+				return true, msg, nil
 			}
 
 		case <-ticker.C:
@@ -314,6 +326,35 @@ exitLoop:
 					"coverage":         res.results.Summary.CoverageAchieved,
 					"new_inputs":       res.results.Summary.NewInputsFound,
 				}).Info("Fuzzing completed")
+
+				// Report crashes to master
+				if res.results.Crashes != nil && len(res.results.Crashes) > 0 {
+					fje.logger.WithFields(logrus.Fields{
+						"job_id":      job.ID,
+						"crash_count": len(res.results.Crashes),
+					}).Info("Reporting crashes to master")
+
+					if reporter, ok := fje.resultHandler.(interface {
+						ReportCrash(crash *common.CrashResult) error
+					}); ok {
+						for _, crash := range res.results.Crashes {
+							if crash != nil {
+								fje.logger.WithFields(logrus.Fields{
+									"crash_id":   crash.ID,
+									"crash_type": crash.Type,
+									"crash_size": crash.Size,
+									"job_id":     crash.JobID,
+								}).Debug("Reporting crash to master")
+
+								if err := reporter.ReportCrash(crash); err != nil {
+									fje.logger.WithError(err).WithField("crash_id", crash.ID).Warn("Failed to report crash to master")
+								}
+							}
+						}
+					} else {
+						fje.logger.Warn("Result handler does not implement ReportCrash interface")
+					}
+				}
 			}
 		case <-resultCtx.Done():
 			fje.logger.WithField("job_id", job.ID).Warn("Timeout waiting for fuzzer results")
@@ -342,6 +383,9 @@ exitLoop:
 				}
 			}
 		}
+
+		// Note: Honggfuzz and LibFuzzer coverage is already collected via collectCoverage() above
+		// which calls GetCoverage() on the fuzzer and reports it to the master
 	}
 
 	if timedOut {
@@ -395,6 +439,49 @@ func (fje *FuzzerJobExecutor) GetEventChannel() <-chan common.FuzzerEvent {
 	return fje.resultChan
 }
 
+// IsJobRunning checks if a job is currently running
+func (fje *FuzzerJobExecutor) IsJobRunning(jobID string) bool {
+	fje.mu.RLock()
+	fuzz, exists := fje.activeFuzzers[jobID]
+	fje.mu.RUnlock()
+
+	if !exists {
+		return false
+	}
+
+	return fuzz.IsRunning()
+}
+
+// CleanupJob cleans up a job's fuzzer instance
+func (fje *FuzzerJobExecutor) CleanupJob(jobID string) error {
+	fje.mu.Lock()
+	fuzz, exists := fje.activeFuzzers[jobID]
+	if exists {
+		delete(fje.activeFuzzers, jobID)
+	}
+	fje.mu.Unlock()
+
+	if !exists {
+		return nil // Already cleaned up
+	}
+
+	// Stop the fuzzer if still running
+	if fuzz.IsRunning() {
+		if err := fuzz.Stop(); err != nil {
+			fje.logger.WithError(err).WithField("job_id", jobID).Warn("Error stopping fuzzer during cleanup")
+		}
+	}
+
+	// Cleanup fuzzer resources
+	if err := fuzz.Cleanup(); err != nil {
+		fje.logger.WithError(err).WithField("job_id", jobID).Warn("Error cleaning up fuzzer resources")
+		return err
+	}
+
+	fje.logger.WithField("job_id", jobID).Info("Job fuzzer instance cleaned up")
+	return nil
+}
+
 // GetFuzzer returns the fuzzer instance for a given job ID
 func (fje *FuzzerJobExecutor) GetFuzzer(jobID string) (fuzzer.Fuzzer, bool) {
 	fje.mu.RLock()
@@ -412,32 +499,6 @@ func (fje *FuzzerJobExecutor) SetResultHandler(handler interface{}) {
 // SetCoverageCollector sets the coverage collector for raw file collection
 func (fje *FuzzerJobExecutor) SetCoverageCollector(collector *CoverageCollector) {
 	fje.coverageCollector = collector
-}
-
-// CleanupJob removes the fuzzer from active jobs and performs cleanup
-// This should be called AFTER crash detection is complete
-func (fje *FuzzerJobExecutor) CleanupJob(jobID string) error {
-	fje.mu.Lock()
-	fuzz, exists := fje.activeFuzzers[jobID]
-	if exists {
-		delete(fje.activeFuzzers, jobID)
-	}
-	fje.mu.Unlock()
-
-	if !exists {
-		fje.logger.WithField("job_id", jobID).Debug("Job already cleaned up")
-		return nil
-	}
-
-	fje.logger.WithField("job_id", jobID).Debug("Cleaning up fuzzer")
-
-	// Clean up fuzzer
-	if err := fuzz.Cleanup(); err != nil {
-		fje.logger.WithError(err).WithField("job_id", jobID).Warn("Failed to cleanup fuzzer")
-		return err
-	}
-
-	return nil
 }
 
 // createFuzzer creates the appropriate fuzzer instance based on job configuration

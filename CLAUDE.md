@@ -105,3 +105,58 @@ All fuzzers implement `types.Fuzzer` interface (`pkg/domain/fuzzer/types/interfa
 - Integration tests: `tests/integration/`
 - E2E tests: Playwright in `tests/e2e/`
 - Test corpus: `test-resources/`
+
+## Development Workflow
+
+### After Making Changes
+
+**IMPORTANT**: After making any code changes, you MUST follow this verification process:
+
+1. **Rebuild with Docker Compose (no cache)**
+   ```bash
+   docker-compose build --no-cache
+   docker-compose up -d
+   ```
+   This ensures all changes are properly built and deployed.
+
+2. **Create Test Jobs**
+   - Run the appropriate scripts to create test jobs
+   - Use `./scripts/run-test-with-corpus.sh` or similar scripts
+   - Verify jobs are created successfully via API
+
+3. **UI Verification with Playwright**
+   - Run Playwright tests to verify UI functionality
+   - Check that all changes are reflected correctly in the web interface
+   - Ensure no regressions in existing functionality
+
+### Writing Tests
+
+- **Extend existing tests** whenever possible rather than creating new test files
+- Look for similar test cases and add your test scenario to the existing structure
+- Only create new test files when testing entirely new components or features
+
+### Debugging Issues
+
+When encountering issues, follow this systematic approach:
+
+1. **Initial Investigation**
+   - Use the API endpoints to query system state
+   - Use `docker exec` commands to inspect containers directly
+   - Check logs from all components: bot, master, database, and UI
+
+2. **Component Isolation**
+   - Determine which component is affected:
+     - **Bot**: Check bot logs, registration status, job execution
+     - **Master**: Verify API responses, database state, job assignment
+     - **Database**: Check for data consistency, migrations, queries
+     - **UI**: Inspect browser console, network requests, state management
+
+3. **Show All Evidence**
+   - When uncertain about the root cause, show all relevant logs and data to the user
+   - Let the user help determine what is correct behavior
+   - Document all findings for reference
+
+4. **Targeted Fix**
+   - Once the issue is isolated to a specific component, focus fixes there
+   - Test the fix in isolation before full integration testing
+   - Verify the fix doesn't break other components

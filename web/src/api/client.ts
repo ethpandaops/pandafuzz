@@ -149,6 +149,12 @@ export class PandaFuzzAPI {
     await this.client.delete(`/jobs/${id}`);
   }
 
+  // Admin endpoints
+  async recoverOrphanedJobs(): Promise<{ recovered_count: number; message: string }> {
+    const response = await this.client.post<{ recovered_count: number; message: string }>('/admin/recover-jobs');
+    return response.data;
+  }
+
   // Result endpoints - Note: These are likely not implemented yet
   async getCrashes(params?: {
     job_id?: string;

@@ -249,7 +249,7 @@ func (s *MergeSyncStrategy) Execute(ctx context.Context, source, target []*types
 
 	// Process modifications with merge
 	for _, mod := range diff.Modified {
-		merged, err := s.mergeFunction(mod.Source, mod.Target)
+		_, err := s.mergeFunction(mod.Source, mod.Target)
 		if err != nil {
 			// Merge failed - treat as conflict
 			conflict := SyncConflict{

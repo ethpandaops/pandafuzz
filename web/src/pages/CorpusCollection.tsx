@@ -36,6 +36,7 @@ import {
   InsertDriveFile as FileIcon,
   Refresh as RefreshIcon,
 } from '@mui/icons-material';
+import { formatDateTime } from '../utils/dateFormat';
 
 interface CorpusCollection {
   id: string;
@@ -232,9 +233,6 @@ function CorpusCollection() {
     return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
   };
 
-  const formatDate = (dateString: string): string => {
-    return new Date(dateString).toLocaleString();
-  };
 
   if (loading) {
     return (
@@ -348,7 +346,7 @@ function CorpusCollection() {
                           size="small"
                         />
                         <Chip
-                          label={`Created ${formatDate(selectedCollection.created_at)}`}
+                          label={`Created ${formatDateTime(selectedCollection.created_at)}`}
                           size="small"
                         />
                       </Box>
@@ -394,7 +392,7 @@ function CorpusCollection() {
                           <FileIcon sx={{ mr: 2, color: 'text.secondary' }} />
                           <ListItemText
                             primary={file.filename}
-                            secondary={`${formatFileSize(file.size)} • ${file.hash.substring(0, 8)}... • ${formatDate(file.uploaded_at)}`}
+                            secondary={`${formatFileSize(file.size)} • ${file.hash.substring(0, 8)}... • ${formatDateTime(file.uploaded_at)}`}
                           />
                         </ListItem>
                       ))}

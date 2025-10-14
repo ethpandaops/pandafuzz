@@ -232,6 +232,75 @@ func (rc *RetryClient) GetJob(botID string) (*common.Job, error) {
 	return &job, nil
 }
 
+// AckJobWithToken acknowledges job assignment with lease token
+func (rc *RetryClient) AckJobWithToken(botID, jobID, leaseToken string) error {
+	request := map[string]interface{}{
+		"bot_id":      botID,
+		"job_id":      jobID,
+		"lease_token": leaseToken,
+		"status":      "starting",
+	}
+
+	var response struct {
+		Acknowledged   bool       `json:"acknowledged"`
+		LeaseExpiresAt *time.Time `json:"lease_expires_at"`
+		Message        string     `json:"message"`
+	}
+
+	err := rc.retryManager.Execute(func() error {
+		return rc.circuitBreaker.Execute(func() error {
+			return rc.doRequest("POST", fmt.Sprintf("/api/v1/jobs/%s/ack", jobID), request, &response)
+		})
+	})
+
+	if err != nil {
+		return common.NewNetworkError("ack_job", err)
+	}
+
+	if !response.Acknowledged {
+		return common.NewValidationError("ack_job", fmt.Errorf("acknowledgment failed: %s", response.Message))
+	}
+
+	rc.logger.WithFields(logrus.Fields{
+		"bot_id":           botID,
+		"job_id":           jobID,
+		"lease_expires_at": response.LeaseExpiresAt,
+	}).Info("Job acknowledged with lease")
+
+	return nil
+}
+
+// SendHeartbeatWithToken sends heartbeat to renew job lease
+func (rc *RetryClient) SendHeartbeatWithToken(botID, jobID, leaseToken string) (*time.Time, error) {
+	request := map[string]interface{}{
+		"bot_id":      botID,
+		"job_id":      jobID,
+		"lease_token": leaseToken,
+	}
+
+	var response struct {
+		Success        bool       `json:"success"`
+		LeaseExpiresAt *time.Time `json:"lease_expires_at"`
+		Message        string     `json:"message"`
+	}
+
+	err := rc.retryManager.Execute(func() error {
+		return rc.circuitBreaker.Execute(func() error {
+			return rc.doRequest("POST", fmt.Sprintf("/api/v1/jobs/%s/heartbeat", jobID), request, &response)
+		})
+	})
+
+	if err != nil {
+		return nil, common.NewNetworkError("heartbeat_job", err)
+	}
+
+	if !response.Success {
+		return nil, common.NewValidationError("heartbeat_job", fmt.Errorf("heartbeat failed: %s", response.Message))
+	}
+
+	return response.LeaseExpiresAt, nil
+}
+
 // CompleteJob notifies the master of job completion and waits for acknowledgment
 func (rc *RetryClient) CompleteJob(botID string, success bool, message string) error {
 	request := map[string]any{
@@ -888,6 +957,32 @@ func (rc *RetryClient) GetReproductionRequest(botID string) (*common.Reproductio
 	}).Info("Received reproduction request")
 
 	return &reproRequest, nil
+}
+
+// ReportJobStarted reports that a job has started to transition it from "assigned" to "running"
+func (rc *RetryClient) ReportJobStarted(jobID string) error {
+	rc.logger.WithField("job_id", jobID).Debug("Reporting job started to master")
+
+	// Use a simple status update request
+	request := struct {
+		Status string `json:"status"`
+	}{
+		Status: "running",
+	}
+
+	url := fmt.Sprintf("/api/v1/jobs/%s/status", jobID)
+	err := rc.retryManager.Execute(func() error {
+		return rc.circuitBreaker.Execute(func() error {
+			return rc.doRequest("PUT", url, request, nil)
+		})
+	})
+
+	if err != nil {
+		return common.NewNetworkError("report_job_started", err)
+	}
+
+	rc.logger.WithField("job_id", jobID).Info("Successfully reported job started")
+	return nil
 }
 
 // GetCorpusFiles gets the list of corpus files for a campaign

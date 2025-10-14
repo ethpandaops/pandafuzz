@@ -1,0 +1,12 @@
+# oapi-codegen v2 configuration for PandaFuzz Go Client SDK
+# This configuration generates client interfaces, types, and implementations
+
+package: generated
+output: generated/client.gen.go
+generate:
+  client: true
+  models: true
+  embedded-spec: true
+
+output-options:
+  skip-fmt: false

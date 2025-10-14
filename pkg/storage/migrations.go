@@ -72,6 +72,12 @@ func GetMigrations() []Migration {
 			Up:          addRawCoverageFilesUp,
 			Down:        addRawCoverageFilesDown,
 		},
+		{
+			ID:          "010_add_lease_management",
+			Description: "Add lease management columns for job assignment and heartbeat",
+			Up:          addLeaseManagementUp,
+			Down:        addLeaseManagementDown,
+		},
 	}
 }
 
@@ -904,6 +910,87 @@ func addRawCoverageFilesUp(tx *sql.Tx) error {
 
 // addRawCoverageFilesDown removes raw coverage file columns
 func addRawCoverageFilesDown(tx *sql.Tx) error {
+	// SQLite doesn't support dropping columns directly
+	// We would need to recreate the table without the columns
+	// For simplicity, we'll just leave the columns as is
+	return nil
+}
+
+// addLeaseManagementUp adds lease management columns for job assignment
+func addLeaseManagementUp(tx *sql.Tx) error {
+	// Check if lease_token column exists
+	var count int
+	err := tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('jobs') 
+		WHERE name = 'lease_token'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for lease_token column: %w", err)
+	}
+
+	if count == 0 {
+		if _, err := tx.Exec(`
+			ALTER TABLE jobs ADD COLUMN lease_token VARCHAR(64)
+		`); err != nil {
+			return fmt.Errorf("failed to add lease_token column: %w", err)
+		}
+	}
+
+	// Check if lease_expires_at column exists
+	err = tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('jobs') 
+		WHERE name = 'lease_expires_at'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for lease_expires_at column: %w", err)
+	}
+
+	if count == 0 {
+		if _, err := tx.Exec(`
+			ALTER TABLE jobs ADD COLUMN lease_expires_at DATETIME
+		`); err != nil {
+			return fmt.Errorf("failed to add lease_expires_at column: %w", err)
+		}
+	}
+
+	// Check if last_heartbeat column exists
+	err = tx.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('jobs') 
+		WHERE name = 'last_heartbeat'
+	`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to check for last_heartbeat column: %w", err)
+	}
+
+	if count == 0 {
+		if _, err := tx.Exec(`
+			ALTER TABLE jobs ADD COLUMN last_heartbeat DATETIME
+		`); err != nil {
+			return fmt.Errorf("failed to add last_heartbeat column: %w", err)
+		}
+	}
+
+	// Create index for lease expiry
+	if _, err := tx.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_jobs_lease_expires_at ON jobs(lease_expires_at)
+		WHERE lease_expires_at IS NOT NULL
+	`); err != nil {
+		return fmt.Errorf("failed to create lease_expires_at index: %w", err)
+	}
+
+	// Create index for status and lease_expires_at for efficient sweeps
+	if _, err := tx.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_jobs_status_lease ON jobs(status, lease_expires_at)
+		WHERE status IN ('assigned', 'starting', 'running')
+	`); err != nil {
+		return fmt.Errorf("failed to create status_lease index: %w", err)
+	}
+
+	return nil
+}
+
+// addLeaseManagementDown removes lease management columns
+func addLeaseManagementDown(tx *sql.Tx) error {
 	// SQLite doesn't support dropping columns directly
 	// We would need to recreate the table without the columns
 	// For simplicity, we'll just leave the columns as is

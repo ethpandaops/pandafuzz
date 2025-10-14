@@ -27,6 +27,7 @@ import {
 } from '@mui/icons-material';
 import api from '../api/client';
 import { Bot, BotStatus } from '../types';
+import { formatDateTime } from '../utils/dateFormat';
 
 const statusColors: Record<BotStatus, string> = {
   [BotStatus.Idle]: '#4caf50',
@@ -205,11 +206,11 @@ function Bots() {
               </Typography>
               <Typography variant="subtitle1" gutterBottom>
                 <strong>Registered:</strong>{' '}
-                {new Date(selectedBot.registered_at).toLocaleString()}
+                {formatDateTime(selectedBot.registered_at)}
               </Typography>
               <Typography variant="subtitle1" gutterBottom>
                 <strong>Last Seen:</strong>{' '}
-                {new Date(selectedBot.last_seen).toLocaleString()}
+                {formatDateTime(selectedBot.last_seen)}
               </Typography>
               <Typography variant="subtitle1" gutterBottom>
                 <strong>Failure Count:</strong> {selectedBot.failure_count}

@@ -15,14 +15,14 @@ export VERSION
 export BUILD_TIME
 export GIT_COMMIT
 
-# Build flags
-LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.gitCommit=$(GIT_COMMIT)"
+# Build flags with proper formatting
+LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.gitCommit=$(GIT_COMMIT) -s -w"
 
 # Default target
 all: build
 
 ## build: Build both master and bot binaries
-build: build-master build-bot
+build: generate-api build-master build-bot
 
 ## build-master: Build the master binary
 build-master:
@@ -120,6 +120,15 @@ clean:
 	@rm -rf data/ work/ logs/
 	@rm -rf web/build/ web/node_modules/
 
+## clean-generated: Remove all generated code
+clean-generated:
+	@echo "Removing generated code..."
+	@rm -rf pkg/api/v1/generated/*.gen.go
+	@rm -rf pkg/clients/go/generated/
+	@rm -rf pkg/clients/python/pandafuzz/
+	@rm -rf pkg/clients/typescript/dist/
+	@echo "Generated code removed"
+
 ## deps: Download dependencies
 deps:
 	@echo "Downloading dependencies..."
@@ -151,10 +160,26 @@ run-bot: build-bot
 	@echo "Running bot..."
 	@./$(BOT_BINARY) -config bot.yaml
 
-## generate: Generate code (if any)
-generate:
-	@echo "Generating code..."
+## generate: Generate code from OpenAPI specs and other sources
+generate: generate-api
+	@echo "Generating other code..."
 	@go generate ./...
+
+## generate-api: Generate API code from OpenAPI specification
+generate-api:
+	@echo "Generating API code from OpenAPI spec..."
+	@command -v oapi-codegen >/dev/null 2>&1 || command -v $$(go env GOPATH)/bin/oapi-codegen >/dev/null 2>&1 || { echo "oapi-codegen not found. Install with: go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest"; exit 1; }
+	@mkdir -p pkg/api/v1/generated
+	@PATH="$$(go env GOPATH)/bin:$$PATH" oapi-codegen -generate "types" -package generated -o pkg/api/v1/generated/types.gen.go pkg/api/v1/openapi/pandafuzz.yaml
+	@PATH="$$(go env GOPATH)/bin:$$PATH" oapi-codegen -generate "chi-server" -package generated -o pkg/api/v1/generated/server.gen.go pkg/api/v1/openapi/pandafuzz.yaml
+	@PATH="$$(go env GOPATH)/bin:$$PATH" oapi-codegen -generate "spec" -package generated -o pkg/api/v1/generated/spec.gen.go pkg/api/v1/openapi/pandafuzz.yaml
+	@echo "API code generation completed successfully"
+
+## generate-check: Verify generated code is up to date
+generate-check: generate-api
+	@echo "Checking if generated code is up to date..."
+	@git diff --exit-code pkg/api/v1/generated/ || (echo "Generated code is not up to date. Run 'make generate-api' to update."; exit 1)
+	@echo "Generated code is up to date"
 
 ## check: Run all checks (fmt, vet, lint, test)
 check: fmt vet lint test

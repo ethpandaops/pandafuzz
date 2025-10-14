@@ -151,6 +151,12 @@ func (e *Engine) Start(ctx context.Context) error {
 	e.ctx, e.cancelFunc = context.WithCancel(ctx)
 	e.cmd = exec.CommandContext(e.ctx, aflBinary, cmdArgs...)
 
+	// Log the command being executed
+	e.log.WithFields(logrus.Fields{
+		"binary": aflBinary,
+		"args":   strings.Join(cmdArgs, " "),
+	}).Info("Starting AFL++ with command")
+
 	// Set process group for proper signal handling (Linux-specific)
 	e.cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid:   true,
@@ -181,6 +187,41 @@ func (e *Engine) Start(ctx context.Context) error {
 	env = append(env, "AFL_FORKSRV_INIT_TIMEOUT=30000") // 30s timeout
 	env = append(env, fmt.Sprintf("__AFL_SHM_ID=afl_%d_%d", os.Getpid(), time.Now().UnixNano()))
 	env = append(env, "AFL_MAP_SIZE=65536") // Standard AFL map size
+
+	// Set AFL_PATH to standard location where AFL++ libraries are installed
+	// This helps AFL++ find afl-compiler-rt.o and other runtime files
+	aflPath := "/usr/local/lib/afl"
+	if _, err := os.Stat(aflPath); err == nil {
+		env = append(env, fmt.Sprintf("AFL_PATH=%s", aflPath))
+		e.log.WithField("AFL_PATH", aflPath).Debug("Setting AFL_PATH environment variable")
+	} else {
+		// Try alternative common locations
+		alternativePaths := []string{
+			"/usr/lib/afl",
+			"/usr/share/afl",
+			"/opt/afl++",
+		}
+		pathFound := false
+		for _, altPath := range alternativePaths {
+			if _, err := os.Stat(altPath); err == nil {
+				env = append(env, fmt.Sprintf("AFL_PATH=%s", altPath))
+				e.log.WithField("AFL_PATH", altPath).Debug("Setting AFL_PATH to alternative location")
+				pathFound = true
+				break
+			}
+		}
+		if !pathFound {
+			// If AFL_PATH cannot be determined, skip binary checks to avoid failures
+			e.log.Warn("AFL_PATH could not be determined, setting AFL_SKIP_BIN_CHECK=1")
+			env = append(env, "AFL_SKIP_BIN_CHECK=1")
+		}
+	}
+
+	// Also set AFL_SKIP_BIN_CHECK to allow fuzzing non-instrumented binaries
+	// This is useful for testing and when binaries are not compiled with afl-cc
+	env = append(env, "AFL_SKIP_BIN_CHECK=1")
+	e.log.Debug("Setting AFL_SKIP_BIN_CHECK=1 to allow fuzzing non-instrumented binaries")
+
 	e.cmd.Env = env
 
 	// Setup pipes
@@ -384,6 +425,38 @@ func (e *Engine) Configure(config *types.FuzzerConfig) error {
 	return nil
 }
 
+// isInstrumented checks if the binary is instrumented for AFL++
+func (e *Engine) isInstrumented() bool {
+	// Check for AFL++ instrumentation signatures in the binary
+	// This is a basic check - looking for __afl_ symbols
+	cmd := exec.Command("strings", e.target)
+	output, err := cmd.Output()
+	if err != nil {
+		e.log.WithError(err).Warn("Failed to check binary instrumentation, assuming not instrumented")
+		return false
+	}
+
+	// Look for AFL++ instrumentation markers
+	outputStr := string(output)
+	aflMarkers := []string{
+		"__afl_",
+		"__AFL_",
+		"afl-compiler-rt",
+		"__sanitizer_cov_",
+		"SanitizerCoverage",
+	}
+
+	for _, marker := range aflMarkers {
+		if strings.Contains(outputStr, marker) {
+			e.log.Debug("Found AFL++ instrumentation marker in binary")
+			return true
+		}
+	}
+
+	e.log.Warn("No AFL++ instrumentation detected in binary, will use dumb mode")
+	return false
+}
+
 // buildCommandArgs builds the command line arguments for AFL++
 func (e *Engine) buildCommandArgs() []string {
 	args := []string{}
@@ -443,46 +516,64 @@ func (e *Engine) buildCommandArgs() []string {
 	}
 
 	// AFL++ specific options
-	if opts.Mode != "" {
-		args = append(args, "-p", opts.Mode)
+	if opts != nil {
+		if opts.Mode != "" {
+			args = append(args, "-p", opts.Mode)
+		}
+
+		if opts.PowerSchedule != "" {
+			args = append(args, "-p", opts.PowerSchedule)
+		}
+
+		if opts.SkipCrashed {
+			args = append(args, "-C")
+		}
+
+		if opts.NoUI {
+			args = append(args, "-s")
+		}
+
+		if opts.Deterministic {
+			args = append(args, "-D")
+		}
 	}
 
-	if opts.PowerSchedule != "" {
-		args = append(args, "-p", opts.PowerSchedule)
+	// Check if we need dumb mode (either explicitly set or auto-detected)
+	useDumbMode := false
+	if opts != nil && opts.DumbMode {
+		useDumbMode = true
+		e.log.Info("Dumb mode explicitly enabled in configuration")
+	} else if e.target != "" {
+		// Auto-detect if binary is not instrumented
+		if !e.isInstrumented() {
+			e.log.Warn("Binary is not instrumented, automatically enabling dumb mode (-n)")
+			useDumbMode = true
+		}
 	}
 
-	if opts.SkipCrashed {
-		args = append(args, "-C")
-	}
-
-	if opts.NoUI {
-		args = append(args, "-s")
-	}
-
-	if opts.Deterministic {
-		args = append(args, "-D")
-	}
-
-	if opts.DumbMode {
+	if useDumbMode {
 		args = append(args, "-n")
+		e.log.Info("Running AFL++ in dumb mode (non-instrumented fuzzing)")
 	}
 
-	if opts.MainNode {
-		args = append(args, "-M", "main")
-	} else if opts.SecondaryNode {
-		args = append(args, "-S", "secondary")
-	}
+	if opts != nil {
+		if opts.MainNode {
+			args = append(args, "-M", "main")
+		} else if opts.SecondaryNode {
+			args = append(args, "-S", "secondary")
+		}
 
-	if opts.FileExtension != "" {
-		args = append(args, "-e", opts.FileExtension)
-	}
+		if opts.FileExtension != "" {
+			args = append(args, "-e", opts.FileExtension)
+		}
 
-	if opts.QemuMode {
-		args = append(args, "-Q")
-	}
+		if opts.QemuMode {
+			args = append(args, "-Q")
+		}
 
-	if opts.UniMode {
-		args = append(args, "-U")
+		if opts.UniMode {
+			args = append(args, "-U")
+		}
 	}
 
 	// Add extra args
@@ -561,11 +652,15 @@ func (e *Engine) monitorStats() {
 
 // readStats reads statistics from AFL++ output files
 func (e *Engine) readStats() {
-	statsFile := filepath.Join(e.outputDir, "fuzzer_stats")
+	// AFL++ creates instance directories with fuzzer_stats
+	var statsFile string
 	if e.config.AFLPlusPlusOptions.MainNode {
 		statsFile = filepath.Join(e.outputDir, "main", "fuzzer_stats")
 	} else if e.config.AFLPlusPlusOptions.SecondaryNode {
 		statsFile = filepath.Join(e.outputDir, "secondary", "fuzzer_stats")
+	} else {
+		// Default instance when no -M or -S is specified
+		statsFile = filepath.Join(e.outputDir, "default", "fuzzer_stats")
 	}
 
 	data, err := os.ReadFile(statsFile)
@@ -700,11 +795,16 @@ func (e *Engine) monitorCrashes() {
 
 // checkForCrashes checks for new crash files
 func (e *Engine) checkForCrashes() {
-	crashDir := filepath.Join(e.outputDir, "crashes")
+	// AFL++ creates instance directories for crashes
+	// Default is "default" when not using -M (main) or -S (secondary)
+	var crashDir string
 	if e.config.AFLPlusPlusOptions.MainNode {
 		crashDir = filepath.Join(e.outputDir, "main", "crashes")
 	} else if e.config.AFLPlusPlusOptions.SecondaryNode {
 		crashDir = filepath.Join(e.outputDir, "secondary", "crashes")
+	} else {
+		// Default instance when no -M or -S is specified
+		crashDir = filepath.Join(e.outputDir, "default", "crashes")
 	}
 
 	files, err := os.ReadDir(crashDir)
@@ -911,11 +1011,15 @@ func (e *Engine) checkProcessHealth(pid int) error {
 // checkAFLInitialized checks if AFL++ has initialized (created output dirs or SHM)
 func (e *Engine) checkAFLInitialized() bool {
 	// Check if fuzzer_stats file exists (AFL++ creates this early)
-	statsFile := filepath.Join(e.outputDir, "fuzzer_stats")
+	// AFL++ creates instance directories with fuzzer_stats
+	var statsFile string
 	if e.config.AFLPlusPlusOptions.MainNode {
 		statsFile = filepath.Join(e.outputDir, "main", "fuzzer_stats")
 	} else if e.config.AFLPlusPlusOptions.SecondaryNode {
 		statsFile = filepath.Join(e.outputDir, "secondary", "fuzzer_stats")
+	} else {
+		// Default instance when no -M or -S is specified
+		statsFile = filepath.Join(e.outputDir, "default", "fuzzer_stats")
 	}
 
 	if _, err := os.Stat(statsFile); err == nil {

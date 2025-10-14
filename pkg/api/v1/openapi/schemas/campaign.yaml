@@ -1,0 +1,716 @@
+# Campaign resource schemas for PandaFuzz API v1
+# Manages fuzzing campaigns with multiple jobs and coordinated execution
+
+Campaign:
+  type: object
+  description: A coordinated fuzzing campaign with multiple jobs
+  required:
+    - id
+    - name
+    - status
+    - target_config
+    - job_template
+    - created_at
+    - updated_at
+  properties:
+    id:
+      type: string
+      format: uuid
+      description: Unique campaign identifier
+      example: "550e8400-e29b-41d4-a716-446655440002"
+    name:
+      type: string
+      maxLength: 200
+      description: Human-readable campaign name
+      example: "HTTP Parser Security Assessment"
+    description:
+      type: string
+      maxLength: 2000
+      description: Detailed campaign description
+      example: "Comprehensive security assessment of HTTP parsing library using multiple fuzzing engines"
+    status:
+      $ref: '#/CampaignStatus'
+    target_config:
+      $ref: '#/CampaignTargetConfig'
+    job_template:
+      $ref: 'job.yaml#/JobConfig'
+    fuzzer_configs:
+      type: array
+      description: Fuzzer-specific configurations
+      items:
+        $ref: '#/FuzzerConfig'
+      minItems: 1
+      maxItems: 10
+    corpus_strategy:
+      $ref: '#/CorpusStrategy'
+    scheduling:
+      $ref: '#/CampaignScheduling'
+    limits:
+      $ref: '#/CampaignLimits'
+    created_at:
+      type: string
+      format: date-time
+      description: Campaign creation timestamp
+      example: "2023-12-01T09:00:00Z"
+    updated_at:
+      type: string
+      format: date-time
+      description: Last update timestamp
+      example: "2023-12-01T14:30:00Z"
+    started_at:
+      type: string
+      format: date-time
+      nullable: true
+      description: Campaign start timestamp
+      example: "2023-12-01T10:00:00Z"
+    completed_at:
+      type: string
+      format: date-time
+      nullable: true
+      description: Campaign completion timestamp
+      example: "2023-12-02T10:00:00Z"
+    owner:
+      type: string
+      maxLength: 100
+      description: Campaign owner/creator
+      example: "security-team"
+    tags:
+      type: array
+      description: Campaign classification tags
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+        maxLength: 50
+      maxItems: 30
+      example: ["security", "regression", "release-blocker"]
+    metadata:
+      type: object
+      description: Additional campaign metadata
+      additionalProperties:
+        type: string
+      maxProperties: 50
+      example:
+        project: "web-security"
+        version: "2.1.0"
+        environment: "testing"
+
+CampaignStatus:
+  type: string
+  enum:
+    - draft
+    - scheduled
+    - running
+    - paused
+    - completed
+    - failed
+    - cancelled
+    - archived
+  description: Current status of the campaign
+  example: "running"
+
+CampaignTargetConfig:
+  type: object
+  description: Target application configuration for the campaign
+  required:
+    - binary_path
+    - binary_checksum
+  properties:
+    binary_path:
+      type: string
+      maxLength: 500
+      description: Path to target binary
+      example: "/opt/targets/http_parser"
+    binary_checksum:
+      type: string
+      pattern: '^[a-f0-9]{64}$'
+      description: SHA256 checksum of target binary
+      example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    binary_version:
+      type: string
+      maxLength: 100
+      description: Target binary version
+      example: "2.1.0-beta"
+    command_line_template:
+      type: string
+      maxLength: 1000
+      description: Command line template with placeholders
+      example: "{binary} --config {config_file} --input {input_file}"
+    environment_setup:
+      type: array
+      description: Environment setup commands
+      items:
+        type: string
+        maxLength: 500
+      maxItems: 20
+      example: ["export ASAN_OPTIONS=detect_odr_violation=0", "ulimit -c unlimited"]
+    working_directory:
+      type: string
+      maxLength: 500
+      description: Working directory for execution
+      example: "/tmp/campaign_workspace"
+    input_format:
+      type: string
+      enum: [file, stdin, network, custom]
+      description: How input is provided to target
+      example: "file"
+    expected_exit_codes:
+      type: array
+      description: Expected non-crash exit codes
+      items:
+        type: integer
+        minimum: 0
+        maximum: 255
+      maxItems: 10
+      example: [0, 1, 2]
+
+FuzzerConfig:
+  type: object
+  description: Configuration for a specific fuzzer in the campaign
+  required:
+    - fuzzer_type
+    - enabled
+    - job_count
+  properties:
+    fuzzer_type:
+      $ref: 'common.yaml#/FuzzerType'
+    enabled:
+      type: boolean
+      description: Whether this fuzzer is enabled
+      example: true
+    job_count:
+      type: integer
+      minimum: 0
+      maximum: 100
+      description: Number of jobs to create for this fuzzer
+      example: 5
+    weight:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 1
+      description: Resource allocation weight (0-1)
+      example: 0.4
+    priority:
+      type: integer
+      minimum: 1
+      maximum: 10
+      description: Job priority for this fuzzer
+      example: 7
+    specific_config:
+      type: object
+      description: Fuzzer-specific configuration options
+      additionalProperties: true
+      example:
+        afl_mode: "qemu"
+        dictionary: "/data/dicts/http.dict"
+        timeout_ms: 5000
+    resource_limits:
+      $ref: 'common.yaml#/ResourceLimits'
+    tags:
+      type: array
+      description: Tags specific to this fuzzer config
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+        maxLength: 50
+      maxItems: 10
+
+CorpusStrategy:
+  type: object
+  description: Corpus management strategy for the campaign
+  required:
+    - sync_enabled
+    - deduplicate
+  properties:
+    sync_enabled:
+      type: boolean
+      description: Enable corpus synchronization between jobs
+      example: true
+    sync_interval:
+      $ref: 'common.yaml#/Duration'
+      description: How often to sync corpus
+      example: "5m"
+    deduplicate:
+      type: boolean
+      description: Remove duplicate corpus entries
+      example: true
+    size_limit:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Maximum corpus size in bytes (0 = unlimited)
+      example: 1073741824
+    file_count_limit:
+      type: integer
+      minimum: 0
+      description: Maximum number of corpus files (0 = unlimited)
+      example: 10000
+    selection_algorithm:
+      type: string
+      enum: [random, coverage_guided, size_weighted, recent_first]
+      default: coverage_guided
+      description: Algorithm for selecting corpus files
+    minimum_coverage:
+      type: integer
+      minimum: 0
+      description: Minimum coverage threshold for corpus inclusion
+      example: 100
+    share_crashes_as_corpus:
+      type: boolean
+      default: false
+      description: Promote interesting crashes to corpus
+    initial_corpus:
+      type: array
+      description: Initial corpus file paths or IDs
+      items:
+        type: string
+        maxLength: 500
+      maxItems: 1000
+
+CampaignScheduling:
+  type: object
+  description: Campaign scheduling and execution parameters
+  properties:
+    auto_start:
+      type: boolean
+      default: false
+      description: Automatically start when created
+    scheduled_start:
+      type: string
+      format: date-time
+      description: Scheduled start time
+      example: "2023-12-01T10:00:00Z"
+    max_duration:
+      $ref: 'common.yaml#/Duration'
+      description: Maximum campaign duration
+      example: "24h"
+    job_spawn_strategy:
+      type: string
+      enum: [all_at_once, sequential, staggered, resource_based]
+      default: resource_based
+      description: How to spawn jobs
+    job_spawn_interval:
+      $ref: 'common.yaml#/Duration'
+      description: Interval between job spawning (for staggered)
+      example: "2m"
+    max_concurrent_jobs:
+      type: integer
+      minimum: 1
+      maximum: 1000
+      description: Maximum concurrent jobs
+      example: 20
+    auto_restart_failed:
+      type: boolean
+      default: false
+      description: Automatically restart failed jobs
+    restart_delay:
+      $ref: 'common.yaml#/Duration'
+      description: Delay before restarting failed jobs
+      example: "10m"
+    completion_criteria:
+      type: object
+      description: Criteria for campaign completion
+      properties:
+        target_coverage:
+          type: integer
+          minimum: 0
+          description: Target coverage percentage
+        target_crashes:
+          type: integer
+          minimum: 0
+          description: Target number of unique crashes
+        all_jobs_complete:
+          type: boolean
+          default: true
+          description: Wait for all jobs to complete
+
+CampaignLimits:
+  type: object
+  description: Resource and execution limits for the campaign
+  properties:
+    max_jobs:
+      type: integer
+      minimum: 1
+      maximum: 10000
+      description: Maximum total jobs in campaign
+      example: 100
+    max_crashes:
+      type: integer
+      minimum: 0
+      description: Stop after finding this many crashes (0 = unlimited)
+      example: 50
+    max_corpus_size:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Maximum total corpus size in bytes
+      example: 10737418240
+    max_disk_usage:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Maximum disk usage in bytes
+      example: 107374182400
+    budget_cpu_hours:
+      type: number
+      format: float
+      minimum: 0
+      description: CPU time budget in hours
+      example: 1000.5
+    budget_memory_gb_hours:
+      type: number
+      format: float
+      minimum: 0
+      description: Memory usage budget in GB-hours
+      example: 500.25
+    priority_threshold:
+      type: integer
+      minimum: 1
+      maximum: 10
+      description: Minimum job priority to execute
+      example: 3
+
+CampaignStats:
+  type: object
+  description: Comprehensive campaign statistics
+  required:
+    - campaign_id
+    - status
+    - jobs_total
+    - jobs_completed
+    - jobs_running
+    - jobs_failed
+    - crashes_total
+    - crashes_unique
+    - coverage_total
+    - corpus_size_files
+    - corpus_size_bytes
+    - execution_time
+    - cpu_time_used
+    - last_updated
+  properties:
+    campaign_id:
+      type: string
+      format: uuid
+      description: Campaign identifier
+      example: "550e8400-e29b-41d4-a716-446655440002"
+    status:
+      $ref: '#/CampaignStatus'
+    progress_percent:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 100
+      description: Overall completion percentage
+      example: 65.5
+    jobs_total:
+      type: integer
+      minimum: 0
+      description: Total jobs in campaign
+      example: 20
+    jobs_completed:
+      type: integer
+      minimum: 0
+      description: Successfully completed jobs
+      example: 12
+    jobs_running:
+      type: integer
+      minimum: 0
+      description: Currently running jobs
+      example: 5
+    jobs_failed:
+      type: integer
+      minimum: 0
+      description: Failed jobs
+      example: 2
+    jobs_pending:
+      type: integer
+      minimum: 0
+      description: Jobs waiting to start
+      example: 1
+    crashes_total:
+      type: integer
+      minimum: 0
+      description: Total crashes found
+      example: 25
+    crashes_unique:
+      type: integer
+      minimum: 0
+      description: Unique crashes found
+      example: 8
+    coverage_total:
+      type: integer
+      minimum: 0
+      description: Total coverage edges discovered
+      example: 45600
+    coverage_percentage:
+      type: number
+      format: float
+      minimum: 0
+      maximum: 100
+      description: Code coverage percentage
+      example: 78.5
+    corpus_size_files:
+      type: integer
+      minimum: 0
+      description: Total corpus files
+      example: 5400
+    corpus_size_bytes:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Total corpus size in bytes
+      example: 2684354560
+    execution_time:
+      $ref: 'common.yaml#/Duration'
+      description: Total execution time
+      example: "15h30m45s"
+    cpu_time_used:
+      $ref: 'common.yaml#/Duration'
+      description: Total CPU time consumed
+      example: "125h15m30s"
+    memory_peak_usage:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Peak memory usage in bytes
+      example: 17179869184
+    disk_usage:
+      type: integer
+      format: int64
+      minimum: 0
+      description: Current disk usage in bytes
+      example: 53687091200
+    executions_per_second:
+      type: number
+      format: float
+      minimum: 0
+      description: Current aggregate execution rate
+      example: 5500.75
+    last_updated:
+      type: string
+      format: date-time
+      description: When statistics were last updated
+      example: "2023-12-01T14:45:30Z"
+    fuzzer_breakdown:
+      type: array
+      description: Per-fuzzer statistics
+      items:
+        type: object
+        properties:
+          fuzzer_type:
+            $ref: 'common.yaml#/FuzzerType'
+          jobs_count:
+            type: integer
+          crashes_found:
+            type: integer
+          coverage_contribution:
+            type: integer
+          execution_rate:
+            type: number
+            format: float
+
+CampaignRequest:
+  type: object
+  description: Request to create a new campaign
+  required:
+    - name
+    - target_config
+    - fuzzer_configs
+  properties:
+    name:
+      type: string
+      maxLength: 200
+      description: Campaign name
+      example: "HTTP Parser Security Test"
+    description:
+      type: string
+      maxLength: 2000
+      description: Campaign description
+      example: "Security assessment using multiple fuzzing engines"
+    target_config:
+      $ref: '#/CampaignTargetConfig'
+    job_template:
+      $ref: 'job.yaml#/JobConfig'
+    fuzzer_configs:
+      type: array
+      description: Fuzzer configurations
+      items:
+        $ref: '#/FuzzerConfig'
+      minItems: 1
+      maxItems: 10
+    corpus_strategy:
+      $ref: '#/CorpusStrategy'
+    scheduling:
+      $ref: '#/CampaignScheduling'
+    limits:
+      $ref: '#/CampaignLimits'
+    owner:
+      type: string
+      maxLength: 100
+      description: Campaign owner
+      example: "security-team"
+    tags:
+      type: array
+      description: Classification tags
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+        maxLength: 50
+      maxItems: 30
+    metadata:
+      type: object
+      description: Additional metadata
+      additionalProperties:
+        type: string
+      maxProperties: 50
+
+CampaignUpdate:
+  type: object
+  description: Request to update campaign properties
+  properties:
+    name:
+      type: string
+      maxLength: 200
+    description:
+      type: string
+      maxLength: 2000
+    status:
+      $ref: '#/CampaignStatus'
+    fuzzer_configs:
+      type: array
+      items:
+        $ref: '#/FuzzerConfig'
+      maxItems: 10
+    corpus_strategy:
+      $ref: '#/CorpusStrategy'
+    scheduling:
+      $ref: '#/CampaignScheduling'
+    limits:
+      $ref: '#/CampaignLimits'
+    tags:
+      type: array
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+        maxLength: 50
+      maxItems: 30
+    metadata:
+      type: object
+      additionalProperties:
+        type: string
+      maxProperties: 50
+
+CampaignListResponse:
+  type: object
+  description: Paginated list of campaigns
+  required:
+    - campaigns
+    - pagination
+  properties:
+    campaigns:
+      type: array
+      items:
+        $ref: '#/Campaign'
+    pagination:
+      $ref: 'common.yaml#/Pagination'
+    filters:
+      type: object
+      description: Applied filters
+      properties:
+        status:
+          type: array
+          items:
+            $ref: '#/CampaignStatus'
+        owner:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        created_after:
+          type: string
+          format: date-time
+        created_before:
+          type: string
+          format: date-time
+
+CampaignActionRequest:
+  type: object
+  description: Request to perform an action on a campaign
+  required:
+    - action
+  properties:
+    action:
+      type: string
+      enum: [start, pause, resume, stop, archive, delete]
+      description: Action to perform
+      example: "start"
+    reason:
+      type: string
+      maxLength: 500
+      description: Reason for the action
+      example: "Starting security assessment for release 2.1.0"
+    force:
+      type: boolean
+      default: false
+      description: Force action even if risky
+    cascade_to_jobs:
+      type: boolean
+      default: true
+      description: Apply action to all campaign jobs
+    scheduled_at:
+      type: string
+      format: date-time
+      description: When to perform the action
+      example: "2023-12-01T15:00:00Z"
+
+CampaignActionResponse:
+  type: object
+  description: Response to campaign action request
+  required:
+    - campaign_id
+    - action
+    - status
+    - performed_at
+  properties:
+    campaign_id:
+      type: string
+      format: uuid
+      description: Campaign identifier
+      example: "550e8400-e29b-41d4-a716-446655440002"
+    action:
+      type: string
+      enum: [start, pause, resume, stop, archive, delete]
+      description: Action that was performed
+      example: "start"
+    status:
+      type: string
+      enum: [accepted, rejected, completed, failed, in_progress]
+      description: Action result status
+      example: "completed"
+    performed_at:
+      type: string
+      format: date-time
+      description: When action was performed
+      example: "2023-12-01T15:00:00Z"
+    message:
+      type: string
+      maxLength: 500
+      description: Additional status message
+      example: "Campaign started successfully, 5 jobs queued"
+    new_campaign_status:
+      $ref: '#/CampaignStatus'
+    affected_jobs:
+      type: array
+      description: Jobs affected by the action
+      items:
+        type: object
+        properties:
+          job_id:
+            type: string
+            format: uuid
+          action_applied:
+            type: string
+          status:
+            type: string

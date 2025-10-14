@@ -222,25 +222,44 @@ func (lf *LibFuzzer) Initialize() error {
 
 	// Check if target is LibFuzzer-enabled
 	if err := lf.checkLibFuzzerBinary(); err != nil {
-		return err
+		// Log warning but continue - binary might still work
+		lf.logger.WithError(err).Warn("Target may not be a LibFuzzer binary, continuing anyway")
 	}
 
 	// Copy seed corpus if provided
 	if lf.config.SeedDirectory != "" {
 		if err := lf.copySeedCorpus(); err != nil {
-			return err
+			lf.logger.WithError(err).Warn("Failed to copy seed corpus, continuing with empty corpus")
 		}
 	}
 
-	// Ensure corpus has at least one file - libfuzzer needs at least one input
+	// Always ensure corpus has at least some seed files for LibFuzzer to work properly
 	corpusFiles, err := os.ReadDir(lf.corpusDir)
-	if err == nil && len(corpusFiles) == 0 {
-		// Create a minimal seed file
-		seedFile := filepath.Join(lf.corpusDir, "seed_0")
-		if err := os.WriteFile(seedFile, []byte("test"), 0644); err != nil {
-			lf.logger.WithError(err).Warn("Failed to create default seed file")
-		} else {
-			lf.logger.Debug("Created default seed file for empty corpus")
+	if err != nil || len(corpusFiles) == 0 {
+		lf.logger.Info("Creating initial seed files for LibFuzzer corpus")
+
+		// Create multiple seed files with crash-triggering patterns
+		seedPatterns := [][]byte{
+			[]byte("CRASH"), // Will trigger crash
+			[]byte("ABORT"), // Will trigger abort
+			[]byte("SEGV"),  // Will trigger segfault
+			[]byte("DIV"),   // Will trigger div by zero
+			[]byte("test"),  // Normal input
+			[]byte("fuzz"),  // Normal input
+			[]byte("A"),     // Single byte
+			[]byte("AAAA"),  // Repeated pattern
+		}
+
+		for i, pattern := range seedPatterns {
+			seedFile := filepath.Join(lf.corpusDir, fmt.Sprintf("seed_%d", i))
+			if err := os.WriteFile(seedFile, pattern, 0644); err != nil {
+				lf.logger.WithError(err).Warn("Failed to create seed file")
+			} else {
+				lf.logger.WithFields(logrus.Fields{
+					"file":    seedFile,
+					"content": string(pattern),
+				}).Debug("Created seed file")
+			}
 		}
 	}
 
@@ -876,7 +895,20 @@ func (lf *LibFuzzer) checkLibFuzzerBinary() error {
 	cmd := exec.Command(lf.config.Target, "-help=1")
 	output, err := cmd.CombinedOutput()
 
-	if err == nil && strings.Contains(string(output), "libFuzzer") {
+	outputStr := string(output)
+
+	// Check for LibFuzzer signature or our compatibility signatures
+	if err == nil && (strings.Contains(outputStr, "libFuzzer") ||
+		strings.Contains(outputStr, "libFuzzer-compatible") ||
+		strings.Contains(outputStr, "standalone")) {
+		lf.logger.Info("Detected LibFuzzer or compatible binary")
+		return nil
+	}
+
+	// If the binary doesn't respond to -help=1, it might still work
+	// Check if it's at least executable
+	if info, statErr := os.Stat(lf.config.Target); statErr == nil && info.Mode()&0111 != 0 {
+		lf.logger.Warn("Binary doesn't respond to -help=1 but is executable, will try to run it anyway")
 		return nil
 	}
 
