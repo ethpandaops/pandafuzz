@@ -6,914 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/storage"
-	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
-// PersistentState manages all system state with persistence and recovery
-type PersistentState struct {
-	db           common.Database
-	mu           sync.RWMutex
-	bots         map[string]*common.Bot
-	jobs         map[string]*common.Job
-	metadata     map[string]any
-	retryManager *common.RetryManager
-	logger       *logrus.Logger
-	config       *common.MasterConfig
-	stats        StateStats
-
-	// Cache management
-	maxCacheSize    int
-	cacheAccessTime map[string]time.Time // Track last access time for cache eviction
-
-	// Campaign management
-	campaignManager *CampaignStateManager
-
-	// Storage backend
-	Storage common.Storage // Storage backend for files
-}
-
-// StateStats tracks statistics about the state manager
-type StateStats struct {
-	BotsRegistered   int64     `json:"bots_registered"`
-	JobsCreated      int64     `json:"jobs_created"`
-	CrashesRecorded  int64     `json:"crashes_recorded"`
-	CoverageReports  int64     `json:"coverage_reports"`
-	CorpusUpdates    int64     `json:"corpus_updates"`
-	TransactionCount int64     `json:"transaction_count"`
-	LastRecovery     time.Time `json:"last_recovery"`
-	LastBackup       time.Time `json:"last_backup"`
-	Uptime           time.Time `json:"uptime"`
-}
-
-// NewPersistentState creates a new persistent state manager
-func NewPersistentState(db common.Database, config *common.MasterConfig, logger *logrus.Logger) *PersistentState {
-	if logger == nil {
-		logger = logrus.New()
-		logger.SetLevel(logrus.InfoLevel)
-	}
-
-	retryPolicy := config.Retry.Database
-	if retryPolicy.MaxRetries == 0 {
-		retryPolicy = common.DatabaseRetryPolicy
-	}
-
-	// Default cache size to 1000 items per type (bots, jobs)
-	maxCacheSize := 1000
-	if config.Limits.MaxCacheSize > 0 {
-		maxCacheSize = config.Limits.MaxCacheSize
-	}
-
-	return &PersistentState{
-		db:              db,
-		bots:            make(map[string]*common.Bot),
-		jobs:            make(map[string]*common.Job),
-		metadata:        make(map[string]any),
-		retryManager:    common.NewRetryManager(retryPolicy),
-		logger:          logger,
-		config:          config,
-		maxCacheSize:    maxCacheSize,
-		cacheAccessTime: make(map[string]time.Time),
-		stats: StateStats{
-			Uptime: time.Now(),
-		},
-	}
-}
-
-// Bot operations with retry logic
-func (ps *PersistentState) SaveBotWithRetry(ctx context.Context, bot *common.Bot) error {
-	return ps.retryManager.Execute(func() error {
-		// Acquire lock late
-		ps.mu.Lock()
-		// Update in-memory state
-		ps.bots[bot.ID] = bot
-		ps.mu.Unlock()
-
-		// Don't hold lock during database operation
-		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
-			// Persist to database
-			if err := tx.Store(ctx, "bot:"+bot.ID, bot); err != nil {
-				return common.NewDatabaseError("save_bot", err)
-			}
-
-			ps.mu.Lock()
-			ps.stats.TransactionCount++
-			ps.mu.Unlock()
-
-			ps.logger.WithFields(logrus.Fields{
-				"bot_id":   bot.ID,
-				"hostname": bot.Hostname,
-				"status":   bot.Status,
-			}).Debug("Bot saved successfully")
-
-			return nil
-		})
-	})
-}
-
-func (ps *PersistentState) GetBot(ctx context.Context, botID string) (*common.Bot, error) {
-	// Check in-memory cache first with RLock
-	ps.mu.RLock()
-	if bot, exists := ps.bots[botID]; exists {
-		ps.mu.RUnlock()
-		// Update access time for LRU
-		ps.mu.Lock()
-		ps.cacheAccessTime["bot:"+botID] = time.Now()
-		ps.mu.Unlock()
-		return bot, nil
-	}
-	ps.mu.RUnlock()
-
-	// Load from database without holding lock
-	var bot common.Bot
-	err := ps.retryManager.Execute(func() error {
-		return ps.db.Get(ctx, "bot:"+botID, &bot)
-	})
-
-	if err != nil {
-		if common.IsNotFoundError(err) {
-			return nil, common.NewValidationError("get_bot", fmt.Errorf("bot not found: %s", botID))
-		}
-		return nil, common.NewDatabaseError("get_bot", err)
-	}
-
-	// Update cache with proper synchronization to avoid race condition
-	ps.mu.Lock()
-	// Double-check if another goroutine already cached it
-	if existingBot, exists := ps.bots[botID]; exists {
-		ps.mu.Unlock()
-		return existingBot, nil
-	}
-
-	// Check cache size and evict if necessary
-	if len(ps.bots) >= ps.maxCacheSize {
-		ps.evictOldestBotFromCache()
-	}
-
-	ps.bots[botID] = &bot
-	ps.cacheAccessTime["bot:"+botID] = time.Now()
-	ps.mu.Unlock()
-
-	return &bot, nil
-}
-
-func (ps *PersistentState) DeleteBot(ctx context.Context, botID string) error {
-	return ps.retryManager.Execute(func() error {
-		// Remove from in-memory state first
-		ps.mu.Lock()
-		delete(ps.bots, botID)
-		delete(ps.cacheAccessTime, "bot:"+botID)
-		ps.mu.Unlock()
-
-		// Don't hold lock during database operation
-		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
-			// Remove from database
-			if err := tx.Delete(ctx, "bot:"+botID); err != nil {
-				return common.NewDatabaseError("delete_bot", err)
-			}
-
-			ps.mu.Lock()
-			ps.stats.TransactionCount++
-			ps.mu.Unlock()
-
-			ps.logger.WithField("bot_id", botID).Debug("Bot deleted successfully")
-
-			return nil
-		})
-	})
-}
-
-func (ps *PersistentState) ListBots(ctx context.Context) ([]*common.Bot, error) {
-	ps.mu.RLock()
-	defer ps.mu.RUnlock()
-
-	bots := make([]*common.Bot, 0, len(ps.bots))
-	for _, bot := range ps.bots {
-		bots = append(bots, bot)
-	}
-
-	return bots, nil
-}
-
-// Job operations with retry logic
-func (ps *PersistentState) SaveJobWithRetry(ctx context.Context, job *common.Job) error {
-	return ps.retryManager.Execute(func() error {
-		// Acquire lock late
-		ps.mu.Lock()
-		// Update in-memory state
-		ps.jobs[job.ID] = job
-		ps.mu.Unlock()
-
-		// Don't hold lock during database operation
-		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
-			// Persist to database
-			if err := tx.Store(ctx, "job:"+job.ID, job); err != nil {
-				return common.NewDatabaseError("save_job", err)
-			}
-
-			ps.mu.Lock()
-			ps.stats.TransactionCount++
-			ps.mu.Unlock()
-
-			ps.logger.WithFields(logrus.Fields{
-				"job_id":       job.ID,
-				"job_name":     job.Name,
-				"fuzzer":       job.Fuzzer,
-				"status":       job.Status,
-				"assigned_bot": job.AssignedBot,
-			}).Debug("Job saved successfully")
-
-			return nil
-		})
-	})
-}
-
-func (ps *PersistentState) GetJob(ctx context.Context, jobID string) (*common.Job, error) {
-	// Check in-memory cache first with RLock
-	ps.mu.RLock()
-	if job, exists := ps.jobs[jobID]; exists {
-		ps.mu.RUnlock()
-		// Update access time for LRU
-		ps.mu.Lock()
-		ps.cacheAccessTime["job:"+jobID] = time.Now()
-		ps.mu.Unlock()
-		return job, nil
-	}
-	ps.mu.RUnlock()
-
-	// If we have SQLiteStorage, use its GetJob method to get data from the jobs table
-	// This ensures we get all fields including enable_coverage and coverage_format
-	ps.logger.WithFields(logrus.Fields{
-		"job_id":  jobID,
-		"db_type": fmt.Sprintf("%T", ps.db),
-	}).Info("Checking database type for GetJob")
-
-	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
-		ps.logger.WithField("job_id", jobID).Info("Using SQLiteStorage.GetJob for job retrieval")
-		job, err := sqliteDB.GetJob(ctx, jobID)
-		if err != nil {
-			if common.IsNotFoundError(err) {
-				return nil, common.NewValidationError("get_job", fmt.Errorf("job not found: %s", jobID))
-			}
-			return nil, common.NewDatabaseError("get_job", err)
-		}
-
-		ps.logger.WithFields(logrus.Fields{
-			"job_id":          jobID,
-			"enable_coverage": job.EnableCoverage,
-			"coverage_format": job.CoverageFormat,
-		}).Debug("Retrieved job from SQLiteStorage")
-
-		// Update cache with proper synchronization
-		ps.mu.Lock()
-		ps.jobs[jobID] = job
-		ps.cacheAccessTime["job:"+jobID] = time.Now()
-		ps.mu.Unlock()
-
-		return job, nil
-	}
-
-	// Fallback: Load from database metadata table without holding lock
-	var job common.Job
-	err := ps.retryManager.Execute(func() error {
-		return ps.db.Get(ctx, "job:"+jobID, &job)
-	})
-
-	if err != nil {
-		if common.IsNotFoundError(err) {
-			return nil, common.NewValidationError("get_job", fmt.Errorf("job not found: %s", jobID))
-		}
-		return nil, common.NewDatabaseError("get_job", err)
-	}
-
-	// Update cache with proper synchronization to avoid race condition
-	ps.mu.Lock()
-	// Double-check if another goroutine already cached it
-	if existingJob, exists := ps.jobs[jobID]; exists {
-		ps.mu.Unlock()
-		return existingJob, nil
-	}
-
-	// Check cache size and evict if necessary
-	if len(ps.jobs) >= ps.maxCacheSize {
-		ps.evictOldestJobFromCache()
-	}
-
-	ps.jobs[jobID] = &job
-	ps.cacheAccessTime["job:"+jobID] = time.Now()
-	ps.mu.Unlock()
-
-	return &job, nil
-}
-
-func (ps *PersistentState) DeleteJob(ctx context.Context, jobID string) error {
-	return ps.retryManager.Execute(func() error {
-		// Remove from in-memory state first
-		ps.mu.Lock()
-		delete(ps.jobs, jobID)
-		delete(ps.cacheAccessTime, "job:"+jobID)
-		ps.mu.Unlock()
-
-		// Don't hold lock during database operation
-		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
-			// Remove from database
-			if err := tx.Delete(ctx, "job:"+jobID); err != nil {
-				return common.NewDatabaseError("delete_job", err)
-			}
-
-			ps.mu.Lock()
-			ps.stats.TransactionCount++
-			ps.mu.Unlock()
-
-			ps.logger.WithField("job_id", jobID).Debug("Job deleted successfully")
-
-			return nil
-		})
-	})
-}
-
-func (ps *PersistentState) ListJobs(ctx context.Context) ([]*common.Job, error) {
-	// Always fetch fresh data from database to ensure we have all jobs
-	// This fixes the phantom job issue where jobs exist in DB but not in cache
-	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
-		// Fetch all jobs from database
-		jobs, err := sqliteDB.ListJobs(ctx, 0, 0, "") // No limit, no offset, no status filter
-		if err != nil {
-			ps.logger.WithError(err).Warn("Failed to fetch jobs from database, falling back to cache")
-			// Fallback to cache if database query fails
-			ps.mu.RLock()
-			defer ps.mu.RUnlock()
-			cachedJobs := make([]*common.Job, 0, len(ps.jobs))
-			for _, job := range ps.jobs {
-				cachedJobs = append(cachedJobs, job)
-			}
-			return cachedJobs, nil
-		}
-
-		// Update cache with fresh data from database
-		ps.mu.Lock()
-		for _, job := range jobs {
-			ps.jobs[job.ID] = job
-		}
-		ps.mu.Unlock()
-
-		ps.logger.WithField("job_count", len(jobs)).Debug("Synchronized jobs from database")
-		return jobs, nil
-	}
-
-	// Fallback to cache for non-advanced databases
-	ps.mu.RLock()
-	defer ps.mu.RUnlock()
-	jobs := make([]*common.Job, 0, len(ps.jobs))
-	for _, job := range ps.jobs {
-		jobs = append(jobs, job)
-	}
-	return jobs, nil
-}
-
-// ListJobsSorted retrieves jobs with sorting from the database
-func (ps *PersistentState) ListJobsSorted(ctx context.Context, sortBy string, sortOrder string) ([]*common.Job, error) {
-	// Check if database supports advanced operations
-	advDB, isAdvanced := ps.db.(common.AdvancedDatabase)
-	if !isAdvanced {
-		// Fallback to unsorted list
-		return ps.ListJobs(ctx)
-	}
-
-	// Build the ORDER BY clause
-	orderClause := ""
-	switch sortBy {
-	case "created_at":
-		orderClause = "created_at"
-	case "started_at":
-		orderClause = "started_at"
-	case "completed_at":
-		orderClause = "completed_at"
-	case "name":
-		orderClause = "name"
-	case "status":
-		orderClause = "status"
-	case "fuzzer":
-		orderClause = "fuzzer"
-	default:
-		orderClause = "created_at" // Default sort
-	}
-
-	if sortOrder == "asc" {
-		orderClause += " ASC"
-	} else {
-		orderClause += " DESC"
-	}
-
-	query := fmt.Sprintf(`
-		SELECT id, name, target, fuzzer, status, created_at, started_at, completed_at, 
-		       timeout_at, assigned_bot, work_dir, config, progress
-		FROM jobs 
-		ORDER BY %s
-	`, orderClause)
-
-	rows, err := advDB.Select(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-
-	jobs := make([]*common.Job, 0, len(rows))
-	for _, row := range rows {
-		job := &common.Job{}
-
-		// Parse basic fields
-		if id, ok := row["id"].(string); ok {
-			job.ID = id
-		}
-		if name, ok := row["name"].(string); ok {
-			job.Name = name
-		}
-		if target, ok := row["target"].(string); ok {
-			job.Target = target
-		}
-		if fuzzer, ok := row["fuzzer"].(string); ok {
-			job.Fuzzer = fuzzer
-		}
-		if status, ok := row["status"].(string); ok {
-			job.Status = common.JobStatus(status)
-		}
-		if workDir, ok := row["work_dir"].(string); ok {
-			job.WorkDir = workDir
-		}
-		if progress, ok := row["progress"].(int64); ok {
-			job.Progress = int(progress)
-		}
-
-		// Parse time fields
-		if createdAt, ok := row["created_at"].(time.Time); ok {
-			job.CreatedAt = createdAt
-		} else if createdAt, ok := row["created_at"].(string); ok {
-			if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
-				job.CreatedAt = t
-			}
-		}
-
-		if startedAt, ok := row["started_at"].(time.Time); ok {
-			job.StartedAt = &startedAt
-		} else if startedAt, ok := row["started_at"].(string); ok && startedAt != "" {
-			if t, err := time.Parse(time.RFC3339, startedAt); err == nil {
-				job.StartedAt = &t
-			}
-		}
-
-		if completedAt, ok := row["completed_at"].(time.Time); ok {
-			job.CompletedAt = &completedAt
-		} else if completedAt, ok := row["completed_at"].(string); ok && completedAt != "" {
-			if t, err := time.Parse(time.RFC3339, completedAt); err == nil {
-				job.CompletedAt = &t
-			}
-		}
-
-		if timeoutAt, ok := row["timeout_at"].(time.Time); ok {
-			job.TimeoutAt = timeoutAt
-		} else if timeoutAt, ok := row["timeout_at"].(string); ok {
-			if t, err := time.Parse(time.RFC3339, timeoutAt); err == nil {
-				job.TimeoutAt = t
-			}
-		}
-
-		// Parse assigned bot
-		if assignedBot, ok := row["assigned_bot"].(string); ok && assignedBot != "" {
-			job.AssignedBot = &assignedBot
-		}
-
-		// Parse config field
-		if configStr, ok := row["config"].(string); ok && configStr != "" {
-			if err := json.Unmarshal([]byte(configStr), &job.Config); err != nil {
-				ps.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to parse job config")
-			}
-		}
-
-		jobs = append(jobs, job)
-	}
-
-	return jobs, nil
-}
-
-// Atomic job assignment with retry logic
-func (ps *PersistentState) AtomicJobAssignmentWithRetry(ctx context.Context, botID string) (*common.Job, error) {
-	var assignedJob *common.Job
-
-	err := ps.retryManager.Execute(func() error {
-		// Get bot info before transaction
-		ps.mu.RLock()
-		bot, exists := ps.bots[botID]
-		if exists {
-			// Make a copy to avoid race conditions
-			botCopy := *bot
-			bot = &botCopy
-		}
-		ps.mu.RUnlock()
-
-		if !exists {
-			return common.NewValidationError("job_assignment", fmt.Errorf("bot not found: %s", botID))
-		}
-
-		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
-			// Find available job with minimal locking
-			ps.mu.RLock()
-			job, err := ps.findAvailableJobTx()
-			ps.mu.RUnlock()
-
-			if err != nil {
-				return err
-			}
-			if job == nil {
-				return common.NewValidationError("job_assignment", fmt.Errorf("no jobs available"))
-			}
-
-			// Check bot availability
-			if bot.Status != common.BotStatusIdle {
-				return common.NewValidationError("job_assignment", fmt.Errorf("bot not available: %s", bot.Status))
-			}
-
-			// Update job status
-			now := time.Now()
-			job.Status = common.JobStatusAssigned
-			job.AssignedBot = &botID
-			job.StartedAt = &now
-
-			// Keep the relative work directory - bot will resolve it based on its config
-			// job.WorkDir is already set to a relative path during job creation
-
-			// Update bot status
-			bot.Status = common.BotStatusBusy
-			bot.CurrentJob = &job.ID
-			bot.LastSeen = now
-
-			// Create assignment record
-			assignment := &common.JobAssignment{
-				JobID:     job.ID,
-				BotID:     botID,
-				Timestamp: now,
-				Status:    "assigned",
-			}
-
-			// Persist all changes atomically
-			if err := tx.Store(ctx, "job:"+job.ID, job); err != nil {
-				return common.NewDatabaseError("save_job_assignment", err)
-			}
-			if err := tx.Store(ctx, "bot:"+botID, bot); err != nil {
-				return common.NewDatabaseError("save_bot_assignment", err)
-			}
-			if err := tx.Store(ctx, "assignment:"+job.ID, assignment); err != nil {
-				return common.NewDatabaseError("save_assignment", err)
-			}
-
-			assignedJob = job
-			return nil
-		})
-	})
-
-	if err == nil && assignedJob != nil {
-		// Update in-memory state after successful commit
-		ps.mu.Lock()
-		ps.jobs[assignedJob.ID] = assignedJob
-		if bot, exists := ps.bots[botID]; exists {
-			bot.Status = common.BotStatusBusy
-			bot.CurrentJob = &assignedJob.ID
-			bot.LastSeen = time.Now()
-		}
-		ps.stats.TransactionCount++
-		ps.mu.Unlock()
-
-		ps.logger.WithFields(logrus.Fields{
-			"job_id":   assignedJob.ID,
-			"bot_id":   botID,
-			"job_name": assignedJob.Name,
-			"fuzzer":   assignedJob.Fuzzer,
-		}).Info("Job assigned successfully")
-	}
-
-	return assignedJob, err
-}
-
-// findAvailableJobTx finds an available job for assignment (transaction context)
-func (ps *PersistentState) findAvailableJobTx() (*common.Job, error) {
-	for _, job := range ps.jobs {
-		if job.Status == common.JobStatusPending {
-			// Check if job has not timed out
-			if time.Now().Before(job.TimeoutAt) {
-				return job, nil
-			}
-		}
-	}
-	return nil, nil
-}
-
-// UpdateJobStatusToTimedOut updates a job status to timed out (for unassigned jobs)
-func (ps *PersistentState) UpdateJobStatusToTimedOut(ctx context.Context, jobID string) error {
-	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
-			ps.mu.Lock()
-			defer ps.mu.Unlock()
-
-			// Get job
-			job, exists := ps.jobs[jobID]
-			if !exists {
-				return common.NewValidationError("update_job_timeout", fmt.Errorf("job not found: %s", jobID))
-			}
-
-			// Only update if job is still pending
-			if job.Status != common.JobStatusPending {
-				ps.logger.WithFields(logrus.Fields{
-					"job_id": jobID,
-					"status": job.Status,
-				}).Debug("Job is not pending, skipping timeout status update")
-				return nil
-			}
-
-			// Update job status
-			now := time.Now()
-			job.Status = common.JobStatusFailed // Mark as failed due to timeout
-			job.CompletedAt = &now
-
-			// Add timeout metadata
-			if job.Metadata == nil {
-				job.Metadata = make(map[string]interface{})
-			}
-			job.Metadata["failure_reason"] = "timeout"
-			job.Metadata["timed_out_at"] = now.Format(time.RFC3339)
-
-			// Persist changes
-			if err := tx.Store(ctx, "job:"+jobID, job); err != nil {
-				return common.NewDatabaseError("save_job_timeout", err)
-			}
-
-			ps.stats.TransactionCount++
-
-			ps.logger.WithFields(logrus.Fields{
-				"job_id": jobID,
-				"status": job.Status,
-			}).Info("Job marked as timed out")
-
-			return nil
-		})
-	})
-}
-
-// Job completion with retry logic
-func (ps *PersistentState) CompleteJobWithRetry(ctx context.Context, jobID, botID string, success bool) error {
-	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
-			ps.mu.Lock()
-			defer ps.mu.Unlock()
-
-			// Get job
-			job, exists := ps.jobs[jobID]
-			if !exists {
-				return common.NewValidationError("complete_job", fmt.Errorf("job not found: %s", jobID))
-			}
-
-			// Get bot
-			bot, exists := ps.bots[botID]
-			if !exists {
-				return common.NewValidationError("complete_job", fmt.Errorf("bot not found: %s", botID))
-			}
-
-			// Validate assignment
-			if job.AssignedBot == nil || *job.AssignedBot != botID {
-				return common.NewValidationError("complete_job", fmt.Errorf("job not assigned to bot"))
-			}
-
-			// Update job status
-			now := time.Now()
-			if success {
-				job.Status = common.JobStatusCompleted
-			} else {
-				job.Status = common.JobStatusFailed
-			}
-			job.CompletedAt = &now
-			job.AssignedBot = nil
-
-			// Update bot status
-			bot.Status = common.BotStatusIdle
-			bot.CurrentJob = nil
-			bot.LastSeen = now
-
-			// Update assignment record
-			assignment := &common.JobAssignment{
-				JobID:     jobID,
-				BotID:     botID,
-				Timestamp: now,
-				Status:    "completed",
-			}
-
-			// Persist changes
-			if err := tx.Store(ctx, "job:"+jobID, job); err != nil {
-				return common.NewDatabaseError("save_job_completion", err)
-			}
-			if err := tx.Store(ctx, "bot:"+botID, bot); err != nil {
-				return common.NewDatabaseError("save_bot_completion", err)
-			}
-			if err := tx.Store(ctx, "assignment:"+jobID, assignment); err != nil {
-				return common.NewDatabaseError("save_assignment_completion", err)
-			}
-
-			// Update in-memory state
-			ps.jobs[jobID] = job
-			ps.bots[botID] = bot
-
-			ps.stats.TransactionCount++
-
-			ps.logger.WithFields(logrus.Fields{
-				"job_id":  jobID,
-				"bot_id":  botID,
-				"success": success,
-				"status":  job.Status,
-			}).Info("Job completed successfully")
-
-			return nil
-		})
-	})
-}
-
-// Result processing with retry logic
-func (ps *PersistentState) ProcessCrashResultWithRetry(ctx context.Context, crash *common.CrashResult) error {
-	// Log incoming crash for processing
-	ps.logger.WithFields(logrus.Fields{
-		"crash_id":  crash.ID,
-		"job_id":    crash.JobID,
-		"bot_id":    crash.BotID,
-		"hash":      crash.Hash,
-		"type":      crash.Type,
-		"size":      crash.Size,
-		"timestamp": crash.Timestamp,
-	}).Info("Processing crash result from bot")
-
-	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
-			// Generate crash ID if not provided
-			if crash.ID == "" {
-				crash.ID = uuid.New().String()
-				ps.logger.WithFields(logrus.Fields{
-					"crash_id": crash.ID,
-					"job_id":   crash.JobID,
-				}).Debug("Generated new crash ID")
-			}
-
-			// Check for duplicates based on hash
-			duplicate, err := ps.checkCrashDuplicateTx(ctx, tx, crash.Hash)
-			if err != nil {
-				return err
-			}
-
-			crash.IsUnique = !duplicate
-
-			if duplicate {
-				ps.logger.WithFields(logrus.Fields{
-					"crash_hash": crash.Hash,
-					"crash_id":   crash.ID,
-					"job_id":     crash.JobID,
-				}).Info("Crash is a duplicate of existing crash")
-			} else {
-				ps.logger.WithFields(logrus.Fields{
-					"crash_hash": crash.Hash,
-					"crash_id":   crash.ID,
-					"job_id":     crash.JobID,
-				}).Info("Crash is unique")
-			}
-
-			// Store crash input separately if provided
-			hasInput := len(crash.Input) > 0
-
-			// Log crash input status
-			if hasInput {
-				ps.logger.WithFields(logrus.Fields{
-					"crash_id":   crash.ID,
-					"input_size": len(crash.Input),
-				}).Info("Received crash with input data")
-			} else if crash.InputBase64 != "" {
-				ps.logger.WithFields(logrus.Fields{
-					"crash_id": crash.ID,
-				}).Info("Received crash with base64 input")
-			} else {
-				ps.logger.WithFields(logrus.Fields{
-					"crash_id": crash.ID,
-				}).Warn("WARNING: Crash received without input data")
-			}
-
-			if hasInput {
-				// Check if we're using SQLiteStorage
-				if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
-					// Store outside transaction for SQLite (it has its own locking)
-					if err := sqliteDB.StoreCrashInput(ctx, crash.ID, crash.Input); err != nil {
-						return common.NewDatabaseError("save_crash_input", err)
-					}
-				} else {
-					// Fallback for other databases
-					if err := tx.Store(ctx, "crash_input:"+crash.ID, crash.Input); err != nil {
-						return common.NewDatabaseError("save_crash_input", err)
-					}
-				}
-				// Clear the input from the crash object to avoid storing it twice
-				crash.Input = nil
-			}
-
-			// Store crash result (without input data)
-			if err := tx.Store(ctx, "crash:"+crash.ID, crash); err != nil {
-				return common.NewDatabaseError("save_crash", err)
-			}
-
-			ps.stats.CrashesRecorded++
-			ps.stats.TransactionCount++
-
-			ps.logger.WithFields(logrus.Fields{
-				"crash_id":  crash.ID,
-				"job_id":    crash.JobID,
-				"bot_id":    crash.BotID,
-				"hash":      crash.Hash,
-				"is_unique": crash.IsUnique,
-				"type":      crash.Type,
-				"signal":    crash.Signal,
-				"exit_code": crash.ExitCode,
-				"size":      crash.Size,
-				"file_path": crash.FilePath,
-				"has_input": hasInput,
-				"timestamp": crash.Timestamp,
-			}).Info("Crash result successfully processed and stored")
-
-			return nil
-		})
-	})
-}
-
-func (ps *PersistentState) ProcessCoverageResultWithRetry(ctx context.Context, coverage *common.CoverageResult) error {
-	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
-			// Generate coverage ID if not provided
-			if coverage.ID == "" {
-				coverage.ID = uuid.New().String()
-			}
-
-			// Store coverage result
-			if err := tx.Store(ctx, "coverage:"+coverage.ID, coverage); err != nil {
-				return common.NewDatabaseError("save_coverage", err)
-			}
-
-			ps.stats.CoverageReports++
-			ps.stats.TransactionCount++
-
-			ps.logger.WithFields(logrus.Fields{
-				"coverage_id": coverage.ID,
-				"job_id":      coverage.JobID,
-				"bot_id":      coverage.BotID,
-				"edges":       coverage.Edges,
-				"new_edges":   coverage.NewEdges,
-				"exec_count":  coverage.ExecCount,
-			}).Debug("Coverage result processed")
-
-			return nil
-		})
-	})
-}
-
-func (ps *PersistentState) ProcessCorpusUpdateWithRetry(ctx context.Context, corpus *common.CorpusUpdate) error {
-	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
-			// Generate corpus ID if not provided
-			if corpus.ID == "" {
-				corpus.ID = uuid.New().String()
-			}
-
-			// Store corpus update
-			if err := tx.Store(ctx, "corpus:"+corpus.ID, corpus); err != nil {
-				return common.NewDatabaseError("save_corpus", err)
-			}
-
-			ps.stats.CorpusUpdates++
-			ps.stats.TransactionCount++
-
-			ps.logger.WithFields(logrus.Fields{
-				"corpus_id":  corpus.ID,
-				"job_id":     corpus.JobID,
-				"bot_id":     corpus.BotID,
-				"file_count": len(corpus.Files),
-				"total_size": corpus.TotalSize,
-			}).Debug("Corpus update processed")
-
-			return nil
-		})
-	})
-}
-
-// checkCrashDuplicateTx checks if a crash with the given hash already exists
-func (ps *PersistentState) checkCrashDuplicateTx(ctx context.Context, tx common.Transaction, hash string) (bool, error) {
-	// This is a simplified implementation
-	// In a real implementation, you would query existing crashes by hash
-	// For now, we'll assume it's unique
-	return false, nil
-}
+// PersistentState, StateStats, and NewPersistentState are defined in state_core.go
+// Bot operations (SaveBotWithRetry, GetBot, DeleteBot, ListBots, etc.) are defined in state_bot.go
+// Job operations (SaveJobWithRetry, GetJob, DeleteJob, ListJobs, AtomicJobAssignmentWithRetry, etc.) are defined in state_job.go
+// Crash operations (ProcessCrashResultWithRetry, GetCrashes, GetCrash, etc.) are defined in state_crash.go
 
 // Recovery operations
 func (ps *PersistentState) LoadPersistedState(ctx context.Context) error {
@@ -1014,77 +117,70 @@ func (ps *PersistentState) FindOrphanedJobs(ctx context.Context) ([]*common.Job,
 	var orphaned []*common.Job
 	now := time.Now()
 
+	// Add grace period for network delays and timing edge cases
+	const gracePeriod = 10 * time.Second
+
 	for _, job := range ps.jobs {
 		// Job is orphaned if it's assigned but the bot is not available
-		if job.Status == common.JobStatusAssigned || job.Status == common.JobStatusRunning {
-			if job.AssignedBot != nil {
-				bot, exists := ps.bots[*job.AssignedBot]
-				if !exists || bot.Status == common.BotStatusFailed || bot.Status == common.BotStatusTimedOut {
-					orphaned = append(orphaned, job)
-				}
-			}
+		// Include JobStatusStarting in the check
+		if job.Status != common.JobStatusAssigned &&
+			job.Status != common.JobStatusStarting &&
+			job.Status != common.JobStatusRunning {
+			continue
+		}
 
-			// Also check for timed out jobs
-			if now.After(job.TimeoutAt) {
+		// Early exit for jobs without assigned bots
+		if job.AssignedBot == nil {
+			orphaned = append(orphaned, job)
+			continue
+		}
+
+		// Single bot lookup with defensive copy to avoid race conditions
+		bot, exists := ps.bots[*job.AssignedBot]
+		if !exists {
+			orphaned = append(orphaned, job)
+			continue
+		}
+
+		// Create defensive copy to avoid race conditions with concurrent bot updates
+		botStatus := bot.Status
+		botIsOnline := bot.IsOnline
+		var botCurrentJob *string
+		if bot.CurrentJob != nil {
+			jobID := *bot.CurrentJob
+			botCurrentJob = &jobID
+		}
+
+		// Check bot health status
+		if botStatus == common.BotStatusFailed ||
+			botStatus == common.BotStatusTimedOut ||
+			!botIsOnline {
+			orphaned = append(orphaned, job)
+			continue
+		}
+
+		// Check lease expiry with grace period for jobs that have lease tokens
+		// Only mark as orphaned if the lease has expired (bot failed to ACK)
+		if job.LeaseExpiresAt != nil && now.Add(-gracePeriod).After(*job.LeaseExpiresAt) {
+			orphaned = append(orphaned, job)
+			continue
+		}
+
+		// Check job timeout ONLY if bot is not actively working on it
+		// Don't timeout jobs where the bot is still online and reporting progress
+		if now.After(job.TimeoutAt.Add(gracePeriod)) {
+			// Verify bot is not actively working on this job
+			if botCurrentJob == nil || *botCurrentJob != job.ID {
 				orphaned = append(orphaned, job)
 			}
+			// If bot claims to be working on it, trust the bot despite timeout
 		}
 	}
 
 	return orphaned, nil
 }
 
-func (ps *PersistentState) FindTimedOutBots(ctx context.Context) ([]string, error) {
-	ps.mu.RLock()
-	defer ps.mu.RUnlock()
-
-	var timedOut []string
-	now := time.Now()
-
-	for _, bot := range ps.bots {
-		if now.After(bot.TimeoutAt) && bot.Status != common.BotStatusTimedOut {
-			timedOut = append(timedOut, bot.ID)
-		}
-	}
-
-	return timedOut, nil
-}
-
-func (ps *PersistentState) ResetBot(ctx context.Context, botID string) error {
-	return ps.retryManager.Execute(func() error {
-		return ps.db.Transaction(ctx, func(tx common.Transaction) error {
-			ps.mu.Lock()
-			defer ps.mu.Unlock()
-
-			bot, exists := ps.bots[botID]
-			if !exists {
-				return common.NewValidationError("reset_bot", fmt.Errorf("bot not found: %s", botID))
-			}
-
-			// Reset bot state
-			bot.Status = common.BotStatusTimedOut
-			bot.CurrentJob = nil
-			bot.FailureCount++
-
-			// Persist changes
-			if err := tx.Store(ctx, "bot:"+botID, bot); err != nil {
-				return common.NewDatabaseError("reset_bot", err)
-			}
-
-			// Update in-memory state
-			ps.bots[botID] = bot
-
-			ps.stats.TransactionCount++
-
-			ps.logger.WithFields(logrus.Fields{
-				"bot_id":        botID,
-				"failure_count": bot.FailureCount,
-			}).Warn("Bot reset due to timeout")
-
-			return nil
-		})
-	})
-}
+// FindTimedOutBots and ResetBot are defined in state_bot.go
 
 // Metadata operations
 func (ps *PersistentState) SetMetadata(ctx context.Context, key string, value any) error {
@@ -1222,252 +318,13 @@ func (ps *PersistentState) GetCampaignManager() *CampaignStateManager {
 	return ps.campaignManager
 }
 
-// GetCrashes retrieves crashes with pagination
-func (ps *PersistentState) GetCrashes(ctx context.Context, limit, offset int) ([]*common.CrashResult, error) {
-	// Don't hold any locks - database has its own concurrency control
-	// Check if the database is SQLiteStorage and use its optimized methods
-	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
-		return sqliteDB.GetCrashes(ctx, limit, offset)
-	}
-
-	// Fallback for other database implementations that support AdvancedDatabase
-	if advDB, ok := ps.db.(common.AdvancedDatabase); ok {
-		crashes := make([]*common.CrashResult, 0, limit)
-		count := 0
-		skipped := 0
-
-		err := advDB.Iterate(ctx, "crash:", func(key string, value []byte) error {
-			// Skip until we reach the offset
-			if skipped < offset {
-				skipped++
-				return nil
-			}
-
-			// Stop when we've collected enough
-			if count >= limit {
-				return fmt.Errorf("limit reached") // Stop iteration
-			}
-
-			var crash common.CrashResult
-			if err := json.Unmarshal(value, &crash); err != nil {
-				ps.logger.WithError(err).WithField("key", key).Warn("Failed to unmarshal crash")
-				return nil // Continue with next crash
-			}
-
-			crashes = append(crashes, &crash)
-			count++
-			return nil
-		})
-
-		if err != nil && err.Error() != "limit reached" {
-			return nil, err
-		}
-
-		return crashes, nil
-	}
-
-	// Basic database fallback - not efficient but functional
-	return nil, fmt.Errorf("database does not support efficient crash listing")
-}
-
-// GetCrashesSorted retrieves crashes with sorting support
-func (ps *PersistentState) GetCrashesSorted(ctx context.Context, limit, offset int, sortBy, sortOrder string) ([]*common.CrashResult, error) {
-	// Don't hold any locks - database has its own concurrency control
-	// Check if the database is SQLiteStorage and use its optimized methods
-	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
-		return sqliteDB.GetCrashesSorted(ctx, limit, offset, sortBy, sortOrder)
-	}
-
-	// Fallback to unsorted for other database implementations
-	// For now, just use the regular GetCrashes method
-	return ps.GetCrashes(ctx, limit, offset)
-}
-
-// GetCrash retrieves a specific crash by ID
-func (ps *PersistentState) GetCrash(ctx context.Context, crashID string) (*common.CrashResult, error) {
-	// Don't hold any locks - database has its own concurrency control
-	// Check if the database is SQLiteStorage and use its optimized methods
-	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
-		return sqliteDB.GetCrash(ctx, crashID)
-	}
-
-	// Fallback for other database implementations
-	var crash common.CrashResult
-	err := ps.db.Get(ctx, "crash:"+crashID, &crash)
-
-	if err != nil {
-		if err == common.ErrKeyNotFound {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	return &crash, nil
-}
-
-// GetJobCrashes retrieves all crashes for a specific job
-func (ps *PersistentState) GetJobCrashes(ctx context.Context, jobID string) ([]*common.CrashResult, error) {
-	// Don't hold any locks - database has its own concurrency control
-	// Check if the database is SQLiteStorage and use its optimized methods
-	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
-		return sqliteDB.GetJobCrashes(ctx, jobID)
-	}
-
-	// Fallback for other database implementations that support AdvancedDatabase
-	if advDB, ok := ps.db.(common.AdvancedDatabase); ok {
-		crashes := make([]*common.CrashResult, 0)
-
-		err := advDB.Iterate(ctx, "crash:", func(key string, value []byte) error {
-			var crash common.CrashResult
-			if err := json.Unmarshal(value, &crash); err != nil {
-				ps.logger.WithError(err).WithField("key", key).Warn("Failed to unmarshal crash")
-				return nil // Continue with next crash
-			}
-
-			if crash.JobID == jobID {
-				crashes = append(crashes, &crash)
-			}
-			return nil
-		})
-
-		if err != nil {
-			return nil, err
-		}
-
-		return crashes, nil
-	}
-
-	// Basic database fallback - not efficient but functional
-	return nil, fmt.Errorf("database does not support efficient job crash listing")
-}
-
-// GetCrashInput retrieves the input data for a specific crash
-func (ps *PersistentState) GetCrashInput(ctx context.Context, crashID string) ([]byte, error) {
-	// Don't hold any locks - database has its own concurrency control
-	// Check if the database is SQLiteStorage and use its optimized methods
-	if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
-		return sqliteDB.GetCrashInput(ctx, crashID)
-	}
-
-	// Fallback for other database implementations
-	var input []byte
-	err := ps.db.Get(ctx, "crash_input:"+crashID, &input)
-
-	if err != nil {
-		if err == common.ErrKeyNotFound {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	return input, nil
-}
+// Crash retrieval operations (GetCrashes, GetCrashesSorted, GetCrash, GetJobCrashes, GetCrashInput)
+// are defined in state_crash.go
 
 // Cache update methods for optimized operations
-
-// UpdateBotInCache updates bot information in the in-memory cache
-func (ps *PersistentState) UpdateBotInCache(botID string, status common.BotStatus, currentJob *string, lastSeen, timeoutAt time.Time) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-
-	if bot, exists := ps.bots[botID]; exists {
-		bot.Status = status
-		bot.CurrentJob = currentJob
-		bot.LastSeen = lastSeen
-		bot.TimeoutAt = timeoutAt
-		bot.IsOnline = true
-	}
-}
-
-// UpdateJobInCache updates job information in the in-memory cache
-func (ps *PersistentState) UpdateJobInCache(job *common.Job) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-
-	ps.jobs[job.ID] = job
-}
-
-// UpdateBotInCacheForJob updates bot status related to job assignment
-func (ps *PersistentState) UpdateBotInCacheForJob(botID string, jobID *string, status common.BotStatus) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-
-	if bot, exists := ps.bots[botID]; exists {
-		bot.Status = status
-		bot.CurrentJob = jobID
-		bot.LastSeen = time.Now()
-	}
-}
-
-// UpdateJobStatusInCache updates job status in the in-memory cache
-func (ps *PersistentState) UpdateJobStatusInCache(jobID string, status common.JobStatus, completedAt *time.Time) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-
-	if job, exists := ps.jobs[jobID]; exists {
-		job.Status = status
-		job.CompletedAt = completedAt
-		if completedAt != nil {
-			job.AssignedBot = nil
-		}
-	}
-}
-
-// Cache eviction methods
-
-// evictOldestBotFromCache removes the least recently accessed bot from cache
-func (ps *PersistentState) evictOldestBotFromCache() {
-	// Must be called with lock held
-	var oldestKey string
-	oldestTime := time.Now()
-
-	for botID := range ps.bots {
-		key := "bot:" + botID
-		if accessTime, exists := ps.cacheAccessTime[key]; exists {
-			if accessTime.Before(oldestTime) {
-				oldestTime = accessTime
-				oldestKey = botID
-			}
-		} else {
-			// If no access time, it's the oldest
-			oldestKey = botID
-			break
-		}
-	}
-
-	if oldestKey != "" {
-		delete(ps.bots, oldestKey)
-		delete(ps.cacheAccessTime, "bot:"+oldestKey)
-		ps.logger.WithField("bot_id", oldestKey).Debug("Evicted bot from cache")
-	}
-}
-
-// evictOldestJobFromCache removes the least recently accessed job from cache
-func (ps *PersistentState) evictOldestJobFromCache() {
-	// Must be called with lock held
-	var oldestKey string
-	oldestTime := time.Now()
-
-	for jobID := range ps.jobs {
-		key := "job:" + jobID
-		if accessTime, exists := ps.cacheAccessTime[key]; exists {
-			if accessTime.Before(oldestTime) {
-				oldestTime = accessTime
-				oldestKey = jobID
-			}
-		} else {
-			// If no access time, it's the oldest
-			oldestKey = jobID
-			break
-		}
-	}
-
-	if oldestKey != "" {
-		delete(ps.jobs, oldestKey)
-		delete(ps.cacheAccessTime, "job:"+oldestKey)
-		ps.logger.WithField("job_id", oldestKey).Debug("Evicted job from cache")
-	}
-}
+// UpdateBotInCache and UpdateBotInCacheForJob are defined in state_bot.go
+// UpdateJobInCache, UpdateJobStatusInCache, and evictOldestJobFromCache are defined in state_job.go
+// evictOldestBotFromCache is defined in state_bot.go
 
 // cleanupCacheAccessTimes periodically removes stale access time entries
 func (ps *PersistentState) cleanupCacheAccessTimes() {
@@ -1690,9 +547,53 @@ type CoverageStats struct {
 
 // GetJobCoverageHistory retrieves coverage history for a job within a time range
 func (ps *PersistentState) GetJobCoverageHistory(ctx context.Context, jobID string, startTime, endTime time.Time) ([]*common.CoverageResult, error) {
-	// TODO: Implement coverage history retrieval
-	// This requires either extending the Database interface or using Storage interface
-	return []*common.CoverageResult{}, nil
+	// Check if database supports advanced operations
+	advDB, isAdvanced := ps.db.(common.AdvancedDatabase)
+	if !isAdvanced {
+		return nil, fmt.Errorf("database doesn't support coverage history query")
+	}
+
+	query := `
+		SELECT id, job_id, bot_id, edges, new_edges, timestamp, exec_count
+		FROM coverage
+		WHERE job_id = ? AND timestamp >= ? AND timestamp <= ?
+		ORDER BY timestamp ASC
+	`
+
+	rows, err := advDB.Select(ctx, query, jobID, startTime, endTime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query coverage history: %w", err)
+	}
+
+	results := make([]*common.CoverageResult, 0, len(rows))
+	for _, row := range rows {
+		coverage := &common.CoverageResult{
+			JobID: jobID,
+		}
+
+		if id, ok := row["id"].(string); ok {
+			coverage.ID = id
+		}
+		if botID, ok := row["bot_id"].(string); ok {
+			coverage.BotID = botID
+		}
+		if edges, ok := row["edges"].(int64); ok {
+			coverage.Edges = int(edges)
+		}
+		if newEdges, ok := row["new_edges"].(int64); ok {
+			coverage.NewEdges = int(newEdges)
+		}
+		if ts, ok := row["timestamp"].(time.Time); ok {
+			coverage.Timestamp = ts
+		}
+		if execCount, ok := row["exec_count"].(int64); ok {
+			coverage.ExecCount = execCount
+		}
+
+		results = append(results, coverage)
+	}
+
+	return results, nil
 }
 
 // GetCampaignCoverageHistory retrieves coverage history for a campaign within a time range
@@ -1718,91 +619,12 @@ func (ps *PersistentState) GetCampaignCoverageHistory(ctx context.Context, campa
 	return coverage, nil
 }
 
-// GetJobCrashesInTimeRange retrieves crashes for a job within a time range
-func (ps *PersistentState) GetJobCrashesInTimeRange(ctx context.Context, jobID string, startTime, endTime time.Time) ([]*common.CrashResult, error) {
-	crashes, err := ps.GetJobCrashes(ctx, jobID)
-	if err != nil {
-		return nil, err
-	}
+// Crash time-range analytics (GetJobCrashesInTimeRange, GetCampaignCrashesInTimeRange, GetCrashesInTimeRange)
+// are defined in state_crash.go
 
-	// Filter by time range
-	var filtered []*common.CrashResult
-	for _, crash := range crashes {
-		if crash.Timestamp.After(startTime) && crash.Timestamp.Before(endTime) {
-			filtered = append(filtered, crash)
-		}
-	}
+// GetJobsInTimeRange and GetCampaignJobs are defined in state_job.go
 
-	return filtered, nil
-}
-
-// GetCampaignCrashesInTimeRange retrieves crashes for a campaign within a time range
-func (ps *PersistentState) GetCampaignCrashesInTimeRange(ctx context.Context, campaignID string, startTime, endTime time.Time) ([]*common.CrashResult, error) {
-	var crashes []*common.CrashResult
-
-	// Get all jobs for this campaign
-	jobs, err := ps.GetCampaignJobs(ctx, campaignID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get crashes for each job
-	for _, job := range jobs {
-		jobCrashes, err := ps.GetJobCrashesInTimeRange(ctx, job.ID, startTime, endTime)
-		if err != nil {
-			ps.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to get job crashes")
-			continue
-		}
-		crashes = append(crashes, jobCrashes...)
-	}
-
-	return crashes, nil
-}
-
-// GetCrashesInTimeRange retrieves all crashes within a time range
-func (ps *PersistentState) GetCrashesInTimeRange(ctx context.Context, startTime, endTime time.Time) ([]*common.CrashResult, error) {
-	// TODO: Implement crash retrieval within time range
-	// This requires either extending the Database interface or using Storage interface
-	return []*common.CrashResult{}, nil
-}
-
-// GetJobsInTimeRange retrieves all jobs created within a time range
-func (ps *PersistentState) GetJobsInTimeRange(ctx context.Context, startTime, endTime time.Time) ([]*common.Job, error) {
-	jobs, err := ps.ListJobs(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Filter by time range
-	var filtered []*common.Job
-	for _, job := range jobs {
-		if job.CreatedAt.After(startTime) && job.CreatedAt.Before(endTime) {
-			filtered = append(filtered, job)
-		}
-	}
-
-	return filtered, nil
-}
-
-// GetCampaignJobs retrieves all jobs for a campaign
-func (ps *PersistentState) GetCampaignJobs(ctx context.Context, campaignID string) ([]*common.Job, error) {
-	jobs, err := ps.ListJobs(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Filter by campaign ID
-	var filtered []*common.Job
-	for _, job := range jobs {
-		if job.CampaignID != nil && *job.CampaignID == campaignID {
-			filtered = append(filtered, job)
-		}
-	}
-
-	return filtered, nil
-}
-
-// GetJobCoverageStats is now implemented above (line 1338)
+// GetJobCoverageStats is implemented in the database maintenance section
 
 // GetCampaignCorpusUpdates retrieves corpus updates for a campaign
 func (ps *PersistentState) GetCampaignCorpusUpdates(ctx context.Context, campaignID string) ([]*common.CorpusUpdate, error) {

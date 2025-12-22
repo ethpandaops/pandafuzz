@@ -425,3 +425,66 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// PromoteCrashToCorpus promotes a crash input to the corpus (from v3)
+func (a *CorpusAdapter) PromoteCrashToCorpus(w http.ResponseWriter, r *http.Request) {
+	a.logger.Debug("promoting crash to corpus")
+
+	var req struct {
+		CrashID    string   `json:"crash_id"`
+		CampaignID string   `json:"campaign_id"`
+		Tags       []string `json:"tags,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
+		return
+	}
+
+	if req.CrashID == "" {
+		a.writeError(w, http.StatusBadRequest, "MISSING_CRASH_ID", "Crash ID is required", nil)
+		return
+	}
+
+	if req.CampaignID == "" {
+		a.writeError(w, http.StatusBadRequest, "MISSING_CAMPAIGN_ID", "Campaign ID is required", nil)
+		return
+	}
+
+	// Mock implementation - would call corpus service
+	entryID := uuid.New()
+	entry := generated.CorpusEntry{
+		Id:         openapi_types.UUID(entryID),
+		CampaignId: openapi_types.UUID(uuid.MustParse(req.CampaignID)),
+		JobId:      openapi_types.UUID(uuid.New()),
+		Filename:   fmt.Sprintf("crash_%s.bin", req.CrashID[:8]),
+		SizeBytes:  512,
+		Hash:       "sha256:promoted_" + req.CrashID[:8],
+		CreatedAt:  time.Now(),
+		Tags:       &[]string{"promoted", "crash"},
+	}
+
+	if len(req.Tags) > 0 {
+		allTags := append(*entry.Tags, req.Tags...)
+		entry.Tags = &allTags
+	}
+
+	// Publish SSE event
+	if a.sse != nil {
+		event := sse.NewCorpusEvent("corpus.promoted", map[string]interface{}{
+			"entry_id":    entry.Id,
+			"crash_id":    req.CrashID,
+			"campaign_id": entry.CampaignId,
+		})
+		a.sse.BroadcastToTopic("corpus", event)
+	}
+
+	response := map[string]interface{}{
+		"success":  true,
+		"entry_id": entryID.String(),
+		"entry":    entry,
+		"message":  "Crash promoted to corpus successfully",
+	}
+
+	a.writeJSONResponse(w, http.StatusCreated, response)
+}

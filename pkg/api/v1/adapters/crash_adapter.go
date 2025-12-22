@@ -448,3 +448,22 @@ func generateCrashHash(input string) string {
 	h.Write([]byte(input))
 	return hex.EncodeToString(h.Sum(nil))
 }
+
+// GetCrashInput returns the raw input data for a crash (from v3)
+func (a *CrashAdapter) GetCrashInput(w http.ResponseWriter, r *http.Request, crashId generated.CrashIdParam) {
+	a.logger.WithField("crash_id", crashId).Debug("getting crash input")
+
+	// In production, this would fetch from storage
+	// Mock implementation returns sample data
+	inputData := []byte("Mock crash input data for " + crashId.String())
+
+	// Set headers for binary download
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"crash_%s.bin\"", crashId.String()[:8]))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(inputData)))
+	w.Header().Set("X-Crash-ID", crashId.String())
+	w.Header().Set("X-Crash-Hash", generateCrashHash(string(inputData)))
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(inputData)
+}

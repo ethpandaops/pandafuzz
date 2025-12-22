@@ -3,183 +3,287 @@ package bot
 import (
 	"context"
 	"errors"
-	"os/exec"
-	"syscall"
 	"testing"
+	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
-func TestClassifyJobEnd(t *testing.T) {
+func TestClassifyJobOutcome(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.DebugLevel)
+	classifier := NewJobStatusClassifier(logger)
+
 	tests := []struct {
-		name          string
-		err           error
-		timedOut      bool
-		stopInitiated bool
-		crashesFound  int
-		wantExpected  bool
-		wantReason    JobEndReason
+		name             string
+		jobID            string
+		err              error
+		duration         time.Duration
+		crashesFound     int
+		expectedDuration time.Duration
+		wantSuccess      bool
+		wantReason       string
 	}{
 		{
-			name:          "Clean exit with no crashes",
-			err:           nil,
-			timedOut:      false,
-			stopInitiated: false,
-			crashesFound:  0,
-			wantExpected:  true,
-			wantReason:    EndReasonCompleted,
+			name:             "Clean exit with no crashes",
+			jobID:            "job-1",
+			err:              nil,
+			duration:         10 * time.Minute,
+			crashesFound:     0,
+			expectedDuration: 30 * time.Minute,
+			wantSuccess:      true,
+			wantReason:       "clean_exit",
 		},
 		{
-			name:          "Clean exit with crashes",
-			err:           nil,
-			timedOut:      false,
-			stopInitiated: false,
-			crashesFound:  5,
-			wantExpected:  true,
-			wantReason:    EndReasonCrashFound,
+			name:             "Clean exit with crashes",
+			jobID:            "job-2",
+			err:              nil,
+			duration:         10 * time.Minute,
+			crashesFound:     5,
+			expectedDuration: 30 * time.Minute,
+			wantSuccess:      true,
+			wantReason:       "crashes_found",
 		},
 		{
-			name:          "Timeout with no crashes",
-			err:           context.DeadlineExceeded,
-			timedOut:      true,
-			stopInitiated: false,
-			crashesFound:  0,
-			wantExpected:  true,
-			wantReason:    EndReasonTimeout,
+			name:             "Timeout with no crashes",
+			jobID:            "job-3",
+			err:              context.DeadlineExceeded,
+			duration:         30 * time.Minute,
+			crashesFound:     0,
+			expectedDuration: 30 * time.Minute,
+			wantSuccess:      true,
+			wantReason:       "expected_termination",
 		},
 		{
-			name:          "Timeout with crashes",
-			err:           context.DeadlineExceeded,
-			timedOut:      true,
-			stopInitiated: false,
-			crashesFound:  10,
-			wantExpected:  true,
-			wantReason:    EndReasonTimeout,
+			name:             "Timeout with crashes",
+			jobID:            "job-4",
+			err:              context.DeadlineExceeded,
+			duration:         30 * time.Minute,
+			crashesFound:     10,
+			expectedDuration: 30 * time.Minute,
+			wantSuccess:      true,
+			wantReason:       "crashes_found",
 		},
 		{
-			name:          "Stopped by user",
-			err:           errors.New("process killed"),
-			timedOut:      false,
-			stopInitiated: true,
-			crashesFound:  0,
-			wantExpected:  true,
-			wantReason:    EndReasonStopped,
+			name:             "Signal killed is expected termination",
+			jobID:            "job-5",
+			err:              errors.New("signal: killed"),
+			duration:         30 * time.Minute,
+			crashesFound:     0,
+			expectedDuration: 30 * time.Minute,
+			wantSuccess:      true,
+			wantReason:       "expected_termination",
 		},
 		{
-			name:          "Stopped by user with crashes",
-			err:           errors.New("process killed"),
-			timedOut:      false,
-			stopInitiated: true,
-			crashesFound:  3,
-			wantExpected:  true,
-			wantReason:    EndReasonStopped,
+			name:             "Signal terminated is expected termination",
+			jobID:            "job-6",
+			err:              errors.New("signal: terminated"),
+			duration:         30 * time.Minute,
+			crashesFound:     0,
+			expectedDuration: 30 * time.Minute,
+			wantSuccess:      true,
+			wantReason:       "expected_termination",
 		},
 		{
-			name:          "Unknown error without crashes",
-			err:           errors.New("some error"),
-			timedOut:      false,
-			stopInitiated: false,
-			crashesFound:  0,
-			wantExpected:  false,
-			wantReason:    EndReasonError,
+			name:             "Unknown error without crashes",
+			jobID:            "job-7",
+			err:              errors.New("some unexpected error"),
+			duration:         10 * time.Minute,
+			crashesFound:     0,
+			expectedDuration: 30 * time.Minute,
+			wantSuccess:      false,
+			wantReason:       "unknown_error",
 		},
 		{
-			name:          "Unknown error with crashes (still success)",
-			err:           errors.New("some error"),
-			timedOut:      false,
-			stopInitiated: false,
-			crashesFound:  5,
-			wantExpected:  true,
-			wantReason:    EndReasonCrashFound,
+			name:             "Unknown error with crashes is success",
+			jobID:            "job-8",
+			err:              errors.New("some unexpected error"),
+			duration:         10 * time.Minute,
+			crashesFound:     5,
+			expectedDuration: 30 * time.Minute,
+			wantSuccess:      true,
+			wantReason:       "crashes_found",
+		},
+		{
+			name:             "Segfault early is harness crash",
+			jobID:            "job-9",
+			err:              errors.New("signal: segmentation fault"),
+			duration:         1 * time.Second,
+			crashesFound:     0,
+			expectedDuration: 30 * time.Minute,
+			wantSuccess:      false,
+			wantReason:       "harness_crash",
+		},
+		{
+			name:             "Binary not found is harness crash",
+			jobID:            "job-10",
+			err:              errors.New("no such file or directory"),
+			duration:         0,
+			crashesFound:     0,
+			expectedDuration: 30 * time.Minute,
+			wantSuccess:      false,
+			wantReason:       "harness_crash",
+		},
+		{
+			name:             "Permission denied is harness crash",
+			jobID:            "job-11",
+			err:              errors.New("permission denied"),
+			duration:         0,
+			crashesFound:     0,
+			expectedDuration: 30 * time.Minute,
+			wantSuccess:      false,
+			wantReason:       "harness_crash",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ClassifyJobEnd(tt.err, tt.timedOut, tt.stopInitiated, tt.crashesFound)
+			result := classifier.ClassifyJobOutcome(tt.jobID, tt.err, tt.duration, tt.crashesFound, tt.expectedDuration)
 
-			if result.Expected != tt.wantExpected {
-				t.Errorf("Expected = %v, want %v", result.Expected, tt.wantExpected)
+			if result.Success != tt.wantSuccess {
+				t.Errorf("Success = %v, want %v", result.Success, tt.wantSuccess)
 			}
 
 			if result.Reason != tt.wantReason {
 				t.Errorf("Reason = %v, want %v", result.Reason, tt.wantReason)
 			}
-
-			if result.CrashesFound != tt.crashesFound {
-				t.Errorf("CrashesFound = %v, want %v", result.CrashesFound, tt.crashesFound)
-			}
 		})
 	}
 }
 
-func TestClassifyJobEnd_WithExitError(t *testing.T) {
-	// Create a mock ExitError with SIGTERM signal
-	// This simulates what happens when we stop AFL++ with a signal
-	cmd := exec.Command("false")
-	_ = cmd.Run() // This will create an ExitError
+func TestJobStatusClassifier_isExpectedTermination(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.DebugLevel)
+	classifier := NewJobStatusClassifier(logger)
 
-	// Get the error
-	err := &exec.ExitError{}
-	err.ProcessState = cmd.ProcessState
-
-	// Test with signal termination but with crashes found
-	result := ClassifyJobEnd(err, false, false, 100)
-
-	// With crashes found, even an exit error should be treated as success
-	if !result.Expected {
-		t.Errorf("Expected job with crashes to be successful even with exit error")
-	}
-
-	if result.Reason != EndReasonCrashFound {
-		t.Errorf("Expected reason to be EndReasonCrashFound, got %v", result.Reason)
-	}
-}
-
-func TestJobEndState_GetMessage(t *testing.T) {
 	tests := []struct {
-		state   JobEndState
-		wantMsg string
+		name             string
+		errLower         string
+		duration         time.Duration
+		expectedDuration time.Duration
+		want             bool
 	}{
 		{
-			state: JobEndState{
-				Expected:     true,
-				Reason:       EndReasonCompleted,
-				CrashesFound: 0,
-			},
-			wantMsg: "Job completed successfully",
+			name:             "signal killed",
+			errLower:         "signal: killed",
+			duration:         30 * time.Minute,
+			expectedDuration: 30 * time.Minute,
+			want:             true,
 		},
 		{
-			state: JobEndState{
-				Expected:     true,
-				Reason:       EndReasonTimeout,
-				CrashesFound: 5,
-			},
-			wantMsg: "Job completed (duration reached, found 5 crashes)",
+			name:             "signal terminated",
+			errLower:         "signal: terminated",
+			duration:         30 * time.Minute,
+			expectedDuration: 30 * time.Minute,
+			want:             true,
 		},
 		{
-			state: JobEndState{
-				Expected:     true,
-				Reason:       EndReasonCrashFound,
-				CrashesFound: 10,
-			},
-			wantMsg: "Job completed successfully (found 10 crashes)",
+			name:             "sigterm",
+			errLower:         "sigterm",
+			duration:         30 * time.Minute,
+			expectedDuration: 30 * time.Minute,
+			want:             true,
 		},
 		{
-			state: JobEndState{
-				Expected: false,
-				Reason:   EndReasonHarnessCrash,
-				Signal:   syscall.SIGSEGV,
-			},
-			wantMsg: "Fuzzer binary crashed (signal 11) - check binary compatibility",
+			name:             "context deadline exceeded",
+			errLower:         "context deadline exceeded",
+			duration:         30 * time.Minute,
+			expectedDuration: 30 * time.Minute,
+			want:             true,
+		},
+		{
+			name:             "random error",
+			errLower:         "some random error",
+			duration:         10 * time.Minute,
+			expectedDuration: 30 * time.Minute,
+			want:             false,
+		},
+		{
+			name:             "afl++ completed",
+			errLower:         "afl++ completed normally",
+			duration:         30 * time.Minute,
+			expectedDuration: 30 * time.Minute,
+			want:             true,
 		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.wantMsg, func(t *testing.T) {
-			got := tt.state.GetMessage()
-			if got != tt.wantMsg {
-				t.Errorf("GetMessage() = %v, want %v", got, tt.wantMsg)
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifier.isExpectedTermination(tt.errLower, tt.duration, tt.expectedDuration)
+			if got != tt.want {
+				t.Errorf("isExpectedTermination() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
+func TestJobStatusClassifier_isHarnessCrash(t *testing.T) {
+	logger := logrus.New()
+	logger.SetLevel(logrus.DebugLevel)
+	classifier := NewJobStatusClassifier(logger)
+
+	tests := []struct {
+		name     string
+		errLower string
+		duration time.Duration
+		want     bool
+	}{
+		{
+			name:     "segfault early",
+			errLower: "segmentation fault",
+			duration: 1 * time.Second,
+			want:     true,
+		},
+		{
+			name:     "segfault late",
+			errLower: "segmentation fault",
+			duration: 10 * time.Minute,
+			want:     false,
+		},
+		{
+			name:     "sigsegv early",
+			errLower: "sigsegv",
+			duration: 2 * time.Second,
+			want:     true,
+		},
+		{
+			name:     "no such file",
+			errLower: "no such file",
+			duration: 0,
+			want:     true,
+		},
+		{
+			name:     "permission denied",
+			errLower: "permission denied",
+			duration: 0,
+			want:     true,
+		},
+		{
+			name:     "cannot execute",
+			errLower: "cannot execute binary",
+			duration: 0,
+			want:     true,
+		},
+		{
+			name:     "core dumped early",
+			errLower: "core dumped",
+			duration: 3 * time.Second,
+			want:     true,
+		},
+		{
+			name:     "random error",
+			errLower: "random error",
+			duration: 0,
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifier.isHarnessCrash(tt.errLower, tt.duration)
+			if got != tt.want {
+				t.Errorf("isHarnessCrash() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

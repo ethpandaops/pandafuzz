@@ -11,7 +11,7 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/bot"
 	"github.com/ethpandaops/pandafuzz/pkg/common"
-	"github.com/ethpandaops/pandafuzz/pkg/fuzzer"
+	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/adapter"
 	"github.com/sirupsen/logrus"
 )
 
@@ -140,7 +140,7 @@ func main() {
 		Timestamp: time.Now(),
 		JobID:     jobID,
 		Data: map[string]interface{}{
-			"stats": &fuzzer.FuzzerStats{
+			"stats": &adapter.FuzzerStats{
 				StartTime:       time.Now().Add(-1 * time.Hour),
 				ElapsedTime:     1 * time.Hour,
 				Executions:      1000000,
@@ -194,7 +194,7 @@ type FuzzerEventHandler struct {
 	botID     string
 }
 
-func (h *FuzzerEventHandler) OnCrash(f fuzzer.Fuzzer, crash *common.CrashResult) {
+func (h *FuzzerEventHandler) OnCrash(f adapter.Fuzzer, crash *common.CrashResult) {
 	event := common.FuzzerEvent{
 		Type:      common.FuzzerEventCrashFound,
 		Timestamp: time.Now(),
@@ -206,7 +206,7 @@ func (h *FuzzerEventHandler) OnCrash(f fuzzer.Fuzzer, crash *common.CrashResult)
 	h.collector.HandleEvent(event)
 }
 
-func (h *FuzzerEventHandler) OnStats(f fuzzer.Fuzzer, stats fuzzer.FuzzerStats) {
+func (h *FuzzerEventHandler) OnStats(f adapter.Fuzzer, stats adapter.FuzzerStats) {
 	event := common.FuzzerEvent{
 		Type:      common.FuzzerEventStats,
 		Timestamp: time.Now(),
@@ -219,4 +219,3 @@ func (h *FuzzerEventHandler) OnStats(f fuzzer.Fuzzer, stats fuzzer.FuzzerStats) 
 }
 
 // Implement other event handler methods...
-

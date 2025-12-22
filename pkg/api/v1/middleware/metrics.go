@@ -4,11 +4,17 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/sirupsen/logrus"
+)
+
+var (
+	apiMetricsInstance *Metrics
+	apiMetricsOnce     sync.Once
 )
 
 // MetricsConfig holds configuration for metrics middleware
@@ -51,8 +57,21 @@ var (
 	sizeBuckets     = []float64{100, 1000, 10000, 100000, 1000000, 10000000, 100000000}
 )
 
-// NewMetrics creates a new metrics instance with Prometheus collectors
+// NewMetrics creates a new metrics instance with Prometheus collectors.
+// Uses singleton pattern to prevent duplicate registration panics.
 func NewMetrics(config MetricsConfig) *Metrics {
+	apiMetricsOnce.Do(func() {
+		apiMetricsInstance = createAPIMetrics(config)
+	})
+	// Update the logger if provided (loggers can change per request)
+	if config.Logger != nil {
+		apiMetricsInstance.logger = config.Logger
+	}
+	return apiMetricsInstance
+}
+
+// createAPIMetrics creates the actual metrics instance with Prometheus collectors
+func createAPIMetrics(config MetricsConfig) *Metrics {
 	if config.Namespace == "" {
 		config.Namespace = "pandafuzz"
 	}

@@ -28,11 +28,24 @@ type RetryClient struct {
 }
 
 // BotRegisterResponse represents registration response from master
+// This is adapted from the API v1 Bot response format
 type BotRegisterResponse struct {
 	BotID     string    `json:"bot_id"`
 	Status    string    `json:"status"`
 	Timestamp time.Time `json:"timestamp"`
 	Timeout   time.Time `json:"timeout"`
+}
+
+// apiV1BotResponse represents the actual Bot response from API v1
+// Used internally to parse the API response and convert to BotRegisterResponse
+type apiV1BotResponse struct {
+	Id            string    `json:"id"`
+	Name          string    `json:"name"`
+	Status        string    `json:"status"`
+	Hostname      string    `json:"hostname"`
+	IsOnline      bool      `json:"is_online"`
+	RegisteredAt  time.Time `json:"registered_at"`
+	LastHeartbeat time.Time `json:"last_heartbeat"`
 }
 
 // JobResponse represents job assignment response
@@ -125,15 +138,25 @@ func (rc *RetryClient) RegisterBot(botID string, capabilities []string, apiEndpo
 		"api_endpoint": apiEndpoint,
 	}).Debug("Sending bot registration request")
 
-	var response BotRegisterResponse
+	// Parse the API v1 Bot response and convert to BotRegisterResponse
+	var apiResponse apiV1BotResponse
 	err := rc.retryManager.Execute(func() error {
 		return rc.circuitBreaker.Execute(func() error {
-			return rc.doRequest("POST", "/api/v1/bots/register", request, &response)
+			// API v1 uses POST /api/v1/bots for bot registration
+			return rc.doRequest("POST", "/api/v1/bots", request, &apiResponse)
 		})
 	})
 
 	if err != nil {
 		return nil, common.NewNetworkError("register_bot", err)
+	}
+
+	// Convert API v1 response to BotRegisterResponse format
+	response := &BotRegisterResponse{
+		BotID:     apiResponse.Id,
+		Status:    "registered",
+		Timestamp: apiResponse.RegisteredAt,
+		Timeout:   apiResponse.LastHeartbeat.Add(30 * time.Second), // Default timeout
 	}
 
 	// Store the bot ID for later use
@@ -147,7 +170,7 @@ func (rc *RetryClient) RegisterBot(botID string, capabilities []string, apiEndpo
 		"capabilities": capabilities,
 	}).Info("Bot registered successfully")
 
-	return &response, nil
+	return response, nil
 }
 
 // DeregisterBot deregisters the bot from the master
@@ -169,9 +192,11 @@ func (rc *RetryClient) DeregisterBot(botID string) error {
 // SendHeartbeat sends a heartbeat to the master
 func (rc *RetryClient) SendHeartbeat(botID string, status common.BotStatus, currentJob *string) error {
 	request := map[string]any{
-		"status":        status,
-		"current_job":   currentJob,
-		"last_activity": time.Now(),
+		"status": status,
+	}
+	// Add current_job_id if provided (API v1 uses current_job_id field name)
+	if currentJob != nil {
+		request["current_job_id"] = *currentJob
 	}
 
 	err := rc.retryManager.Execute(func() error {
@@ -193,13 +218,45 @@ func (rc *RetryClient) SendHeartbeat(botID string, status common.BotStatus, curr
 	return nil
 }
 
+// apiV1JobResponse represents the job assignment response from API v1
+// The API wraps the job in a structure with lease information
+type apiV1JobResponse struct {
+	Job            *apiV1Job  `json:"job"`
+	LeaseToken     string     `json:"lease_token"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at"`
+	Message        string     `json:"message"`
+}
+
+// apiV1Job represents the job fields in the API v1 response
+type apiV1Job struct {
+	ID             string            `json:"id"`
+	Name           string            `json:"name"`
+	Fuzzer         string            `json:"fuzzer"`
+	Target         string            `json:"target"`
+	TargetArgs     []string          `json:"target_args"`
+	Status         string            `json:"status"`
+	AssignedBotID  *string           `json:"assigned_bot_id"`
+	WorkDir        string            `json:"work_dir"`
+	CorpusDir      string            `json:"corpus_dir"`
+	Duration       int               `json:"duration"` // in seconds
+	Timeout        int               `json:"timeout"`  // in seconds
+	MemoryLimit    int64             `json:"memory_limit"`
+	CreatedAt      time.Time         `json:"created_at"`
+	StartedAt      *time.Time        `json:"started_at"`
+	CompletedAt    *time.Time        `json:"completed_at"`
+	EnableCoverage bool              `json:"enable_coverage"`
+	CoverageFormat string            `json:"coverage_format"`
+	Metadata       map[string]string `json:"metadata"`
+}
+
 // GetJob requests a job assignment from the master
 func (rc *RetryClient) GetJob(botID string) (*common.Job, error) {
 	var response json.RawMessage
 
 	err := rc.retryManager.Execute(func() error {
 		return rc.circuitBreaker.Execute(func() error {
-			return rc.doRequest("GET", fmt.Sprintf("/api/v1/bots/%s/job", botID), nil, &response)
+			// API v1 uses POST /api/v1/bots/{id}/jobs/next for job assignment
+			return rc.doRequest("POST", fmt.Sprintf("/api/v1/bots/%s/jobs/next", botID), nil, &response)
 		})
 	})
 
@@ -207,19 +264,41 @@ func (rc *RetryClient) GetJob(botID string) (*common.Job, error) {
 		return nil, common.NewNetworkError("get_job", err)
 	}
 
-	// Parse response to check if it's a job or a status message
-	var statusResponse map[string]any
-	if err := json.Unmarshal(response, &statusResponse); err == nil {
-		if status, exists := statusResponse["status"]; exists && status == "no_jobs_available" {
-			rc.logger.Debug("No jobs available from master")
-			return nil, nil
-		}
+	// Parse as API v1 job response with wrapper
+	var apiResponse apiV1JobResponse
+	if err := json.Unmarshal(response, &apiResponse); err != nil {
+		return nil, common.NewNetworkError("parse_job_response", err)
 	}
 
-	// Parse as job
-	var job common.Job
-	if err := json.Unmarshal(response, &job); err != nil {
-		return nil, common.NewNetworkError("parse_job_response", err)
+	// Check if no job was available
+	if apiResponse.Job == nil {
+		rc.logger.Debug("No jobs available from master")
+		return nil, nil
+	}
+
+	// Convert API job to common.Job
+	job := &common.Job{
+		ID:             apiResponse.Job.ID,
+		Name:           apiResponse.Job.Name,
+		Fuzzer:         apiResponse.Job.Fuzzer,
+		Target:         apiResponse.Job.Target,
+		Status:         common.JobStatus(apiResponse.Job.Status),
+		WorkDir:        apiResponse.Job.WorkDir,
+		CreatedAt:      apiResponse.Job.CreatedAt,
+		StartedAt:      apiResponse.Job.StartedAt,
+		CompletedAt:    apiResponse.Job.CompletedAt,
+		EnableCoverage: apiResponse.Job.EnableCoverage,
+		CoverageFormat: apiResponse.Job.CoverageFormat,
+		Config: common.JobConfig{
+			Duration:    time.Duration(apiResponse.Job.Duration) * time.Second,
+			Timeout:     time.Duration(apiResponse.Job.Timeout) * time.Second,
+			MemoryLimit: apiResponse.Job.MemoryLimit,
+		},
+	}
+
+	// Set AssignedBot if present
+	if apiResponse.Job.AssignedBotID != nil {
+		job.AssignedBot = apiResponse.Job.AssignedBotID
 	}
 
 	rc.logger.WithFields(logrus.Fields{
@@ -229,7 +308,7 @@ func (rc *RetryClient) GetJob(botID string) (*common.Job, error) {
 		"fuzzer":   job.Fuzzer,
 	}).Info("Job received from master")
 
-	return &job, nil
+	return job, nil
 }
 
 // AckJobWithToken acknowledges job assignment with lease token
@@ -302,8 +381,9 @@ func (rc *RetryClient) SendHeartbeatWithToken(botID, jobID, leaseToken string) (
 }
 
 // CompleteJob notifies the master of job completion and waits for acknowledgment
-func (rc *RetryClient) CompleteJob(botID string, success bool, message string) error {
+func (rc *RetryClient) CompleteJob(botID, jobID string, success bool, message string) error {
 	request := map[string]any{
+		"job_id":    jobID,
 		"success":   success,
 		"timestamp": time.Now(),
 		"message":   message,
@@ -318,7 +398,8 @@ func (rc *RetryClient) CompleteJob(botID string, success bool, message string) e
 
 	err := rc.retryManager.Execute(func() error {
 		return rc.circuitBreaker.Execute(func() error {
-			return rc.doRequest("POST", fmt.Sprintf("/api/v1/bots/%s/job/complete", botID), request, &response)
+			// API v1 uses POST /api/v1/bots/{id}/jobs/complete for job completion
+			return rc.doRequest("POST", fmt.Sprintf("/api/v1/bots/%s/jobs/complete", botID), request, &response)
 		})
 	})
 

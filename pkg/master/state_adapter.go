@@ -321,11 +321,12 @@ func (a *StateStoreAdapter) CompleteJobOptimized(ctx context.Context, jobID, bot
 // GetStorage returns the underlying storage interface
 // This is needed for services that require direct storage access
 func (a *StateStoreAdapter) GetStorage() common.Storage {
-	// Check if the database implements the Storage interface
-	if storage, ok := a.PS.db.(common.Storage); ok {
-		return storage
+	// Note: common.Database and common.Storage have incompatible Close() signatures,
+	// so a database.Database cannot also implement common.Storage directly.
+	// Check if PersistentState provides a storage reference
+	if a.PS != nil && a.PS.Storage != nil {
+		return a.PS.Storage
 	}
-	// Return nil if not a Storage implementation
 	return nil
 }
 
@@ -337,4 +338,21 @@ func generateSecureToken() string {
 		return fmt.Sprintf("lease_%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
+}
+
+// Analytics operations
+func (a *StateStoreAdapter) GetCampaignJobs(ctx context.Context, campaignID string) ([]*common.Job, error) {
+	return a.PS.GetCampaignJobs(ctx, campaignID)
+}
+
+func (a *StateStoreAdapter) GetJobCrashes(ctx context.Context, jobID string) ([]*common.CrashResult, error) {
+	return a.PS.GetJobCrashes(ctx, jobID)
+}
+
+func (a *StateStoreAdapter) GetCrashesInTimeRange(ctx context.Context, startTime, endTime time.Time) ([]*common.CrashResult, error) {
+	return a.PS.GetCrashesInTimeRange(ctx, startTime, endTime)
+}
+
+func (a *StateStoreAdapter) GetJobCoverageHistory(ctx context.Context, jobID string, startTime, endTime time.Time) ([]*common.CoverageResult, error) {
+	return a.PS.GetJobCoverageHistory(ctx, jobID, startTime, endTime)
 }

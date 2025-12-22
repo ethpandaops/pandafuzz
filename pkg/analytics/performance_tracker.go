@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
-	"github.com/ethpandaops/pandafuzz/pkg/fuzzer"
+	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/adapter"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
 	"github.com/sirupsen/logrus"
 )
@@ -22,7 +22,7 @@ type PerformanceTracker interface {
 	CompareFuzzers(ctx context.Context, jobIDs []string) (*FuzzerComparison, error)
 
 	// RecommendOptimalSettings recommends optimal fuzzer settings based on performance data
-	RecommendOptimalSettings(ctx context.Context, targetBinary string, fuzzerType fuzzer.FuzzerType) (*OptimalSettings, error)
+	RecommendOptimalSettings(ctx context.Context, targetBinary string, fuzzerType adapter.FuzzerType) (*OptimalSettings, error)
 }
 
 // FuzzerPerformanceAnalysis represents comprehensive performance analysis for a fuzzing job
@@ -229,8 +229,8 @@ type OptimalFuzzerConfig struct {
 // OptimalSettings represents recommended optimal settings for a fuzzer
 type OptimalSettings struct {
 	TargetBinary        string              `json:"target_binary"`
-	FuzzerType          fuzzer.FuzzerType   `json:"fuzzer_type"`
-	BaseConfiguration   fuzzer.FuzzConfig   `json:"base_configuration"`
+	FuzzerType          adapter.FuzzerType  `json:"fuzzer_type"`
+	BaseConfiguration   adapter.FuzzConfig  `json:"base_configuration"`
 	OptimalParameters   map[string]any      `json:"optimal_parameters"`
 	EnvironmentSettings map[string]string   `json:"environment_settings"`
 	ResourceAllocation  ResourceAllocation  `json:"resource_allocation"`
@@ -451,7 +451,7 @@ func (pt *performanceTracker) CompareFuzzers(ctx context.Context, jobIDs []strin
 }
 
 // RecommendOptimalSettings recommends optimal fuzzer settings
-func (pt *performanceTracker) RecommendOptimalSettings(ctx context.Context, targetBinary string, fuzzerType fuzzer.FuzzerType) (*OptimalSettings, error) {
+func (pt *performanceTracker) RecommendOptimalSettings(ctx context.Context, targetBinary string, fuzzerType adapter.FuzzerType) (*OptimalSettings, error) {
 	pt.logger.WithFields(logrus.Fields{
 		"target_binary": targetBinary,
 		"fuzzer_type":   fuzzerType,
@@ -992,7 +992,7 @@ func (pt *performanceTracker) determineOptimalConfiguration(analyses map[string]
 
 // Helper methods for optimal settings
 
-func (pt *performanceTracker) getHistoricalPerformanceData(ctx context.Context, targetBinary string, fuzzerType fuzzer.FuzzerType) []map[string]interface{} {
+func (pt *performanceTracker) getHistoricalPerformanceData(ctx context.Context, targetBinary string, fuzzerType adapter.FuzzerType) []map[string]interface{} {
 	// TODO: Implement actual historical data retrieval
 	// This would query past jobs with similar targets and fuzzer types
 	return []map[string]interface{}{}
@@ -1009,14 +1009,13 @@ func (pt *performanceTracker) analyzeTargetProfile(targetBinary string) map[stri
 	}
 }
 
-func (pt *performanceTracker) determineBaseConfiguration(fuzzerType fuzzer.FuzzerType, targetProfile map[string]interface{}) fuzzer.FuzzConfig {
+func (pt *performanceTracker) determineBaseConfiguration(fuzzerType adapter.FuzzerType, targetProfile map[string]interface{}) adapter.FuzzConfig {
 	// Base configuration based on fuzzer type and target profile
-	config := fuzzer.FuzzConfig{
+	config := adapter.FuzzConfig{
 		Duration:      24 * time.Hour,
 		Timeout:       10 * time.Second,
 		MemoryLimit:   2 * 1024 * 1024 * 1024, // 2GB
-		Strategy:      fuzzer.StrategyCoverage,
-		Coverage:      fuzzer.CoverageEdge,
+		Coverage:      adapter.CoverageEdge,
 		StatsInterval: 30 * time.Second,
 		LogLevel:      "info",
 	}
@@ -1094,7 +1093,7 @@ func (pt *performanceTracker) defineCorpusStrategy(targetProfile map[string]inte
 	}
 }
 
-func (pt *performanceTracker) defineMutationStrategy(targetProfile map[string]interface{}, fuzzerType fuzzer.FuzzerType) MutationStrategy {
+func (pt *performanceTracker) defineMutationStrategy(targetProfile map[string]interface{}, fuzzerType adapter.FuzzerType) MutationStrategy {
 	strategy := MutationStrategy{
 		Mutators:            []string{"bit_flip", "byte_flip", "arithmetic", "havoc"},
 		MutationDepth:       5,
@@ -1115,7 +1114,7 @@ func (pt *performanceTracker) defineMutationStrategy(targetProfile map[string]in
 	return strategy
 }
 
-func (pt *performanceTracker) calculateExpectedPerformance(config fuzzer.FuzzConfig, params map[string]any,
+func (pt *performanceTracker) calculateExpectedPerformance(config adapter.FuzzConfig, params map[string]any,
 	resources ResourceAllocation, historical []map[string]interface{}) ExpectedPerformance {
 
 	// Base estimates
@@ -1143,7 +1142,7 @@ func (pt *performanceTracker) calculateExpectedPerformance(config fuzzer.FuzzCon
 	}
 }
 
-func (pt *performanceTracker) generateAlternativeConfigurations(base fuzzer.FuzzConfig, params map[string]any,
+func (pt *performanceTracker) generateAlternativeConfigurations(base adapter.FuzzConfig, params map[string]any,
 	targetProfile map[string]interface{}) []AlternativeConfig {
 
 	alternatives := []AlternativeConfig{
@@ -1204,7 +1203,7 @@ func (pt *performanceTracker) calculateConfidenceScore(historical []map[string]i
 	return math.Min(0.95, confidence)
 }
 
-func (pt *performanceTracker) determineEnvironmentSettings(fuzzerType fuzzer.FuzzerType, resources ResourceAllocation) map[string]string {
+func (pt *performanceTracker) determineEnvironmentSettings(fuzzerType adapter.FuzzerType, resources ResourceAllocation) map[string]string {
 	env := map[string]string{
 		"AFL_NO_AFFINITY":  "1",
 		"AFL_TMPDIR":       "/tmp/fuzzer",
@@ -1213,10 +1212,10 @@ func (pt *performanceTracker) determineEnvironmentSettings(fuzzerType fuzzer.Fuz
 
 	// Add fuzzer-specific settings
 	switch fuzzerType {
-	case fuzzer.FuzzerTypeAFL:
+	case adapter.FuzzerTypeAFL:
 		env["AFL_FAST_CAL"] = "1"
 		env["AFL_CMPLOG_ONLY_NEW"] = "1"
-	case fuzzer.FuzzerTypeLibFuzzer:
+	case adapter.FuzzerTypeLibFuzzer:
 		env["LIBFUZZER_WORKERS"] = fmt.Sprintf("%d", resources.WorkerCount)
 	}
 

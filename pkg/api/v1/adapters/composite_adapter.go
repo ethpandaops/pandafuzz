@@ -23,6 +23,7 @@ type CompositeAdapter struct {
 	corpusAdapter    *CorpusAdapter
 	crashAdapter     *CrashAdapter
 	analyticsAdapter *AnalyticsAdapter
+	systemAdapter    *SystemAdapter
 	sse              *sse.Manager
 	logger           logrus.FieldLogger
 }
@@ -35,6 +36,7 @@ func NewCompositeAdapter(
 	corpusAdapter *CorpusAdapter,
 	crashAdapter *CrashAdapter,
 	analyticsAdapter *AnalyticsAdapter,
+	systemAdapter *SystemAdapter,
 	sse *sse.Manager,
 	logger logrus.FieldLogger,
 ) *CompositeAdapter {
@@ -45,6 +47,7 @@ func NewCompositeAdapter(
 		corpusAdapter:    corpusAdapter,
 		crashAdapter:     crashAdapter,
 		analyticsAdapter: analyticsAdapter,
+		systemAdapter:    systemAdapter,
 		sse:              sse,
 		logger:           logger.WithField("component", "composite_adapter"),
 	}
@@ -201,6 +204,10 @@ func (a *CompositeAdapter) CreateJob(w http.ResponseWriter, r *http.Request) {
 
 func (a *CompositeAdapter) DeleteJob(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam) {
 	a.jobAdapter.DeleteJob(w, r, jobId)
+}
+
+func (a *CompositeAdapter) CancelJob(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam) {
+	a.jobAdapter.CancelJob(w, r, jobId)
 }
 
 func (a *CompositeAdapter) GetJob(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam, params generated.GetJobParams) {
@@ -486,4 +493,86 @@ func (a *CompositeAdapter) AckJob(w http.ResponseWriter, r *http.Request, jobID,
 // JobHeartbeat forwards to job adapter
 func (a *CompositeAdapter) JobHeartbeat(w http.ResponseWriter, r *http.Request, jobID, botID, leaseToken string) {
 	a.jobAdapter.JobHeartbeat(w, r, jobID, botID, leaseToken)
+}
+
+// System management endpoints (from v3)
+func (a *CompositeAdapter) GetSystemStatus(w http.ResponseWriter, r *http.Request) {
+	a.systemAdapter.GetSystemStatus(w, r)
+}
+
+func (a *CompositeAdapter) GetSystemStats(w http.ResponseWriter, r *http.Request) {
+	a.systemAdapter.GetSystemStats(w, r)
+}
+
+func (a *CompositeAdapter) GetVersion(w http.ResponseWriter, r *http.Request) {
+	a.systemAdapter.GetVersion(w, r)
+}
+
+func (a *CompositeAdapter) TriggerRecovery(w http.ResponseWriter, r *http.Request) {
+	a.systemAdapter.TriggerRecovery(w, r)
+}
+
+func (a *CompositeAdapter) TriggerMaintenance(w http.ResponseWriter, r *http.Request) {
+	a.systemAdapter.TriggerMaintenance(w, r)
+}
+
+func (a *CompositeAdapter) ListTimeouts(w http.ResponseWriter, r *http.Request) {
+	a.systemAdapter.ListTimeouts(w, r)
+}
+
+func (a *CompositeAdapter) ForceTimeout(w http.ResponseWriter, r *http.Request, timeoutType, id string) {
+	a.systemAdapter.ForceTimeout(w, r, timeoutType, id)
+}
+
+func (a *CompositeAdapter) DetailedHealthCheck(w http.ResponseWriter, r *http.Request) {
+	a.systemAdapter.DetailedHealthCheck(w, r)
+}
+
+// Bot extension endpoints (from v3)
+func (a *CompositeAdapter) GetNextJob(w http.ResponseWriter, r *http.Request, botId generated.BotIdParam) {
+	a.botAdapter.GetNextJob(w, r, botId)
+}
+
+func (a *CompositeAdapter) CompleteJob(w http.ResponseWriter, r *http.Request, botId generated.BotIdParam) {
+	a.botAdapter.CompleteJob(w, r, botId)
+}
+
+func (a *CompositeAdapter) GetBotMetrics(w http.ResponseWriter, r *http.Request, botId generated.BotIdParam) {
+	a.botAdapter.GetBotMetrics(w, r, botId)
+}
+
+// Job extension endpoints (from v3)
+func (a *CompositeAdapter) GetJobProgress(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam) {
+	a.jobAdapter.GetJobProgress(w, r, jobId)
+}
+
+func (a *CompositeAdapter) GetJobCrashes(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam) {
+	a.jobAdapter.GetJobCrashes(w, r, jobId)
+}
+
+// Corpus extension endpoints (from v3)
+func (a *CompositeAdapter) PromoteCrashToCorpus(w http.ResponseWriter, r *http.Request) {
+	a.corpusAdapter.PromoteCrashToCorpus(w, r)
+}
+
+// Crash extension endpoints (from v3)
+func (a *CompositeAdapter) GetCrashInput(w http.ResponseWriter, r *http.Request, crashId generated.CrashIdParam) {
+	a.crashAdapter.GetCrashInput(w, r, crashId)
+}
+
+// Results submission endpoints (from v3)
+func (a *CompositeAdapter) SubmitBatchResults(w http.ResponseWriter, r *http.Request) {
+	a.systemAdapter.SubmitBatchResults(w, r)
+}
+
+func (a *CompositeAdapter) SubmitCrashResult(w http.ResponseWriter, r *http.Request) {
+	a.systemAdapter.SubmitCrashResult(w, r)
+}
+
+func (a *CompositeAdapter) SubmitCoverageResult(w http.ResponseWriter, r *http.Request) {
+	a.systemAdapter.SubmitCoverageResult(w, r)
+}
+
+func (a *CompositeAdapter) SubmitCorpusUpdate(w http.ResponseWriter, r *http.Request) {
+	a.systemAdapter.SubmitCorpusUpdate(w, r)
 }

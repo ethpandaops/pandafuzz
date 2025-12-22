@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
-	"github.com/ethpandaops/pandafuzz/pkg/fuzzer"
+	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/adapter"
 	"github.com/sirupsen/logrus"
 )
 
@@ -19,7 +19,7 @@ type FuzzerJobExecutor struct {
 	config            *common.BotConfig
 	logger            *logrus.Logger
 	resultChan        chan common.FuzzerEvent
-	activeFuzzers     map[string]fuzzer.Fuzzer
+	activeFuzzers     map[string]adapter.Fuzzer
 	mu                sync.RWMutex
 	botID             string
 	resultHandler     interface{} // Handler for reporting results to master
@@ -32,7 +32,7 @@ func NewFuzzerJobExecutor(config *common.BotConfig, logger *logrus.Logger) *Fuzz
 		config:        config,
 		logger:        logger,
 		resultChan:    make(chan common.FuzzerEvent, 100),
-		activeFuzzers: make(map[string]fuzzer.Fuzzer),
+		activeFuzzers: make(map[string]adapter.Fuzzer, 4),
 		botID:         config.ID,
 	}
 }
@@ -117,10 +117,10 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 	}
 
 	// Set coverage type based on job configuration
-	var coverageType fuzzer.CoverageType
+	var coverageType adapter.CoverageType
 	if job.EnableCoverage {
 		// Default to edge coverage for AFL++
-		coverageType = fuzzer.CoverageEdge
+		coverageType = adapter.CoverageEdge
 		fje.logger.WithFields(logrus.Fields{
 			"job_id":          job.ID,
 			"enable_coverage": job.EnableCoverage,
@@ -128,7 +128,7 @@ func (fje *FuzzerJobExecutor) ExecuteJob(job *common.Job) (success bool, message
 		}).Info("Coverage collection enabled for job")
 	}
 
-	config := fuzzer.FuzzConfig{
+	config := adapter.FuzzConfig{
 		JobID:           job.ID, // Set the actual job ID
 		Target:          targetPath,
 		WorkDirectory:   workDir,
@@ -302,14 +302,14 @@ exitLoop:
 		defer resultCancel()
 
 		resultChan := make(chan struct {
-			results *fuzzer.FuzzerResults
+			results *adapter.FuzzerResults
 			err     error
 		}, 1)
 
 		go func() {
 			results, err := fuzz.GetResults()
 			resultChan <- struct {
-				results *fuzzer.FuzzerResults
+				results *adapter.FuzzerResults
 				err     error
 			}{results, err}
 		}()
@@ -483,7 +483,7 @@ func (fje *FuzzerJobExecutor) CleanupJob(jobID string) error {
 }
 
 // GetFuzzer returns the fuzzer instance for a given job ID
-func (fje *FuzzerJobExecutor) GetFuzzer(jobID string) (fuzzer.Fuzzer, bool) {
+func (fje *FuzzerJobExecutor) GetFuzzer(jobID string) (adapter.Fuzzer, bool) {
 	fje.mu.RLock()
 	defer fje.mu.RUnlock()
 
@@ -502,20 +502,20 @@ func (fje *FuzzerJobExecutor) SetCoverageCollector(collector *CoverageCollector)
 }
 
 // createFuzzer creates the appropriate fuzzer instance based on job configuration
-func (fje *FuzzerJobExecutor) createFuzzer(job *common.Job) (fuzzer.Fuzzer, error) {
+func (fje *FuzzerJobExecutor) createFuzzer(job *common.Job) (adapter.Fuzzer, error) {
 	switch job.Fuzzer {
 	case "aflplusplus", "afl++", "afl":
-		aflFuzz := fuzzer.NewAFLPlusPlus(fje.logger)
+		aflFuzz := adapter.NewAFLPlusPlus(fje.logger)
 		aflFuzz.SetBotID(fje.botID)
 		return aflFuzz, nil
 
 	case "libfuzzer":
-		libFuzz := fuzzer.NewLibFuzzer(fje.logger)
+		libFuzz := adapter.NewLibFuzzer(fje.logger)
 		libFuzz.SetBotID(fje.botID)
 		return libFuzz, nil
 
 	case "honggfuzz":
-		honggFuzz := fuzzer.NewHonggfuzz(fje.logger)
+		honggFuzz := adapter.NewHonggfuzz(fje.logger)
 		honggFuzz.SetBotID(fje.botID)
 		return honggFuzz, nil
 
@@ -525,7 +525,7 @@ func (fje *FuzzerJobExecutor) createFuzzer(job *common.Job) (fuzzer.Fuzzer, erro
 }
 
 // collectCoverage collects and reports coverage data for a job
-func (fje *FuzzerJobExecutor) collectCoverage(job *common.Job, fuzz fuzzer.Fuzzer) {
+func (fje *FuzzerJobExecutor) collectCoverage(job *common.Job, fuzz adapter.Fuzzer) {
 	// AFL++ uses raw coverage files, not stats-based coverage
 	if job.Fuzzer == "aflplusplus" || job.Fuzzer == "afl++" {
 		fje.logger.WithField("job_id", job.ID).Debug("AFL++ uses raw coverage files, skipping stats-based coverage collection")
@@ -674,14 +674,14 @@ func (fje *FuzzerJobExecutor) handleFuzzerEvents(jobID string) {
 	}
 }
 
-// jobEventHandler implements the fuzzer.EventHandler interface
+// jobEventHandler implements the adapter.EventHandler interface
 type jobEventHandler struct {
 	jobID      string
 	logger     *logrus.Logger
 	resultChan chan common.FuzzerEvent
 }
 
-func (h *jobEventHandler) OnStart(fuzz fuzzer.Fuzzer) {
+func (h *jobEventHandler) OnStart(fuzz adapter.Fuzzer) {
 	h.logger.WithFields(logrus.Fields{
 		"job_id": h.jobID,
 		"fuzzer": fuzz.Name(),
@@ -698,7 +698,7 @@ func (h *jobEventHandler) OnStart(fuzz fuzzer.Fuzzer) {
 	}
 }
 
-func (h *jobEventHandler) OnStop(fuzz fuzzer.Fuzzer, reason string) {
+func (h *jobEventHandler) OnStop(fuzz adapter.Fuzzer, reason string) {
 	h.logger.WithFields(logrus.Fields{
 		"job_id": h.jobID,
 		"fuzzer": fuzz.Name(),
@@ -716,7 +716,7 @@ func (h *jobEventHandler) OnStop(fuzz fuzzer.Fuzzer, reason string) {
 	}
 }
 
-func (h *jobEventHandler) OnCrash(fuzz fuzzer.Fuzzer, crash *common.CrashResult) {
+func (h *jobEventHandler) OnCrash(fuzz adapter.Fuzzer, crash *common.CrashResult) {
 	h.logger.WithFields(logrus.Fields{
 		"job_id":   h.jobID,
 		"fuzzer":   fuzz.Name(),
@@ -736,7 +736,7 @@ func (h *jobEventHandler) OnCrash(fuzz fuzzer.Fuzzer, crash *common.CrashResult)
 	}
 }
 
-func (h *jobEventHandler) OnNewPath(fuzz fuzzer.Fuzzer, path *fuzzer.CorpusEntry) {
+func (h *jobEventHandler) OnNewPath(fuzz adapter.Fuzzer, path *adapter.CorpusEntry) {
 	h.logger.WithFields(logrus.Fields{
 		"job_id":   h.jobID,
 		"fuzzer":   fuzz.Name(),
@@ -757,7 +757,7 @@ func (h *jobEventHandler) OnNewPath(fuzz fuzzer.Fuzzer, path *fuzzer.CorpusEntry
 	}
 }
 
-func (h *jobEventHandler) OnStats(fuzz fuzzer.Fuzzer, stats fuzzer.FuzzerStats) {
+func (h *jobEventHandler) OnStats(fuzz adapter.Fuzzer, stats adapter.FuzzerStats) {
 	h.logger.WithFields(logrus.Fields{
 		"job_id":          h.jobID,
 		"fuzzer":          fuzz.Name(),
@@ -783,7 +783,7 @@ func (h *jobEventHandler) OnStats(fuzz fuzzer.Fuzzer, stats fuzzer.FuzzerStats) 
 	}
 }
 
-func (h *jobEventHandler) OnError(fuzz fuzzer.Fuzzer, err error) {
+func (h *jobEventHandler) OnError(fuzz adapter.Fuzzer, err error) {
 	h.logger.WithFields(logrus.Fields{
 		"job_id": h.jobID,
 		"fuzzer": fuzz.Name(),
@@ -801,7 +801,7 @@ func (h *jobEventHandler) OnError(fuzz fuzzer.Fuzzer, err error) {
 	}
 }
 
-func (h *jobEventHandler) OnProgress(fuzz fuzzer.Fuzzer, progress fuzzer.FuzzerProgress) {
+func (h *jobEventHandler) OnProgress(fuzz adapter.Fuzzer, progress adapter.FuzzerProgress) {
 	h.logger.WithFields(logrus.Fields{
 		"job_id":   h.jobID,
 		"fuzzer":   fuzz.Name(),

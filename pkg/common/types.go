@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/ethpandaops/pandafuzz/pkg/retry"
 )
 
 // Common errors
@@ -140,15 +142,8 @@ type SystemConfig struct {
 	StoragePath       string        `json:"storage_path" yaml:"storage_path"`
 }
 
-// Retry policy configuration
-type RetryPolicy struct {
-	MaxRetries      int           `json:"max_retries" yaml:"max_retries"`
-	InitialDelay    time.Duration `json:"initial_delay" yaml:"initial_delay"`
-	MaxDelay        time.Duration `json:"max_delay" yaml:"max_delay"`
-	Multiplier      float64       `json:"multiplier" yaml:"multiplier"`
-	Jitter          bool          `json:"jitter" yaml:"jitter"`
-	RetryableErrors []string      `json:"retryable_errors" yaml:"retryable_errors"`
-}
+// RetryPolicy is an alias to retry.Policy for backward compatibility
+type RetryPolicy = retry.Policy
 
 // Resource limits configuration
 type ResourceLimits struct {

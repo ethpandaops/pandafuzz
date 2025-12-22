@@ -455,16 +455,23 @@ func (s *jobService) CancelJob(ctx context.Context, jobID string) error {
 	job.Status = common.JobStatusCancelled
 	now := time.Now()
 	job.CompletedAt = &now
+	botID := job.AssignedBot
+	job.AssignedBot = nil // Unassign the job
 
-	// If job is assigned, free up the bot
-	if job.AssignedBot != nil {
-		if err := s.state.CompleteJobWithRetry(jobID, *job.AssignedBot, false); err != nil {
-			return errors.Wrap(errors.ErrorTypeDatabase, "cancel_job", "Failed to cancel job", err)
-		}
-	} else {
-		// Just update job status
-		if err := s.state.SaveJobWithRetry(job); err != nil {
-			return errors.Wrap(errors.ErrorTypeDatabase, "cancel_job", "Failed to save job", err)
+	// Save the job with cancelled status
+	if err := s.state.SaveJobWithRetry(job); err != nil {
+		return errors.Wrap(errors.ErrorTypeDatabase, "cancel_job", "Failed to save job", err)
+	}
+
+	// If job was assigned, free up the bot
+	if botID != nil {
+		bot, err := s.state.GetBot(*botID)
+		if err == nil && bot != nil {
+			bot.Status = common.BotStatusIdle
+			bot.CurrentJob = nil
+			if err := s.state.SaveBotWithRetry(bot); err != nil {
+				s.logger.WithError(err).WithField("bot_id", *botID).Warn("Failed to free up bot after job cancellation")
+			}
 		}
 	}
 

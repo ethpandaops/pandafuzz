@@ -229,7 +229,7 @@ type MasterResultReporter struct {
 }
 
 func (r *MasterResultReporter) ReportJobCompletion(ctx context.Context, jobID, botID string, success bool, message string) error {
-	return r.client.CompleteJob(botID, success, message)
+	return r.client.CompleteJob(botID, jobID, success, message)
 }
 
 func (r *MasterResultReporter) ReportCrash(ctx context.Context, crash *common.CrashResult) error {

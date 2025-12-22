@@ -32,22 +32,22 @@ func NewManager(
 	recoveryManager RecoveryManager,
 	config *common.MasterConfig,
 	logger *logrus.Logger,
-) *Manager {
+) (*Manager, error) {
 	// Validate required dependencies
 	if state == nil {
-		panic("service manager requires state store to be initialized")
+		return nil, fmt.Errorf("service manager: state store is required")
 	}
 	if timeoutManager == nil {
-		panic("service manager requires timeout manager to be initialized")
+		return nil, fmt.Errorf("service manager: timeout manager is required")
 	}
 	if recoveryManager == nil {
-		panic("service manager requires recovery manager to be initialized")
+		return nil, fmt.Errorf("service manager: recovery manager is required")
 	}
 	if config == nil {
-		panic("service manager requires configuration to be initialized")
+		return nil, fmt.Errorf("service manager: configuration is required")
 	}
 	if logger == nil {
-		panic("service manager requires logger to be initialized")
+		return nil, fmt.Errorf("service manager: logger is required")
 	}
 
 	// Create monitoring service first
@@ -85,7 +85,11 @@ func NewManager(
 				}
 			}
 
-			corpusService = NewCorpusService(storage, fileStorage, corpusDir, logger)
+			var err error
+			corpusService, err = NewCorpusService(storage, fileStorage, corpusDir, logger)
+			if err != nil {
+				logger.WithError(err).Error("Failed to create corpus service")
+			}
 		} else {
 			logger.Warn("Storage not available in state provider, corpus service will be limited")
 		}
@@ -151,7 +155,7 @@ func NewManager(
 		Reproducibility: reproducibilityService,
 		CrashMinimizer:  crashMinimizerService,
 		logger:          logger,
-	}
+	}, nil
 }
 
 // Start starts all managed services

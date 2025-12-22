@@ -55,7 +55,7 @@ run_fuzzer_test() {
     cd "$TEMP_BUILD_DIR"
 
     if [[ "$FUZZER_TYPE" == "afl++" ]]; then
-        # Create a proper AFL++ test program
+        # Create a proper AFL++ test program with easy-to-find bugs
         cat > afl_test.c << 'EOF'
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,65 +64,72 @@ run_fuzzer_test() {
 #include <signal.h>
 
 int main(int argc, char *argv[]) {
-    char buffer[100];
+    unsigned char buffer[100];
     int bytes_read;
-    
+
     // For debugging
     fprintf(stderr, "AFL test program started with %d args\n", argc);
-    
+
     // Always read from stdin for AFL++ compatibility
     fprintf(stderr, "Reading from stdin\n");
-    
+
     // Read input - use read() instead of fgets() for binary data
     bytes_read = read(0, buffer, sizeof(buffer) - 1);
     if (bytes_read <= 0) {
         fprintf(stderr, "No input received\n");
         return 0;
     }
-    
-    // Null terminate
-    buffer[bytes_read] = '\0';
-    
-    // Remove newline
-    buffer[strcspn(buffer, "\n")] = 0;
-    
-    // Echo what we got (for debugging)
-    printf("Received input: %s (length: %zu)\n", buffer, strlen(buffer));
-    
-    // Various crash conditions for AFL++ to find
-    if (strlen(buffer) >= 5) {
-        if (strncmp(buffer, "CRASH", 5) == 0) {
-            printf("Triggering null pointer dereference\n");
+
+    fprintf(stderr, "Received %d bytes\n", bytes_read);
+
+    // AFL++-friendly crash conditions using simple byte comparisons
+    // These are much easier for AFL++ to discover through mutations
+
+    // Bug 1: Simple byte sequence trigger (easier than string comparison)
+    if (bytes_read >= 3) {
+        if (buffer[0] == 'A' && buffer[1] == 'B' && buffer[2] == 'C') {
+            fprintf(stderr, "Found ABC pattern - triggering crash!\n");
+            fflush(stderr);
             // Null pointer dereference
             int *p = NULL;
             *p = 42;
         }
-        
-        if (strncmp(buffer, "ABORT", 5) == 0) {
-            printf("Calling abort()\n");
+    }
+
+    // Bug 2: Magic number trigger
+    if (bytes_read >= 4) {
+        unsigned int magic = (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
+        if (magic == 0xDEADBEEF) {
+            fprintf(stderr, "Found magic number 0xDEADBEEF - triggering abort!\n");
+            fflush(stderr);
             abort();
         }
-        
-        if (strncmp(buffer, "SEGV", 4) == 0) {
-            printf("Triggering segmentation fault\n");
-            // Segmentation fault
-            raise(SIGSEGV);
+    }
+
+    // Bug 3: Very simple trigger - just check first byte
+    if (bytes_read >= 1 && buffer[0] == 'X') {
+        if (bytes_read >= 2 && buffer[1] == 'Y') {
+            if (bytes_read >= 3 && buffer[2] == 'Z') {
+                fprintf(stderr, "Found XYZ pattern - triggering segfault!\n");
+                fflush(stderr);
+                raise(SIGSEGV);
+            }
         }
     }
-    
-    // Buffer overflow vulnerability
-    if (strlen(buffer) > 50) {
-        printf("Input too long, triggering buffer overflow\n");
-        char small[10];
-        strcpy(small, buffer);  // Buffer overflow
+
+    // Bug 4: Size-based trigger (easiest for AFL++ to hit)
+    if (bytes_read >= 20 && bytes_read < 25) {
+        // Check for specific pattern at this size
+        if (buffer[0] == 'B' && buffer[1] == 'U' && buffer[2] == 'G') {
+            fprintf(stderr, "Found BUG pattern at right size - crashing!\n");
+            fflush(stderr);
+            // Array out of bounds
+            char small[5];
+            memcpy(small, buffer, bytes_read);
+        }
     }
-    
-    // Check for other patterns
-    if (strstr(buffer, "FUZZ")) {
-        printf("Found FUZZ pattern\n");
-    }
-    
-    printf("Processing completed successfully\n");
+
+    fprintf(stderr, "Processing completed successfully\n");
     return 0;
 }
 EOF
@@ -139,7 +146,7 @@ EOF
             echo -e "${YELLOW}⚠️  AFL++ compilers not found, using regular gcc${NC}"
             gcc -g -O0 -o afl_test afl_test.c
         fi
-        
+
         TEST_BINARY="$TEMP_BUILD_DIR/afl_test"
         echo -e "${GREEN}✓ Created AFL++ test binary: ${TEST_BINARY}${NC}"
 
@@ -495,12 +502,12 @@ EOF
     echo "1234" > "$TEMP_DIR/seed_06_numbers.txt"
     echo "AFL++" > "$TEMP_DIR/seed_07_afl.txt"
     echo "x" > "$TEMP_DIR/seed_08_single.txt"
-    # Add seeds that directly trigger crashes
-    echo "CRASH" > "$TEMP_DIR/seed_09_crash.txt"
-    echo "ABORT" > "$TEMP_DIR/seed_10_abort.txt"
-    echo "SEGV" > "$TEMP_DIR/seed_11_segv.txt"
-    # Add a seed with FUZZ pattern for coverage
-    echo "FUZZ" > "$TEMP_DIR/seed_12_fuzz_pattern.txt"
+    # Add seeds that are close to crash triggers - AFL++ will mutate these
+    echo "ABD" > "$TEMP_DIR/seed_09_abc_close.txt"  # Close to ABC trigger
+    echo "XYW" > "$TEMP_DIR/seed_10_xyz_close.txt"  # Close to XYZ trigger
+    printf "\xDE\xAD\xBE\xEE" > "$TEMP_DIR/seed_11_magic_close.bin"  # Close to 0xDEADBEEF
+    # Create a 21-byte file starting with "BVG" (close to BUG trigger)
+    printf "BVG%-18s" "padding_data_here" > "$TEMP_DIR/seed_12_bug_close.txt"
 
     # Additional seed for LibFuzzer-specific crash
     if [[ "$FUZZER_TYPE" == "libfuzzer" ]]; then

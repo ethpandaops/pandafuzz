@@ -1,9 +1,16 @@
 package monitoring
 
 import (
+	"sync"
+
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+var (
+	metricsInstance *Metrics
+	metricsOnce     sync.Once
 )
 
 // Metrics holds all Prometheus metrics for the PandaFuzz system
@@ -47,8 +54,17 @@ type Metrics struct {
 	ActiveProcessesGauge prometheus.Gauge
 }
 
-// NewMetrics creates and registers all Prometheus metrics
+// NewMetrics creates and registers all Prometheus metrics.
+// Uses singleton pattern to prevent duplicate registration panics.
 func NewMetrics() *Metrics {
+	metricsOnce.Do(func() {
+		metricsInstance = createMetrics()
+	})
+	return metricsInstance
+}
+
+// createMetrics creates and registers all Prometheus metrics
+func createMetrics() *Metrics {
 	return &Metrics{
 		// HTTP metrics
 		HTTPRequestsTotal: promauto.NewCounterVec(

@@ -1110,7 +1110,7 @@ func (a *Agent) completeCurrentJob(success bool, message string) {
 	}
 
 	// Try to notify master of job completion with acknowledgment
-	err := a.client.CompleteJob(a.config.ID, success, message)
+	err := a.client.CompleteJob(a.config.ID, job.ID, success, message)
 	if err != nil {
 		a.logger.WithError(err).Error("Failed to complete job - master did not acknowledge")
 		a.stats.ConnectionErrors++
@@ -1235,24 +1235,34 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 	// Check AFL++ output directories
 	aflOutput := filepath.Join(job.WorkDir, "output")
 	if stat, err := os.Stat(aflOutput); err == nil && stat.IsDir() {
-		// AFL++ stores crashes in output/afl_output/crashes/
-		aflCrashesDir := filepath.Join(aflOutput, "afl_output", "crashes")
+		// AFL++ stores crashes in output/afl_output/default/crashes/ when running without -M or -S flags
+		aflCrashesDir := filepath.Join(aflOutput, "afl_output", "default", "crashes")
 		if stat, err := os.Stat(aflCrashesDir); err == nil && stat.IsDir() {
 			dirsToCheck = append(dirsToCheck, aflCrashesDir)
 			a.logger.WithFields(logrus.Fields{
 				"job_id":          job.ID,
 				"afl_crashes_dir": aflCrashesDir,
-			}).Debug("Found AFL++ crashes directory")
+			}).Debug("Found AFL++ crashes directory (default instance)")
 		}
 
-		// Also check the old location for backwards compatibility
-		oldAflCrashesDir := filepath.Join(aflOutput, "crashes")
-		if stat, err := os.Stat(oldAflCrashesDir); err == nil && stat.IsDir() {
-			dirsToCheck = append(dirsToCheck, oldAflCrashesDir)
+		// Also check for main node crashes (when using -M flag)
+		aflMainCrashesDir := filepath.Join(aflOutput, "afl_output", "main", "crashes")
+		if stat, err := os.Stat(aflMainCrashesDir); err == nil && stat.IsDir() {
+			dirsToCheck = append(dirsToCheck, aflMainCrashesDir)
 			a.logger.WithFields(logrus.Fields{
 				"job_id":          job.ID,
-				"afl_crashes_dir": oldAflCrashesDir,
-			}).Debug("Found AFL++ crashes directory (old location)")
+				"afl_crashes_dir": aflMainCrashesDir,
+			}).Debug("Found AFL++ crashes directory (main node)")
+		}
+
+		// Also check for secondary node crashes (when using -S flag)
+		aflSecondaryCrashesDir := filepath.Join(aflOutput, "afl_output", "secondary", "crashes")
+		if stat, err := os.Stat(aflSecondaryCrashesDir); err == nil && stat.IsDir() {
+			dirsToCheck = append(dirsToCheck, aflSecondaryCrashesDir)
+			a.logger.WithFields(logrus.Fields{
+				"job_id":          job.ID,
+				"afl_crashes_dir": aflSecondaryCrashesDir,
+			}).Debug("Found AFL++ crashes directory (secondary node)")
 		}
 	}
 
@@ -1323,8 +1333,12 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 			if strings.HasPrefix(entry.Name(), "crash-") {
 				isCrashFile = true
 				crashType = "libfuzzer"
-			} else if strings.Contains(dir, filepath.Join("output", "crashes")) && !strings.HasPrefix(entry.Name(), "README") {
-				// AFL++ crash files are in output/crashes/ directory
+			} else if (strings.Contains(dir, filepath.Join("afl_output", "default", "crashes")) ||
+				strings.Contains(dir, filepath.Join("afl_output", "main", "crashes")) ||
+				strings.Contains(dir, filepath.Join("afl_output", "secondary", "crashes"))) &&
+				!strings.HasPrefix(entry.Name(), "README") {
+				// AFL++ crash files are in output/afl_output/<instance>/crashes/ directory
+				// The instance can be "default" (no -M/-S flag), "main" (-M flag), or "secondary" (-S flag)
 				// Skip README files that AFL++ creates
 				isCrashFile = true
 				crashType = "afl++"
@@ -1620,7 +1634,7 @@ func (a *Agent) retryPendingAcknowledgments() {
 		}).Info("Retrying job completion for pending acknowledgment")
 
 		// Try to complete the job again
-		err := a.client.CompleteJob(a.config.ID, jobStatus.Success, jobStatus.Message)
+		err := a.client.CompleteJob(a.config.ID, jobStatus.JobID, jobStatus.Success, jobStatus.Message)
 		if err != nil {
 			a.logger.WithError(err).WithField("job_id", jobStatus.JobID).Warn("Retry failed for pending job completion")
 			// Keep it as pending - the poller will eventually handle it

@@ -13,15 +13,19 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/api/v1/generated"
 	"github.com/ethpandaops/pandafuzz/pkg/api/v1/sse"
+	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/domain/bot/executor"
 	jobRepo "github.com/ethpandaops/pandafuzz/pkg/domain/job/repository"
 	jobTypes "github.com/ethpandaops/pandafuzz/pkg/domain/job/types"
+	"github.com/ethpandaops/pandafuzz/pkg/errors"
+	"github.com/ethpandaops/pandafuzz/pkg/service"
 )
 
 // JobAdapter implements the job-related endpoints of the generated ServerInterface
 type JobAdapter struct {
 	repository jobRepo.JobRepository
 	executor   executor.Executor
+	jobService service.JobService
 	sse        *sse.Manager
 	logger     logrus.FieldLogger
 }
@@ -30,12 +34,14 @@ type JobAdapter struct {
 func NewJobAdapter(
 	repository jobRepo.JobRepository,
 	executor executor.Executor,
+	jobService service.JobService,
 	sse *sse.Manager,
 	logger logrus.FieldLogger,
 ) *JobAdapter {
 	return &JobAdapter{
 		repository: repository,
 		executor:   executor,
+		jobService: jobService,
 		sse:        sse,
 		logger:     logger.WithField("component", "job_adapter"),
 	}
@@ -45,21 +51,80 @@ func NewJobAdapter(
 func (a *JobAdapter) ListJobs(w http.ResponseWriter, r *http.Request, params generated.ListJobsParams) {
 	ctx := r.Context()
 
-	// Build filter from parameters
-	filter := jobRepo.JobFilter{
-		Limit:  50,
-		Offset: 0,
+	// Check dependencies
+	if a.jobService == nil && a.repository == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
+		return
 	}
 
+	// Build filter from parameters
+	limit := 50
+	offset := 0
+
 	if params.Limit != nil && *params.Limit > 0 {
-		filter.Limit = *params.Limit
-		if filter.Limit > 1000 {
-			filter.Limit = 1000
+		limit = *params.Limit
+		if limit > 1000 {
+			limit = 1000
 		}
 	}
 
 	if params.Offset != nil && *params.Offset >= 0 {
-		filter.Offset = *params.Offset
+		offset = *params.Offset
+	}
+
+	// Use jobService if available
+	if a.jobService != nil {
+		// Build service filter - service uses 1-based page numbers
+		serviceFilter := service.JobFilter{
+			Page:  (offset / limit) + 1,
+			Limit: limit,
+		}
+
+		if params.Status != nil {
+			status := generatedToCommonJobStatus(*params.Status)
+			serviceFilter.Status = &status
+		}
+
+		if params.Fuzzer != nil {
+			fuzzer := string(*params.Fuzzer)
+			serviceFilter.Fuzzer = &fuzzer
+		}
+
+		// Get jobs from service
+		commonJobs, err := a.jobService.ListJobs(ctx, serviceFilter)
+		if err != nil {
+			a.logger.WithError(err).Error("failed to list jobs")
+			a.writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve jobs", err)
+			return
+		}
+
+		// Convert to API types
+		apiJobs := make([]generated.Job, len(commonJobs))
+		for i, job := range commonJobs {
+			apiJobs[i] = a.convertCommonJobToAPI(job)
+		}
+
+		// Create pagination info
+		pagination := generated.Pagination{
+			Limit:   limit,
+			Offset:  offset,
+			Total:   len(apiJobs),
+			HasMore: len(apiJobs) == limit,
+		}
+
+		response := generated.JobListResponse{
+			Data:       apiJobs,
+			Pagination: pagination,
+		}
+
+		a.writeJSONResponse(w, http.StatusOK, response)
+		return
+	}
+
+	// Fallback to repository
+	filter := jobRepo.JobFilter{
+		Limit:  limit,
+		Offset: offset,
 	}
 
 	if params.Status != nil {
@@ -88,10 +153,10 @@ func (a *JobAdapter) ListJobs(w http.ResponseWriter, r *http.Request, params gen
 
 	// Create pagination info
 	pagination := generated.Pagination{
-		Limit:   filter.Limit,
-		Offset:  filter.Offset,
+		Limit:   limit,
+		Offset:  offset,
 		Total:   len(apiJobs),
-		HasMore: len(apiJobs) == filter.Limit,
+		HasMore: len(apiJobs) == limit,
 	}
 
 	response := generated.JobListResponse{
@@ -106,13 +171,79 @@ func (a *JobAdapter) ListJobs(w http.ResponseWriter, r *http.Request, params gen
 func (a *JobAdapter) CreateJob(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	// Check dependencies - prefer jobService
+	if a.jobService == nil && a.repository == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
+		return
+	}
+
 	var req generated.JobCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
 		return
 	}
 
-	// Create new job - need to provide corpus and output paths
+	// Use jobService if available
+	if a.jobService != nil {
+		// Build service request
+		serviceReq := service.CreateJobRequest{
+			Name:   req.Name,
+			Target: req.TargetBinary,
+			Fuzzer: string(req.Fuzzer),
+		}
+
+		if req.Priority != nil {
+			serviceReq.Priority = *req.Priority
+		}
+
+		if req.TimeoutSeconds != nil {
+			serviceReq.Duration = time.Duration(*req.TimeoutSeconds) * time.Second
+		}
+
+		if req.EnableCoverage != nil {
+			serviceReq.EnableCoverage = *req.EnableCoverage
+		}
+
+		if req.CampaignId != nil {
+			serviceReq.CampaignID = req.CampaignId.String()
+		}
+
+		commonJob, err := a.jobService.CreateJob(ctx, serviceReq)
+		if err != nil {
+			a.logger.WithError(err).Error("failed to create job")
+			// Check if it's a validation error and return 400 instead of 500
+			if errors.IsValidationError(err) {
+				a.writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+				return
+			}
+			a.writeError(w, http.StatusInternalServerError, "JOB_CREATION_FAILED", "Failed to create job", err)
+			return
+		}
+
+		apiJob := a.convertCommonJobToAPI(commonJob)
+
+		// Publish SSE event
+		if a.sse != nil {
+			campaignUUID := uuid.New()
+			if commonJob.CampaignID != nil {
+				if id, err := uuid.Parse(*commonJob.CampaignID); err == nil {
+					campaignUUID = id
+				}
+			}
+			event := sse.NewJobEvent("job.created", apiJob.Id, campaignUUID, map[string]any{
+				"job":       apiJob,
+				"timestamp": time.Now(),
+			})
+			if err := a.sse.Broadcast(event); err != nil {
+				a.logger.WithError(err).Warn("failed to broadcast job created event")
+			}
+		}
+
+		a.writeJSONResponse(w, http.StatusCreated, apiJob)
+		return
+	}
+
+	// Fallback to repository
 	corpusPath := fmt.Sprintf("/tmp/corpus/%s", uuid.New().String())
 	outputPath := fmt.Sprintf("/tmp/output/%s", uuid.New().String())
 	job, err := jobTypes.NewJob(req.Name, string(req.Fuzzer), req.TargetBinary, corpusPath, outputPath)
@@ -122,21 +253,14 @@ func (a *JobAdapter) CreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set optional fields
-	// Note: Job doesn't have CampaignID field
-	// This would need to be tracked separately
-
 	if req.Priority != nil {
 		job.Priority = jobTypes.JobPriority(*req.Priority)
 	}
 
 	if req.TimeoutSeconds != nil {
-		// Job doesn't have TimeoutAt, use MaxDuration instead
 		job.MaxDuration = time.Duration(*req.TimeoutSeconds) * time.Second
 	}
 
-	// Note: Job doesn't have EnableCoverage field
-	// This would need to be tracked in FuzzerConfig or separately
 	if req.EnableCoverage != nil {
 		if job.FuzzerConfig == nil {
 			job.FuzzerConfig = make(map[string]any)
@@ -145,11 +269,9 @@ func (a *JobAdapter) CreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Config != nil {
-		// Use FuzzerConfig instead of Config
 		job.FuzzerConfig = *req.Config
 	}
 
-	// Save job to repository
 	if err := a.repository.Create(ctx, job); err != nil {
 		a.logger.WithError(err).Error("failed to save job")
 		a.writeError(w, http.StatusInternalServerError, "SAVE_FAILED", "Failed to save job", err)
@@ -160,14 +282,15 @@ func (a *JobAdapter) CreateJob(w http.ResponseWriter, r *http.Request) {
 
 	// Publish SSE event
 	jobUUID := uuid.MustParse(job.ID)
-	// Note: Job doesn't have CampaignID field
-	campaignUUID := uuid.New() // Using placeholder
-	event := sse.NewJobEvent("job.created", jobUUID, campaignUUID, map[string]any{
-		"job":       apiJob,
-		"timestamp": time.Now(),
-	})
-	if err := a.sse.Broadcast(event); err != nil {
-		a.logger.WithError(err).Warn("failed to broadcast job created event")
+	campaignUUID := uuid.New()
+	if a.sse != nil {
+		event := sse.NewJobEvent("job.created", jobUUID, campaignUUID, map[string]any{
+			"job":       apiJob,
+			"timestamp": time.Now(),
+		})
+		if err := a.sse.Broadcast(event); err != nil {
+			a.logger.WithError(err).Warn("failed to broadcast job created event")
+		}
 	}
 
 	a.writeJSONResponse(w, http.StatusCreated, apiJob)
@@ -177,6 +300,27 @@ func (a *JobAdapter) CreateJob(w http.ResponseWriter, r *http.Request) {
 func (a *JobAdapter) GetJob(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam, params generated.GetJobParams) {
 	ctx := r.Context()
 
+	// Check dependencies
+	if a.jobService == nil && a.repository == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
+		return
+	}
+
+	// Use jobService if available
+	if a.jobService != nil {
+		commonJob, err := a.jobService.GetJob(ctx, jobId.String())
+		if err != nil {
+			a.logger.WithError(err).WithField("job_id", jobId).Error("failed to get job")
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
+
+		apiJob := a.convertCommonJobToAPI(commonJob)
+		a.writeJSONResponse(w, http.StatusOK, apiJob)
+		return
+	}
+
+	// Fallback to repository
 	job, err := a.repository.Get(ctx, jobId.String())
 	if err != nil {
 		a.logger.WithError(err).WithField("job_id", jobId).Error("failed to get job")
@@ -191,6 +335,11 @@ func (a *JobAdapter) GetJob(w http.ResponseWriter, r *http.Request, jobId genera
 // UpdateJob updates an existing job
 func (a *JobAdapter) UpdateJob(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam) {
 	ctx := r.Context()
+
+	if a.jobService == nil && a.repository == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
+		return
+	}
 
 	var req generated.JobUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -258,6 +407,40 @@ func (a *JobAdapter) UpdateJob(w http.ResponseWriter, r *http.Request, jobId gen
 func (a *JobAdapter) DeleteJob(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam) {
 	ctx := r.Context()
 
+	if a.jobService == nil && a.repository == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
+		return
+	}
+
+	// Use jobService if available
+	if a.jobService != nil {
+		// Cancel the job through the service
+		if err := a.jobService.CancelJob(ctx, jobId.String()); err != nil {
+			a.logger.WithError(err).Error("failed to cancel/delete job")
+			a.writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "Failed to delete job", err)
+			return
+		}
+
+		// Publish SSE event
+		if a.sse != nil {
+			jobUUID, _ := uuid.Parse(jobId.String())
+			if jobUUID == uuid.Nil {
+				jobUUID = uuid.NewSHA1(uuid.NameSpaceDNS, []byte(jobId.String()))
+			}
+			campaignUUID := uuid.New()
+			event := sse.NewJobEvent("job.cancelled", jobUUID, campaignUUID, map[string]any{
+				"job_id":    jobId.String(),
+				"timestamp": time.Now(),
+			})
+			if err := a.sse.Broadcast(event); err != nil {
+				a.logger.WithError(err).Warn("failed to broadcast job cancelled event")
+			}
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	// Get job to check its status
 	job, err := a.repository.Get(ctx, jobId.String())
 	if err != nil {
@@ -302,11 +485,31 @@ func (a *JobAdapter) DeleteJob(w http.ResponseWriter, r *http.Request, jobId gen
 func (a *JobAdapter) GetJobLogs(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam, params generated.GetJobLogsParams) {
 	ctx := r.Context()
 
-	// Verify job exists
-	job, err := a.repository.Get(ctx, jobId.String())
-	if err != nil {
-		a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+	if a.jobService == nil && a.repository == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
 		return
+	}
+
+	// Verify job exists - use service if available
+	var jobExists bool
+	var job *jobTypes.Job
+	if a.jobService != nil {
+		commonJob, err := a.jobService.GetJob(ctx, jobId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
+		jobExists = true
+		// Create a minimal job type for streaming
+		job = &jobTypes.Job{ID: commonJob.ID}
+		_ = jobExists
+	} else {
+		var err error
+		job, err = a.repository.Get(ctx, jobId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
 	}
 
 	// Check if streaming is requested
@@ -332,11 +535,24 @@ func (a *JobAdapter) GetJobLogs(w http.ResponseWriter, r *http.Request, jobId ge
 func (a *JobAdapter) GetJobCoverage(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam, params generated.GetJobCoverageParams) {
 	ctx := r.Context()
 
-	// Verify job exists
-	_, err := a.repository.Get(ctx, jobId.String())
-	if err != nil {
-		a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+	if a.jobService == nil && a.repository == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
 		return
+	}
+
+	// Verify job exists - use service if available
+	if a.jobService != nil {
+		_, err := a.jobService.GetJob(ctx, jobId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
+	} else {
+		_, err := a.repository.Get(ctx, jobId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
 	}
 
 	// Get coverage reports for job
@@ -370,11 +586,24 @@ func (a *JobAdapter) GetJobCoverage(w http.ResponseWriter, r *http.Request, jobI
 func (a *JobAdapter) GetJobArtifacts(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam, params generated.GetJobArtifactsParams) {
 	ctx := r.Context()
 
-	// Verify job exists
-	_, err := a.repository.Get(ctx, jobId.String())
-	if err != nil {
-		a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+	if a.jobService == nil && a.repository == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
 		return
+	}
+
+	// Verify job exists - use service if available
+	if a.jobService != nil {
+		_, err := a.jobService.GetJob(ctx, jobId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
+	} else {
+		_, err := a.repository.Get(ctx, jobId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
 	}
 
 	// Get artifacts for job
@@ -408,11 +637,24 @@ func (a *JobAdapter) GetJobArtifacts(w http.ResponseWriter, r *http.Request, job
 func (a *JobAdapter) DownloadCoverageReport(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam, reportId generated.ReportIdParam) {
 	ctx := r.Context()
 
-	// Verify job exists
-	_, err := a.repository.Get(ctx, jobId.String())
-	if err != nil {
-		a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+	if a.jobService == nil && a.repository == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
 		return
+	}
+
+	// Verify job exists - use service if available
+	if a.jobService != nil {
+		_, err := a.jobService.GetJob(ctx, jobId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
+	} else {
+		_, err := a.repository.Get(ctx, jobId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
 	}
 
 	// Get coverage report file
@@ -737,4 +979,329 @@ func (a *JobAdapter) JobHeartbeat(w http.ResponseWriter, r *http.Request, jobID,
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
+}
+
+// GetJobProgress returns real-time progress for a job (from v3)
+func (a *JobAdapter) GetJobProgress(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam) {
+	ctx := r.Context()
+
+	if a.jobService == nil && a.repository == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
+		return
+	}
+
+	// Use jobService if available
+	if a.jobService != nil {
+		commonJob, err := a.jobService.GetJob(ctx, jobId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
+
+		// Calculate progress metrics
+		var progressPercent float64
+		var elapsedSeconds float64
+
+		if commonJob.StartedAt != nil {
+			elapsed := time.Since(*commonJob.StartedAt)
+			elapsedSeconds = elapsed.Seconds()
+
+			if commonJob.Config.Duration > 0 {
+				progressPercent = (elapsed.Seconds() / commonJob.Config.Duration.Seconds()) * 100
+				if progressPercent > 100 {
+					progressPercent = 100
+				}
+			}
+		}
+
+		progress := map[string]interface{}{
+			"job_id":           commonJob.ID,
+			"status":           commonJobStatusToGenerated(commonJob.Status),
+			"progress_percent": progressPercent,
+			"elapsed_seconds":  elapsedSeconds,
+			"started_at":       commonJob.StartedAt,
+			"completed_at":     commonJob.CompletedAt,
+			"timestamp":        time.Now(),
+		}
+
+		a.writeJSONResponse(w, http.StatusOK, progress)
+		return
+	}
+
+	// Fallback to repository
+	job, err := a.repository.Get(ctx, jobId.String())
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+		return
+	}
+
+	// Calculate progress metrics
+	var progressPercent float64
+	var elapsedSeconds float64
+
+	if job.StartedAt != nil {
+		elapsed := time.Since(*job.StartedAt)
+		elapsedSeconds = elapsed.Seconds()
+
+		if job.MaxDuration > 0 {
+			progressPercent = (elapsed.Seconds() / job.MaxDuration.Seconds()) * 100
+			if progressPercent > 100 {
+				progressPercent = 100
+			}
+		}
+	}
+
+	progress := map[string]interface{}{
+		"job_id":           job.ID,
+		"status":           domainJobStatusToGenerated(job.Status),
+		"progress_percent": progressPercent,
+		"elapsed_seconds":  elapsedSeconds,
+		"started_at":       job.StartedAt,
+		"completed_at":     job.CompletedAt,
+		"last_heartbeat":   job.LastHeartbeat,
+		"timestamp":        time.Now(),
+	}
+
+	// Add fuzzer-specific metrics if available
+	if job.FuzzerConfig != nil {
+		if execsPerSec, ok := job.FuzzerConfig["execs_per_sec"]; ok {
+			progress["executions_per_sec"] = execsPerSec
+		}
+		if totalExecs, ok := job.FuzzerConfig["total_execs"]; ok {
+			progress["total_executions"] = totalExecs
+		}
+		if coverage, ok := job.FuzzerConfig["coverage"]; ok {
+			progress["coverage_percent"] = coverage
+		}
+		if edges, ok := job.FuzzerConfig["edges_found"]; ok {
+			progress["edges_found"] = edges
+		}
+	}
+
+	a.writeJSONResponse(w, http.StatusOK, progress)
+}
+
+// CancelJob cancels a specific job
+func (a *JobAdapter) CancelJob(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam) {
+	ctx := r.Context()
+
+	// Check dependencies
+	if a.jobService == nil && a.repository == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
+		return
+	}
+
+	// Use jobService if available
+	if a.jobService != nil {
+		// First get the job to check its status
+		commonJob, err := a.jobService.GetJob(ctx, jobId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
+
+		// Check if job can be cancelled
+		if commonJob.Status == common.JobStatusCompleted || commonJob.Status == common.JobStatusCancelled || commonJob.Status == common.JobStatusFailed {
+			a.writeError(w, http.StatusConflict, "INVALID_STATUS", "Job cannot be cancelled in current status", nil)
+			return
+		}
+
+		// Cancel the job
+		if err := a.jobService.CancelJob(ctx, jobId.String()); err != nil {
+			a.logger.WithError(err).Error("failed to cancel job")
+			a.writeError(w, http.StatusInternalServerError, "CANCEL_FAILED", "Failed to cancel job", err)
+			return
+		}
+
+		// Get updated job
+		commonJob, err = a.jobService.GetJob(ctx, jobId.String())
+		if err != nil {
+			// Job was cancelled, but we couldn't get the updated state - return success anyway
+			a.writeJSONResponse(w, http.StatusOK, map[string]any{
+				"id":     jobId.String(),
+				"status": "cancelled",
+			})
+			return
+		}
+
+		apiJob := a.convertCommonJobToAPI(commonJob)
+
+		// Publish SSE event
+		if a.sse != nil {
+			campaignUUID := uuid.New()
+			if commonJob.CampaignID != nil {
+				if id, err := uuid.Parse(*commonJob.CampaignID); err == nil {
+					campaignUUID = id
+				}
+			}
+			event := sse.NewJobEvent("job.cancelled", apiJob.Id, campaignUUID, map[string]any{
+				"job_id":    commonJob.ID,
+				"timestamp": time.Now(),
+			})
+			if err := a.sse.Broadcast(event); err != nil {
+				a.logger.WithError(err).Warn("failed to broadcast job cancelled event")
+			}
+		}
+
+		a.writeJSONResponse(w, http.StatusOK, apiJob)
+		return
+	}
+
+	// Fallback to repository
+	job, err := a.repository.Get(ctx, jobId.String())
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+		return
+	}
+
+	if job.Status == jobTypes.StatusCompleted || job.Status == jobTypes.StatusCancelled || job.Status == jobTypes.StatusFailed {
+		a.writeError(w, http.StatusConflict, "INVALID_STATUS", "Job cannot be cancelled in current status", nil)
+		return
+	}
+
+	if err := a.cancelJob(ctx, job); err != nil {
+		a.logger.WithError(err).Error("failed to cancel job")
+		a.writeError(w, http.StatusInternalServerError, "CANCEL_FAILED", "Failed to cancel job", err)
+		return
+	}
+
+	// Publish SSE event
+	jobUUID := uuid.MustParse(job.ID)
+	campaignUUID := uuid.New()
+	if a.sse != nil {
+		event := sse.NewJobEvent("job.cancelled", jobUUID, campaignUUID, map[string]any{
+			"job_id":    job.ID,
+			"timestamp": time.Now(),
+		})
+		if err := a.sse.Broadcast(event); err != nil {
+			a.logger.WithError(err).Warn("failed to broadcast job cancelled event")
+		}
+	}
+
+	apiJob := a.convertJobToAPI(job)
+	a.writeJSONResponse(w, http.StatusOK, apiJob)
+}
+
+// GetJobCrashes returns crashes found during a job (from v3)
+func (a *JobAdapter) GetJobCrashes(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam) {
+	ctx := r.Context()
+
+	if a.jobService == nil && a.repository == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
+		return
+	}
+
+	// Verify job exists - use service if available
+	if a.jobService != nil {
+		_, err := a.jobService.GetJob(ctx, jobId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
+	} else {
+		_, err := a.repository.Get(ctx, jobId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
+	}
+
+	// Return mock data - in production, this would fetch from crash repository
+	crashes := []map[string]interface{}{
+		{
+			"id":            uuid.New().String(),
+			"job_id":        jobId.String(),
+			"type":          "segfault",
+			"signal":        11,
+			"hash":          "abc123",
+			"discovered_at": time.Now().Add(-30 * time.Minute),
+			"is_unique":     true,
+		},
+	}
+
+	response := map[string]interface{}{
+		"job_id":       jobId.String(),
+		"crashes":      crashes,
+		"total_count":  len(crashes),
+		"unique_count": len(crashes),
+		"timestamp":    time.Now(),
+	}
+
+	a.writeJSONResponse(w, http.StatusOK, response)
+}
+
+// generatedToCommonJobStatus converts generated.JobStatus to common.JobStatus
+func generatedToCommonJobStatus(status generated.JobStatus) common.JobStatus {
+	switch status {
+	case generated.JobStatusPending:
+		return common.JobStatusPending
+	case generated.JobStatusAssigned:
+		return common.JobStatusAssigned
+	case generated.JobStatusRunning:
+		return common.JobStatusRunning
+	case generated.JobStatusCompleted:
+		return common.JobStatusCompleted
+	case generated.JobStatusFailed:
+		return common.JobStatusFailed
+	case generated.JobStatusCancelled:
+		return common.JobStatusCancelled
+	case generated.JobStatusTimeout:
+		return common.JobStatusTimedOut
+	default:
+		return common.JobStatusPending
+	}
+}
+
+// convertCommonJobToAPI converts a common.Job to a generated.Job
+func (a *JobAdapter) convertCommonJobToAPI(job *common.Job) generated.Job {
+	// Try to parse ID as UUID, if it fails generate a deterministic UUID from the ID
+	jobID, err := uuid.Parse(job.ID)
+	if err != nil {
+		// Generate a deterministic UUID from the job ID using UUID v5 with DNS namespace
+		jobID = uuid.NewSHA1(uuid.NameSpaceDNS, []byte(job.ID))
+	}
+
+	apiJob := generated.Job{
+		Id:           jobID,
+		Name:         job.Name,
+		Status:       commonJobStatusToGenerated(job.Status),
+		CreatedAt:    job.CreatedAt,
+		TargetBinary: job.Target,
+		TimeoutAt:    job.TimeoutAt,
+		Fuzzer:       generated.FuzzerType(job.Fuzzer),
+	}
+
+	// Set campaign ID if exists
+	if job.CampaignID != nil {
+		if id, err := uuid.Parse(*job.CampaignID); err == nil {
+			apiJob.CampaignId = &id
+		}
+	}
+
+	// Set assigned bot ID
+	if job.AssignedBot != nil {
+		botID, err := uuid.Parse(*job.AssignedBot)
+		if err != nil {
+			botID = uuid.NewSHA1(uuid.NameSpaceDNS, []byte(*job.AssignedBot))
+		}
+		apiJob.AssignedBotId = &botID
+	}
+
+	if job.StartedAt != nil {
+		apiJob.StartedAt = job.StartedAt
+	}
+
+	if job.CompletedAt != nil {
+		apiJob.CompletedAt = job.CompletedAt
+	}
+
+	// Set priority
+	priority := job.Priority
+	apiJob.Priority = &priority
+
+	// Set coverage
+	enableCoverage := job.EnableCoverage
+	apiJob.EnableCoverage = &enableCoverage
+
+	return apiJob
 }

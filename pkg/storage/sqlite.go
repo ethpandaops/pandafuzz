@@ -931,7 +931,36 @@ func (tx *SQLiteTransaction) Get(ctx context.Context, key string, dest any) erro
 }
 
 func (tx *SQLiteTransaction) Delete(ctx context.Context, key string) error {
-	_, err := tx.tx.ExecContext(ctx, "DELETE FROM metadata WHERE key = ?", key)
+	// Route delete based on key prefix (same as deleteByKeyContext)
+	parts := strings.SplitN(key, ":", 2)
+	if len(parts) != 2 {
+		_, err := tx.tx.ExecContext(ctx, "DELETE FROM metadata WHERE key = ?", key)
+		return err
+	}
+
+	table := parts[0]
+	id := parts[1]
+
+	var query string
+	switch table {
+	case "bot":
+		query = "DELETE FROM bots WHERE id = ?"
+	case "job":
+		query = "DELETE FROM jobs WHERE id = ?"
+	case "crash":
+		query = "DELETE FROM crashes WHERE id = ?"
+	case "coverage":
+		query = "DELETE FROM coverage WHERE id = ?"
+	case "corpus":
+		query = "DELETE FROM corpus WHERE id = ?"
+	case "assignment":
+		query = "DELETE FROM assignments WHERE id = ?"
+	default:
+		_, err := tx.tx.ExecContext(ctx, "DELETE FROM metadata WHERE key = ?", key)
+		return err
+	}
+
+	_, err := tx.tx.ExecContext(ctx, query, id)
 	return err
 }
 
@@ -1090,6 +1119,11 @@ func (s *SQLiteStorage) Iterate(ctx context.Context, prefix string, fn func(key 
 	// Add timeout check
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+
+	// Check if database is closed
+	if s.db == nil {
+		return common.ErrDatabaseClosed
 	}
 
 	return ExecuteWithRetry(ctx, s.config, func() error {
@@ -1891,6 +1925,11 @@ func (s *SQLiteStorage) UpdateJob(ctx context.Context, id string, updates map[st
 
 // ListJobs retrieves jobs with pagination and optional status filter
 func (s *SQLiteStorage) ListJobs(ctx context.Context, limit, offset int, status string) ([]*common.Job, error) {
+	// Check if database is closed
+	if s.db == nil {
+		return nil, common.ErrDatabaseClosed
+	}
+
 	// Build query to get ALL non-deleted jobs
 	query := `SELECT id, name, target, fuzzer, status, assigned_bot,
 		created_at, started_at, completed_at, timeout_at, work_dir, config, progress

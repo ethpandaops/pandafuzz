@@ -153,21 +153,30 @@ func ExampleRetryableOperation() {
 
 func ExampleBuildInsertQuery() {
 	// Build an INSERT query
-	query := sqlite.BuildInsertQuery("users", []string{"name", "email", "age"})
+	query, err := sqlite.BuildInsertQuery("users", []string{"name", "email", "age"})
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println(query)
 	// Output: INSERT INTO users (name, email, age) VALUES (?, ?, ?)
 }
 
 func ExampleBuildUpdateQuery() {
 	// Build an UPDATE query
-	query := sqlite.BuildUpdateQuery("users", []string{"name", "email"}, "id = ?")
+	query, err := sqlite.BuildUpdateQuery("users", []string{"name", "email"}, "id = ?")
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println(query)
 	// Output: UPDATE users SET name = ?, email = ? WHERE id = ?
 }
 
 func ExampleBuildBulkInsertQuery() {
 	// Build a bulk INSERT query for 3 rows
-	query := sqlite.BuildBulkInsertQuery("logs", []string{"level", "message", "timestamp"}, 3)
+	query, err := sqlite.BuildBulkInsertQuery("logs", []string{"level", "message", "timestamp"}, 3)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println(query)
 	// Output: INSERT INTO logs (level, message, timestamp) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)
 }

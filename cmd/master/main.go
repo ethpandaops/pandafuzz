@@ -446,13 +446,16 @@ func initializeDependencies(config *common.MasterConfig, logger *logrus.Logger) 
 	var stateAdapter service.StateStore = stateAdapterConcrete
 
 	// Create service manager
-	services := service.NewManager(
+	services, err := service.NewManager(
 		stateAdapter,
 		timeoutMgr,
 		recoveryMgr,
 		config,
 		logger,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service manager: %w", err)
+	}
 
 	// Asynq queue initialization is skipped in master
 	// Bot workers will connect directly to Redis for job processing
@@ -507,13 +510,9 @@ func createHTTPServer(config *common.MasterConfig, deps *Dependencies, logger *l
 		// CORS is already added by master server if needed
 	}
 
-	// Setup API v1 routes on top of existing routes
-	setupAPIRoutes(router, config, deps, masterServer, logger)
-
-	// Additional health and metrics endpoints (if not already added by master)
-	router.HandleFunc("/health", handleHealth(deps)).Methods("GET")
-	router.HandleFunc("/status", handleStatus(deps, versionInfo)).Methods("GET")
-	router.HandleFunc("/metrics", handleMetrics()).Methods("GET")
+	// Note: API routes are already configured by master server via InitializeRouter
+	// The legacy setupAPIRoutes and duplicate endpoints are no longer needed
+	// as the unified API v1 handles all routing through pkg/api/v1
 
 	return &http.Server{
 		Addr:         fmt.Sprintf(":%d", config.Server.Port),

@@ -8,7 +8,6 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/bot"
 	"github.com/ethpandaops/pandafuzz/pkg/common"
-	"github.com/ethpandaops/pandafuzz/pkg/master"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -113,21 +112,21 @@ func TestOrphanedJobRecovery(t *testing.T) {
 	assert.Equal(t, common.JobStatusPending, recoveredJob.Status)
 	assert.Nil(t, recoveredJob.AssignedBot)
 
-	// Create new bot to pick up the job
+	// Create new bot to pick up the job - use returned bot ID
 	bot2Client, err := bot.NewRetryClient(&common.BotConfig{
 		ID:           "bot-2",
 		MasterURL:    env.masterURL,
 		Capabilities: []string{"afl++"},
-		// WorkDirectory: env.tempDir, // TODO: WorkDirectory doesn't exist on BotConfig
 	}, env.logger)
 	require.NoError(t, err)
 	defer bot2Client.Close()
 
-	_, err = bot2Client.RegisterBot("bot-2", []string{"afl++"}, "http://localhost:9000")
+	bot2Response, err := bot2Client.RegisterBot("bot-2", []string{"afl++"}, "http://localhost:9000")
 	require.NoError(t, err)
+	bot2ID := bot2Response.BotID
 
 	// Bot 2 should be able to get the recovered job
-	assignedJob, err := bot2Client.GetJob("bot-2")
+	assignedJob, err := bot2Client.GetJob(bot2ID)
 	require.NoError(t, err)
 	assert.NotNil(t, assignedJob)
 	assert.Equal(t, job.ID, assignedJob.ID)
@@ -141,28 +140,29 @@ func TestBotFailureRecovery(t *testing.T) {
 	err := env.StartMaster()
 	require.NoError(t, err)
 
-	// Create and register bot
+	// Create and register bot - use returned bot ID
 	botClient, err := bot.NewRetryClient(env.botConfig, env.logger)
 	require.NoError(t, err)
 	defer botClient.Close()
 
-	_, err = botClient.RegisterBot(env.botConfig.ID, env.botConfig.Capabilities, "http://localhost:9000")
+	regResponse, err := botClient.RegisterBot(env.botConfig.ID, env.botConfig.Capabilities, "http://localhost:9000")
 	require.NoError(t, err)
+	botID := regResponse.BotID
 
 	// Create and get job
 	job, err := env.CreateTestJob("bot-failure-test")
 	require.NoError(t, err)
 
-	assignedJob, err := botClient.GetJob(env.botConfig.ID)
+	assignedJob, err := botClient.GetJob(botID)
 	require.NoError(t, err)
 	require.NotNil(t, assignedJob)
 
-	// Simulate bot failure
-	err = env.recoveryMgr.HandleBotFailureWithRetry(context.Background(), env.botConfig.ID)
+	// Simulate bot failure using returned bot ID
+	err = env.recoveryMgr.HandleBotFailureWithRetry(context.Background(), botID)
 	require.NoError(t, err)
 
 	// Check bot is marked as failed
-	failedBot, err := env.state.GetBot(context.Background(), env.botConfig.ID)
+	failedBot, err := env.state.GetBot(context.Background(), botID)
 	require.NoError(t, err)
 	assert.Equal(t, common.BotStatusFailed, failedBot.Status)
 	assert.Greater(t, failedBot.FailureCount, 0)
@@ -273,11 +273,8 @@ func TestTimeoutRecovery(t *testing.T) {
 	env := SetupTestEnvironment(t)
 
 	// Use very short timeouts
-	env.masterConfig.Timeouts.JobExecution = 2 * time.Second
+	env.masterConfig.Timeouts.JobExecution = 1 * time.Second
 	env.masterConfig.Timeouts.BotHeartbeat = 1 * time.Second
-
-	// Recreate timeout manager with new config
-	env.timeoutMgr = master.NewTimeoutManager(env.state, env.masterConfig, env.logger)
 
 	// Start master
 	err := env.StartMaster()
@@ -304,17 +301,19 @@ func TestTimeoutRecovery(t *testing.T) {
 	err = env.state.SaveBotWithRetry(context.Background(), bot)
 	require.NoError(t, err)
 
-	// Wait for timeout
-	time.Sleep(3 * time.Second)
+	// Register job with timeout manager
+	env.timeoutMgr.SetJobTimeout(job.ID, 1*time.Second)
 
-	// Check timeouts
-	// env.timeoutMgr.CheckTimeouts() // TODO: This method doesn't exist
+	// Wait for timeout to expire
+	time.Sleep(2 * time.Second)
+
+	// Force timeout check instead of waiting for background interval
+	env.timeoutMgr.ForceTimeoutCheck()
 
 	// Verify job is timed out
 	timedOutJob, err := env.state.GetJob(context.Background(), job.ID)
 	require.NoError(t, err)
 	assert.Equal(t, common.JobStatusFailed, timedOutJob.Status)
-	// assert.Contains(t, timedOutJob.Message, "timeout") // TODO: Message field doesn't exist
 
 	// Verify bot is reset
 	timedOutBot, err := env.state.GetBot(context.Background(), bot.ID)
@@ -333,11 +332,14 @@ func TestSystemStateValidation(t *testing.T) {
 
 	// Create inconsistent state
 	// Bot with non-existent job
+	// Set TimeoutAt to future so it's not detected as timed out by resetTimedOutBots()
 	bot1 := &common.Bot{
-		ID:         "inconsistent-bot-1",
-		Status:     common.BotStatusBusy,
-		CurrentJob: func() *string { s := "non-existent-job"; return &s }(),
-		LastSeen:   time.Now(),
+		ID:           "inconsistent-bot-1",
+		Status:       common.BotStatusBusy,
+		CurrentJob:   func() *string { s := "non-existent-job"; return &s }(),
+		LastSeen:     time.Now(),
+		TimeoutAt:    time.Now().Add(1 * time.Hour),
+		RegisteredAt: time.Now(),
 	}
 	err = env.state.SaveBotWithRetry(context.Background(), bot1)
 	require.NoError(t, err)

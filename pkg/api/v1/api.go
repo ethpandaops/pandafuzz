@@ -148,6 +148,8 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 		services.BotRegistry,
 		services.BotRepo,
 		services.JobRepo,
+		services.Bot,
+		services.Job,
 		sseManager,
 		apiLogger,
 	)
@@ -155,6 +157,7 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 	jobAdapter := adapters.NewJobAdapter(
 		services.JobRepo,
 		services.Executor,
+		services.Job,
 		sseManager,
 		apiLogger,
 	)
@@ -194,6 +197,15 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 		apiLogger,
 	)
 
+	// Create system adapter for system management endpoints
+	systemAdapter := adapters.NewSystemAdapter(
+		services.Bot,
+		services.Job,
+		sseManager,
+		nil, // VersionInfo - can be passed if available
+		apiLogger,
+	)
+
 	// Create composite adapter
 	compositeAdapter := adapters.NewCompositeAdapter(
 		botAdapter,
@@ -202,6 +214,7 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 		corpusAdapter,
 		crashAdapter,
 		analyticsAdapter,
+		systemAdapter,
 		sseManager,
 		apiLogger,
 	)

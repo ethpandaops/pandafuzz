@@ -271,3 +271,9 @@ func (h *Handlers) HandleDownloadCoverageReport(w http.ResponseWriter, r *http.R
 	// Delegate to adapter
 	h.adapter.DownloadCoverageReport(w, r, jobId, reportId)
 }
+
+// HandleCancelJob handles POST /api/v1/jobs/{id}/cancel
+func (h *Handlers) HandleCancelJob(w http.ResponseWriter, r *http.Request) {
+	jobId := h.extractJobID(r)
+	h.adapter.CancelJob(w, r, jobId)
+}

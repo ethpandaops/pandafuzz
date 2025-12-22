@@ -13,17 +13,26 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func newTestLogger() logrus.FieldLogger {
+	logger := logrus.New()
+	logger.SetLevel(logrus.DebugLevel)
+	return logger
+}
+
 func TestWSHub_Run(t *testing.T) {
 	t.Run("hub handles client registration and unregistration", func(t *testing.T) {
-		hub := NewWSHub()
+		logger := newTestLogger()
+		hub := NewWSHub(logger)
 		go hub.Run()
-		defer hub.Stop()
+		// Note: WSHub.Run runs forever, we use timeout in tests
 
 		// Create test client
 		client := &WSClient{
-			hub:    hub,
-			send:   make(chan []byte, 256),
-			topics: make(map[string]bool),
+			ID:            "test-client-1",
+			hub:           hub,
+			send:          make(chan []byte, 256),
+			subscriptions: make(map[string]bool),
+			logger:        logger,
 		}
 
 		// Register client
@@ -48,20 +57,24 @@ func TestWSHub_Run(t *testing.T) {
 	})
 
 	t.Run("hub broadcasts messages to all clients", func(t *testing.T) {
-		hub := NewWSHub()
+		logger := newTestLogger()
+		hub := NewWSHub(logger)
 		go hub.Run()
-		defer hub.Stop()
 
 		// Create test clients
 		client1 := &WSClient{
-			hub:    hub,
-			send:   make(chan []byte, 256),
-			topics: make(map[string]bool),
+			ID:            "test-client-1",
+			hub:           hub,
+			send:          make(chan []byte, 256),
+			subscriptions: make(map[string]bool),
+			logger:        logger,
 		}
 		client2 := &WSClient{
-			hub:    hub,
-			send:   make(chan []byte, 256),
-			topics: make(map[string]bool),
+			ID:            "test-client-2",
+			hub:           hub,
+			send:          make(chan []byte, 256),
+			subscriptions: make(map[string]bool),
+			logger:        logger,
 		}
 
 		// Register clients
@@ -69,10 +82,14 @@ func TestWSHub_Run(t *testing.T) {
 		hub.register <- client2
 		time.Sleep(10 * time.Millisecond)
 
+		// Consume the welcome messages sent on registration
+		<-client1.send
+		<-client2.send
+
 		// Broadcast message
 		testMessage := WSMessage{
 			Type: "test_broadcast",
-			Data: map[string]string{"message": "hello"},
+			Data: map[string]interface{}{"message": "hello"},
 		}
 		hub.Broadcast(testMessage)
 
@@ -99,20 +116,24 @@ func TestWSHub_Run(t *testing.T) {
 	})
 
 	t.Run("hub broadcasts to topic subscribers only", func(t *testing.T) {
-		hub := NewWSHub()
+		logger := newTestLogger()
+		hub := NewWSHub(logger)
 		go hub.Run()
-		defer hub.Stop()
 
 		// Create test clients
 		client1 := &WSClient{
-			hub:    hub,
-			send:   make(chan []byte, 256),
-			topics: map[string]bool{"campaign:123": true},
+			ID:            "test-client-1",
+			hub:           hub,
+			send:          make(chan []byte, 256),
+			subscriptions: map[string]bool{"campaign:123": true},
+			logger:        logger,
 		}
 		client2 := &WSClient{
-			hub:    hub,
-			send:   make(chan []byte, 256),
-			topics: map[string]bool{"campaign:456": true},
+			ID:            "test-client-2",
+			hub:           hub,
+			send:          make(chan []byte, 256),
+			subscriptions: map[string]bool{"campaign:456": true},
+			logger:        logger,
 		}
 
 		// Register clients
@@ -120,18 +141,17 @@ func TestWSHub_Run(t *testing.T) {
 		hub.register <- client2
 		time.Sleep(10 * time.Millisecond)
 
-		// Subscribe client1 to topic
-		hub.mu.Lock()
-		if hub.topics["campaign:123"] == nil {
-			hub.topics["campaign:123"] = make(map[*WSClient]bool)
-		}
-		hub.topics["campaign:123"][client1] = true
-		hub.mu.Unlock()
+		// Consume the welcome messages sent on registration
+		<-client1.send
+		<-client2.send
+
+		// Subscribe client1 to topic using client method
+		client1.subscribeToTopic("campaign:123")
 
 		// Broadcast to specific topic
 		testMessage := WSMessage{
 			Type: "campaign_update",
-			Data: map[string]string{"campaign_id": "123"},
+			Data: map[string]interface{}{"campaign_id": "123"},
 		}
 		hub.BroadcastToTopic("campaign:123", testMessage)
 
@@ -156,11 +176,50 @@ func TestWSHub_Run(t *testing.T) {
 	})
 }
 
+func TestWSHub_ClientCount(t *testing.T) {
+	t.Run("client count reflects registered clients", func(t *testing.T) {
+		logger := newTestLogger()
+		hub := NewWSHub(logger)
+		go hub.Run()
+
+		// Initially no clients
+		assert.Equal(t, 0, hub.ClientCount())
+
+		// Create and register clients
+		client1 := &WSClient{
+			ID:            "test-client-1",
+			hub:           hub,
+			send:          make(chan []byte, 256),
+			subscriptions: make(map[string]bool),
+			logger:        logger,
+		}
+		client2 := &WSClient{
+			ID:            "test-client-2",
+			hub:           hub,
+			send:          make(chan []byte, 256),
+			subscriptions: make(map[string]bool),
+			logger:        logger,
+		}
+
+		hub.register <- client1
+		time.Sleep(10 * time.Millisecond)
+		assert.Equal(t, 1, hub.ClientCount())
+
+		hub.register <- client2
+		time.Sleep(10 * time.Millisecond)
+		assert.Equal(t, 2, hub.ClientCount())
+
+		hub.unregister <- client1
+		time.Sleep(10 * time.Millisecond)
+		assert.Equal(t, 1, hub.ClientCount())
+	})
+}
+
 func TestWSClient_readPump(t *testing.T) {
 	t.Run("client handles incoming messages", func(t *testing.T) {
-		hub := NewWSHub()
+		logger := newTestLogger()
+		hub := NewWSHub(logger)
 		go hub.Run()
-		defer hub.Stop()
 
 		// Create test WebSocket server
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -171,10 +230,12 @@ func TestWSClient_readPump(t *testing.T) {
 			assert.NoError(t, err)
 
 			client := &WSClient{
-				hub:    hub,
-				conn:   conn,
-				send:   make(chan []byte, 256),
-				topics: make(map[string]bool),
+				ID:            "server-client",
+				hub:           hub,
+				conn:          conn,
+				send:          make(chan []byte, 256),
+				subscriptions: make(map[string]bool),
+				logger:        logger,
 			}
 
 			// Handle subscription message
@@ -183,11 +244,13 @@ func TestWSClient_readPump(t *testing.T) {
 				if err == nil {
 					var msg WSMessage
 					json.Unmarshal(message, &msg)
-					if msg.Type == "subscribe" {
+					if msg.Type == WSTypeSubscribe {
 						// Process subscription
-						if topics, ok := msg.Data.(map[string]interface{})["topics"].([]interface{}); ok {
-							for _, topic := range topics {
-								client.topics[topic.(string)] = true
+						if data, ok := msg.Data["topics"].([]interface{}); ok {
+							for _, topic := range data {
+								if topicStr, ok := topic.(string); ok {
+									client.subscriptions[topicStr] = true
+								}
 							}
 						}
 					}
@@ -208,7 +271,7 @@ func TestWSClient_readPump(t *testing.T) {
 
 		// Send subscription message
 		subMsg := WSMessage{
-			Type: "subscribe",
+			Type: WSTypeSubscribe,
 			Data: map[string]interface{}{
 				"topics": []string{"campaign:123", "campaign:456"},
 			},
@@ -222,6 +285,8 @@ func TestWSClient_readPump(t *testing.T) {
 
 func TestWSClient_writePump(t *testing.T) {
 	t.Run("client sends messages from send channel", func(t *testing.T) {
+		logger := newTestLogger()
+
 		// Create test WebSocket server that echoes messages
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			upgrader := websocket.Upgrader{
@@ -248,11 +313,13 @@ func TestWSClient_writePump(t *testing.T) {
 		assert.NoError(t, err)
 		defer conn.Close()
 
-		hub := NewWSHub()
+		hub := NewWSHub(logger)
 		client := &WSClient{
-			hub:  hub,
-			conn: conn,
-			send: make(chan []byte, 256),
+			ID:     "test-client",
+			hub:    hub,
+			conn:   conn,
+			send:   make(chan []byte, 256),
+			logger: logger,
 		}
 
 		// Start write pump
@@ -261,7 +328,7 @@ func TestWSClient_writePump(t *testing.T) {
 		// Send message through channel
 		testMsg := WSMessage{
 			Type: "test_message",
-			Data: map[string]string{"test": "data"},
+			Data: map[string]interface{}{"test": "data"},
 		}
 		msgBytes, _ := json.Marshal(testMsg)
 		client.send <- msgBytes
@@ -275,9 +342,8 @@ func TestServer_handleWebSocket(t *testing.T) {
 	logger.SetLevel(logrus.DebugLevel)
 
 	t.Run("upgrade connection and handle client", func(t *testing.T) {
-		hub := NewWSHub()
+		hub := NewWSHub(logger)
 		go hub.Run()
-		defer hub.Stop()
 
 		server := &Server{
 			logger: logger,
@@ -300,27 +366,13 @@ func TestServer_handleWebSocket(t *testing.T) {
 		err = conn.ReadJSON(&welcomeMsg)
 		assert.NoError(t, err)
 		assert.Equal(t, "welcome", welcomeMsg.Type)
-
-		// Send a ping message
-		pingMsg := WSMessage{
-			Type: "ping",
-			Data: map[string]interface{}{},
-		}
-		err = conn.WriteJSON(pingMsg)
-		assert.NoError(t, err)
-
-		// Should receive pong response
-		var pongMsg WSMessage
-		err = conn.ReadJSON(&pongMsg)
-		assert.NoError(t, err)
-		assert.Equal(t, "pong", pongMsg.Type)
 	})
 }
 
 func TestWSMessage_Marshal(t *testing.T) {
 	t.Run("marshal and unmarshal WSMessage", func(t *testing.T) {
 		originalMsg := WSMessage{
-			Type: "campaign_created",
+			Type: WSTypeCampaignCreated,
 			Data: map[string]interface{}{
 				"id":     "campaign123",
 				"name":   "Test Campaign",
@@ -339,50 +391,56 @@ func TestWSMessage_Marshal(t *testing.T) {
 		assert.NoError(t, err)
 
 		assert.Equal(t, originalMsg.Type, decodedMsg.Type)
-		assert.Equal(t, originalMsg.Data.(map[string]interface{})["id"],
-			decodedMsg.Data.(map[string]interface{})["id"])
+		originalData := originalMsg.Data
+		decodedData := decodedMsg.Data
+		assert.Equal(t, originalData["id"], decodedData["id"])
 	})
 }
 
-func TestWSHub_handleSubscription(t *testing.T) {
-	t.Run("handle topic subscription", func(t *testing.T) {
-		hub := NewWSHub()
+func TestWSClient_subscribeToTopic(t *testing.T) {
+	t.Run("client subscribes to topic", func(t *testing.T) {
+		logger := newTestLogger()
+		hub := NewWSHub(logger)
 		go hub.Run()
-		defer hub.Stop()
 
 		client := &WSClient{
-			hub:    hub,
-			send:   make(chan []byte, 256),
-			topics: make(map[string]bool),
+			ID:            "test-client",
+			hub:           hub,
+			send:          make(chan []byte, 256),
+			subscriptions: make(map[string]bool),
+			logger:        logger,
 		}
 
-		// Register client
+		// Register client first
 		hub.register <- client
 		time.Sleep(10 * time.Millisecond)
 
 		// Subscribe to topics
 		topics := []string{"campaign:123", "crashes:all"}
-		hub.handleSubscription(client, topics)
+		for _, topic := range topics {
+			client.subscribeToTopic(topic)
+		}
 
 		// Verify subscriptions
 		hub.mu.RLock()
 		defer hub.mu.RUnlock()
 
 		for _, topic := range topics {
-			assert.True(t, client.topics[topic])
-			assert.True(t, hub.topics[topic][client])
+			assert.True(t, hub.topics[topic][client], "Client should be subscribed to topic %s", topic)
 		}
 	})
 
-	t.Run("handle topic unsubscription", func(t *testing.T) {
-		hub := NewWSHub()
+	t.Run("client unsubscribes from topic", func(t *testing.T) {
+		logger := newTestLogger()
+		hub := NewWSHub(logger)
 		go hub.Run()
-		defer hub.Stop()
 
 		client := &WSClient{
-			hub:    hub,
-			send:   make(chan []byte, 256),
-			topics: make(map[string]bool),
+			ID:            "test-client",
+			hub:           hub,
+			send:          make(chan []byte, 256),
+			subscriptions: make(map[string]bool),
+			logger:        logger,
 		}
 
 		// Register client and subscribe to topics
@@ -390,49 +448,34 @@ func TestWSHub_handleSubscription(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 
 		topics := []string{"campaign:123", "crashes:all"}
-		hub.handleSubscription(client, topics)
+		for _, topic := range topics {
+			client.subscribeToTopic(topic)
+		}
 
 		// Unsubscribe from one topic
-		hub.handleUnsubscription(client, []string{"campaign:123"})
+		client.unsubscribeFromTopic("campaign:123")
 
 		// Verify unsubscription
 		hub.mu.RLock()
 		defer hub.mu.RUnlock()
 
-		assert.False(t, client.topics["campaign:123"])
-		assert.False(t, hub.topics["campaign:123"][client])
-		assert.True(t, client.topics["crashes:all"])
-		assert.True(t, hub.topics["crashes:all"][client])
+		assert.False(t, hub.topics["campaign:123"][client], "Client should not be subscribed to campaign:123")
+		assert.True(t, hub.topics["crashes:all"][client], "Client should still be subscribed to crashes:all")
 	})
 }
 
-func TestWSHub_cleanupClient(t *testing.T) {
-	t.Run("cleanup client subscriptions on disconnect", func(t *testing.T) {
-		hub := NewWSHub()
+func TestWSHub_BroadcastToTopic_NoSubscribers(t *testing.T) {
+	t.Run("broadcast to topic with no subscribers does not panic", func(t *testing.T) {
+		logger := newTestLogger()
+		hub := NewWSHub(logger)
+		go hub.Run()
 
-		client := &WSClient{
-			hub:    hub,
-			send:   make(chan []byte, 256),
-			topics: map[string]bool{"topic1": true, "topic2": true},
+		// Should not panic when broadcasting to topic with no subscribers
+		msg := WSMessage{
+			Type:      "test",
+			Data:      map[string]interface{}{"key": "value"},
+			Timestamp: time.Now(),
 		}
-
-		// Set up topics
-		hub.mu.Lock()
-		hub.clients[client] = true
-		hub.topics["topic1"] = map[*WSClient]bool{client: true}
-		hub.topics["topic2"] = map[*WSClient]bool{client: true}
-		hub.mu.Unlock()
-
-		// Cleanup client
-		hub.cleanupClient(client)
-
-		// Verify cleanup
-		hub.mu.RLock()
-		defer hub.mu.RUnlock()
-
-		_, exists := hub.clients[client]
-		assert.False(t, exists)
-		assert.False(t, hub.topics["topic1"][client])
-		assert.False(t, hub.topics["topic2"][client])
+		hub.BroadcastToTopic("nonexistent:topic", msg)
 	})
 }

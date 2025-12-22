@@ -14,6 +14,7 @@ import (
 	"github.com/ethpandaops/pandafuzz/pkg/config"
 	"github.com/ethpandaops/pandafuzz/pkg/master"
 	"github.com/ethpandaops/pandafuzz/pkg/storage"
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
@@ -58,7 +59,8 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 			Path: filepath.Join(tempDir, "test.db"),
 		},
 		Storage: config.StorageConfig{
-			Type: "filesystem",
+			Type:        "filesystem",
+			MaxFileSize: 100 * 1024 * 1024, // 100MB
 			Filesystem: config.FilesystemConfig{
 				BasePath: tempDir,
 			},
@@ -172,6 +174,12 @@ func (env *TestEnvironment) StartMaster() error {
 		return fmt.Errorf("failed to start timeout manager: %w", err)
 	}
 
+	// Initialize storage which creates service manager and enables API v1
+	err = env.server.InitializeStorage()
+	if err != nil {
+		return fmt.Errorf("failed to initialize storage: %w", err)
+	}
+
 	// Start server in background
 	errChan := make(chan error, 1)
 	go func() {
@@ -243,20 +251,16 @@ func (env *TestEnvironment) Cleanup() {
 	}
 }
 
-// CreateTestJob creates a test job
+// CreateTestJob creates a test job with a valid UUID
 func (env *TestEnvironment) CreateTestJob(name string) (*common.Job, error) {
+	// Generate a proper UUID for API compatibility
+	jobID := uuid.New().String()
 	job := &common.Job{
-		ID:     fmt.Sprintf("job-%s-%d", name, time.Now().UnixNano()),
-		Name:   name,
-		Status: common.JobStatusPending,
-		// Priority:    common.JobPriorityNormal, // TODO: Find correct priority constant
-		Fuzzer: "afl++",
-		Target: "/bin/test",
-		// TargetArgs:  []string{"@@"}, // TODO: Check if this field exists
-		// Corpus:      []string{"/corpus"}, // TODO: Check if this field exists
-		// Dictionary:  "/dict.txt", // TODO: Check if this field exists
-		// TimeoutSec:  300, // TODO: Check if this field exists
-		// MemoryLimit: 1024, // TODO: Check if this field exists
+		ID:        jobID,
+		Name:      name,
+		Status:    common.JobStatusPending,
+		Fuzzer:    "afl++",
+		Target:    "/bin/test",
 		CreatedAt: time.Now(),
 		TimeoutAt: time.Now().Add(5 * time.Minute),
 		Config: common.JobConfig{
@@ -269,16 +273,18 @@ func (env *TestEnvironment) CreateTestJob(name string) (*common.Job, error) {
 	return job, env.state.SaveJobWithRetry(context.Background(), job)
 }
 
-// CreateTestBot creates a test bot
+// CreateTestBot creates a test bot with a valid UUID
 func (env *TestEnvironment) CreateTestBot(id string) (*common.Bot, error) {
+	// Generate a proper UUID for API compatibility, using the id as the name
+	botID := uuid.New().String()
 	bot := &common.Bot{
-		ID:           id,
+		ID:           botID,
+		Name:         id, // Use the parameter as name for easy identification
 		Status:       common.BotStatusIdle,
 		Hostname:     "test-host",
 		Capabilities: []string{"afl++", "libfuzzer"},
 		LastSeen:     time.Now(),
 		RegisteredAt: time.Now(),
-		// IP:           "127.0.0.1", // TODO: Check if this field exists
 	}
 
 	return bot, env.state.SaveBotWithRetry(context.Background(), bot)
@@ -308,9 +314,7 @@ func (env *TestEnvironment) CreateTestCoverage(jobID string) *common.CoverageRes
 		BotID:     env.botConfig.ID,
 		Timestamp: time.Now(),
 		Edges:     1000,
-		// CoveredEdges:    500, // TODO: Check if this field exists
-		NewEdges: 10,
-		// CoveragePercent: 50.0, // TODO: Check if this field exists
+		NewEdges:  10,
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	// "github.com/go-chi/chi/v5/middleware" // Temporarily disabled for build
 	"github.com/sirupsen/logrus"
 
 	apiv1 "github.com/ethpandaops/pandafuzz/pkg/api/v1"
@@ -16,7 +15,6 @@ import (
 	"github.com/ethpandaops/pandafuzz/pkg/httputil"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
 	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
-	"github.com/gorilla/mux"
 )
 
 // Server represents the master HTTP server
@@ -28,7 +26,6 @@ type Server struct {
 	botPoller       *BotPoller
 	services        *service.Manager
 	httpServer      *http.Server
-	router          *mux.Router
 	chiRouter       chi.Router
 	apiV1           *apiv1.API
 	logger          *logrus.Logger
@@ -128,17 +125,10 @@ func (s *Server) Start() error {
 		return common.NewSystemError("setup_router", err)
 	}
 
-	// Configure HTTP server - use Chi router if available, otherwise fall back to Gorilla mux
-	var handler http.Handler
-	if s.chiRouter != nil {
-		handler = s.chiRouter
-	} else {
-		handler = s.router
-	}
-
+	// Configure HTTP server with Chi router
 	s.httpServer = &http.Server{
 		Addr:           fmt.Sprintf("%s:%d", s.config.Server.Host, s.config.Server.Port),
-		Handler:        handler,
+		Handler:        s.chiRouter,
 		ReadTimeout:    s.config.Server.ReadTimeout,
 		WriteTimeout:   s.config.Server.WriteTimeout,
 		IdleTimeout:    s.config.Server.IdleTimeout,
@@ -179,6 +169,12 @@ func (s *Server) Start() error {
 		if err := s.botPoller.Start(); err != nil {
 			return common.NewSystemError("start_bot_poller", err)
 		}
+	}
+
+	// Start WebSocket hub
+	if s.wsHub != nil {
+		s.logger.Info("Starting WebSocket hub")
+		go s.wsHub.Run()
 	}
 
 	// Start lease expiry sweep
@@ -297,13 +293,8 @@ func (s *Server) SetServiceManager(sm *service.Manager) {
 	s.services = sm
 }
 
-// GetRouter returns the configured Gorilla mux router (for backwards compatibility)
-func (s *Server) GetRouter() *mux.Router {
-	return s.router
-}
-
-// GetChiRouter returns the configured Chi router
-func (s *Server) GetChiRouter() chi.Router {
+// GetRouter returns the configured Chi router
+func (s *Server) GetRouter() chi.Router {
 	return s.chiRouter
 }
 
@@ -358,14 +349,19 @@ func (s *Server) initializeServices() {
 	stateAdapter := NewStateStoreAdapter(s.state)
 
 	// Create custom service manager initialization to use storage backend
-	s.services = s.createServiceManager(stateAdapter)
+	services, err := s.createServiceManager(stateAdapter)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to create service manager")
+		return
+	}
+	s.services = services
 
 	// Initialize bot poller with 5 second interval for more responsive updates
 	s.botPoller = NewBotPoller(s.state, s.services, s.logger, 5*time.Second)
 }
 
 // createServiceManager creates a service manager with the storage backend
-func (s *Server) createServiceManager(stateAdapter service.StateStore) *service.Manager {
+func (s *Server) createServiceManager(stateAdapter service.StateStore) (*service.Manager, error) {
 	// Create a custom state adapter that provides the storage backend
 	customStateAdapter := &storageBackendAdapter{
 		StateStore:     stateAdapter,

@@ -12,20 +12,24 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/api/v1/generated"
 	"github.com/ethpandaops/pandafuzz/pkg/api/v1/sse"
+	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/domain/bot/registry"
 	botRepo "github.com/ethpandaops/pandafuzz/pkg/domain/bot/repository"
 	botTypes "github.com/ethpandaops/pandafuzz/pkg/domain/bot/types"
 	jobRepo "github.com/ethpandaops/pandafuzz/pkg/domain/job/repository"
 	jobTypes "github.com/ethpandaops/pandafuzz/pkg/domain/job/types"
+	"github.com/ethpandaops/pandafuzz/pkg/service"
 )
 
 // BotAdapter implements the bot-related endpoints of the generated ServerInterface
 type BotAdapter struct {
-	registry *registry.Service
-	botRepo  botRepo.AgentRepository
-	jobRepo  jobRepo.JobRepository
-	sse      *sse.Manager
-	logger   logrus.FieldLogger
+	registry   *registry.Service
+	botRepo    botRepo.AgentRepository
+	jobRepo    jobRepo.JobRepository
+	botService service.BotService
+	jobService service.JobService
+	sse        *sse.Manager
+	logger     logrus.FieldLogger
 }
 
 // Compile-time check to ensure BotAdapter implements part of ServerInterface
@@ -36,21 +40,31 @@ func NewBotAdapter(
 	registry *registry.Service,
 	botRepo botRepo.AgentRepository,
 	jobRepo jobRepo.JobRepository,
+	botService service.BotService,
+	jobService service.JobService,
 	sse *sse.Manager,
 	logger logrus.FieldLogger,
 ) *BotAdapter {
 	return &BotAdapter{
-		registry: registry,
-		botRepo:  botRepo,
-		jobRepo:  jobRepo,
-		sse:      sse,
-		logger:   logger.WithField("component", "bot_adapter"),
+		registry:   registry,
+		botRepo:    botRepo,
+		jobRepo:    jobRepo,
+		botService: botService,
+		jobService: jobService,
+		sse:        sse,
+		logger:     logger.WithField("component", "bot_adapter"),
 	}
 }
 
 // ListBots retrieves all registered bots with filtering and pagination
 func (a *BotAdapter) ListBots(w http.ResponseWriter, r *http.Request, params generated.ListBotsParams) {
 	ctx := r.Context()
+
+	// Check if botService is available (preferred) or botRepo as fallback
+	if a.botService == nil && a.botRepo == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Bot service not configured", nil)
+		return
+	}
 
 	// Set defaults for pagination
 	limit := 50
@@ -67,7 +81,71 @@ func (a *BotAdapter) ListBots(w http.ResponseWriter, r *http.Request, params gen
 		offset = *params.Offset
 	}
 
-	// Get bots from repository with pagination
+	// Use botService if available
+	if a.botService != nil {
+		// Convert status filter if provided
+		var statusFilter *common.BotStatus
+		if params.Status != nil {
+			status := generatedToBotStatus(*params.Status)
+			statusFilter = &status
+		}
+
+		// Get bots from service
+		commonBots, err := a.botService.ListBots(ctx, statusFilter)
+		if err != nil {
+			a.logger.WithError(err).Error("failed to list bots")
+			a.writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve bots", err)
+			return
+		}
+
+		// Filter by online status if specified
+		if params.OnlineOnly != nil && *params.OnlineOnly {
+			filtered := make([]*common.Bot, 0)
+			for _, bot := range commonBots {
+				if bot.IsOnline {
+					filtered = append(filtered, bot)
+				}
+			}
+			commonBots = filtered
+		}
+
+		// Apply pagination
+		total := len(commonBots)
+		if offset >= len(commonBots) {
+			commonBots = []*common.Bot{}
+		} else {
+			end := offset + limit
+			if end > len(commonBots) {
+				end = len(commonBots)
+			}
+			commonBots = commonBots[offset:end]
+		}
+
+		// Convert to API types
+		bots := make([]generated.Bot, len(commonBots))
+		for i, bot := range commonBots {
+			bots[i] = a.convertCommonBotToAPIBot(bot)
+		}
+
+		// Create pagination info
+		hasMore := offset+len(bots) < total
+		pagination := generated.Pagination{
+			Limit:   limit,
+			Offset:  offset,
+			Total:   total,
+			HasMore: hasMore,
+		}
+
+		response := generated.BotListResponse{
+			Data:       bots,
+			Pagination: pagination,
+		}
+
+		a.writeJSONResponse(w, http.StatusOK, response)
+		return
+	}
+
+	// Fallback to repository if service is not available
 	agents, total, err := a.botRepo.List(ctx, offset, limit)
 	if err != nil {
 		a.logger.WithError(err).Error("failed to list bots")
@@ -124,23 +202,78 @@ func (a *BotAdapter) ListBots(w http.ResponseWriter, r *http.Request, params gen
 func (a *BotAdapter) CreateBot(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	// Check dependencies - prefer botService over registry
+	if a.botService == nil && a.registry == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Bot service not configured", nil)
+		return
+	}
+
 	var req generated.BotCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
 		return
 	}
 
-	// Generate a unique ID for the bot
-	botID := uuid.New().String()
-
-	// Convert capabilities
-	capabilities := make([]botTypes.Capability, len(req.Capabilities))
-	for i, cap := range req.Capabilities {
-		capabilities[i] = generatedToCapability(cap)
+	// Validate required fields
+	if req.Hostname == "" {
+		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Hostname is required", nil)
+		return
+	}
+	if len(req.Capabilities) == 0 {
+		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "At least one capability is required", nil)
+		return
 	}
 
-	// Register the bot
-	agent, err := a.registry.RegisterBot(ctx, botID, req.Name, capabilities)
+	// Convert capabilities to strings
+	capabilities := make([]string, len(req.Capabilities))
+	for i, cap := range req.Capabilities {
+		capabilities[i] = capabilityToString(cap)
+	}
+
+	// Use botService if available
+	if a.botService != nil {
+		// Get API endpoint from request - use direct field first, then check metadata
+		apiEndpoint := req.ApiEndpoint
+		if apiEndpoint == "" && req.Metadata != nil {
+			if ep, ok := (*req.Metadata)["api_endpoint"]; ok {
+				if epStr, ok := ep.(string); ok {
+					apiEndpoint = epStr
+				}
+			}
+		}
+
+		commonBot, err := a.botService.RegisterBot(ctx, req.Hostname, req.Name, capabilities, apiEndpoint)
+		if err != nil {
+			a.logger.WithError(err).Error("failed to register bot")
+			a.writeError(w, http.StatusInternalServerError, "REGISTRATION_FAILED", "Failed to register bot", err)
+			return
+		}
+
+		bot := a.convertCommonBotToAPIBot(commonBot)
+
+		// Publish SSE event
+		if a.sse != nil {
+			event := sse.NewBotEvent("bot.created", bot.Id, map[string]any{
+				"bot":       bot,
+				"timestamp": time.Now(),
+			})
+			if err := a.sse.Broadcast(event); err != nil {
+				a.logger.WithError(err).Warn("failed to broadcast bot created event")
+			}
+		}
+
+		a.writeJSONResponse(w, http.StatusCreated, bot)
+		return
+	}
+
+	// Fallback to registry
+	botID := uuid.New().String()
+	domainCapabilities := make([]botTypes.Capability, len(req.Capabilities))
+	for i, cap := range req.Capabilities {
+		domainCapabilities[i] = generatedToCapability(cap)
+	}
+
+	agent, err := a.registry.RegisterBot(ctx, botID, req.Name, domainCapabilities)
 	if err != nil {
 		a.logger.WithError(err).Error("failed to register bot")
 		a.writeError(w, http.StatusInternalServerError, "REGISTRATION_FAILED", "Failed to register bot", err)
@@ -152,23 +285,25 @@ func (a *BotAdapter) CreateBot(w http.ResponseWriter, r *http.Request) {
 		for key, value := range *req.Metadata {
 			agent.SetMetadata(key, value)
 		}
-		// Save metadata updates
-		if err := a.botRepo.Update(ctx, agent); err != nil {
-			a.logger.WithError(err).Warn("failed to update bot metadata")
+		if a.botRepo != nil {
+			if err := a.botRepo.Update(ctx, agent); err != nil {
+				a.logger.WithError(err).Warn("failed to update bot metadata")
+			}
 		}
 	}
 
-	// Convert to API response
 	bot := a.convertAgentToBot(agent)
 
 	// Publish SSE event
 	botUUID := uuid.MustParse(botID)
-	event := sse.NewBotEvent("bot.created", botUUID, map[string]any{
-		"bot":       bot,
-		"timestamp": time.Now(),
-	})
-	if err := a.sse.Broadcast(event); err != nil {
-		a.logger.WithError(err).Warn("failed to broadcast bot created event")
+	if a.sse != nil {
+		event := sse.NewBotEvent("bot.created", botUUID, map[string]any{
+			"bot":       bot,
+			"timestamp": time.Now(),
+		})
+		if err := a.sse.Broadcast(event); err != nil {
+			a.logger.WithError(err).Warn("failed to broadcast bot created event")
+		}
 	}
 
 	a.writeJSONResponse(w, http.StatusCreated, bot)
@@ -178,6 +313,27 @@ func (a *BotAdapter) CreateBot(w http.ResponseWriter, r *http.Request) {
 func (a *BotAdapter) GetBot(w http.ResponseWriter, r *http.Request, botId generated.BotIdParam, params generated.GetBotParams) {
 	ctx := r.Context()
 
+	// Check dependencies
+	if a.botService == nil && a.botRepo == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Bot service not configured", nil)
+		return
+	}
+
+	// Use botService if available
+	if a.botService != nil {
+		commonBot, err := a.botService.GetBot(ctx, botId.String())
+		if err != nil {
+			a.logger.WithError(err).WithField("bot_id", botId).Error("failed to get bot")
+			a.writeError(w, http.StatusNotFound, "BOT_NOT_FOUND", "Bot not found", err)
+			return
+		}
+
+		bot := a.convertCommonBotToAPIBot(commonBot)
+		a.writeJSONResponse(w, http.StatusOK, bot)
+		return
+	}
+
+	// Fallback to repository
 	agent, err := a.botRepo.FindByID(ctx, botId.String())
 	if err != nil {
 		a.logger.WithError(err).WithField("bot_id", botId).Error("failed to get bot")
@@ -192,6 +348,11 @@ func (a *BotAdapter) GetBot(w http.ResponseWriter, r *http.Request, botId genera
 // UpdateBot updates an existing bot
 func (a *BotAdapter) UpdateBot(w http.ResponseWriter, r *http.Request, botId generated.BotIdParam) {
 	ctx := r.Context()
+
+	if a.botService == nil && a.botRepo == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Bot service not configured", nil)
+		return
+	}
 
 	var req generated.BotUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -254,6 +415,34 @@ func (a *BotAdapter) UpdateBot(w http.ResponseWriter, r *http.Request, botId gen
 func (a *BotAdapter) DeleteBot(w http.ResponseWriter, r *http.Request, botId generated.BotIdParam) {
 	ctx := r.Context()
 
+	if a.botService == nil && (a.botRepo == nil || a.registry == nil) {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Bot services not configured", nil)
+		return
+	}
+
+	// Use botService if available
+	if a.botService != nil {
+		if err := a.botService.DeregisterBot(ctx, botId.String()); err != nil {
+			a.logger.WithError(err).Error("failed to deregister bot")
+			a.writeError(w, http.StatusInternalServerError, "DEREGISTRATION_FAILED", "Failed to deregister bot", err)
+			return
+		}
+
+		// Publish SSE event
+		if a.sse != nil {
+			event := sse.NewBotEvent("bot.deleted", botId, map[string]any{
+				"bot_id":    botId.String(),
+				"timestamp": time.Now(),
+			})
+			if err := a.sse.Broadcast(event); err != nil {
+				a.logger.WithError(err).Warn("failed to broadcast bot deleted event")
+			}
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	// Check if bot exists first
 	_, err := a.botRepo.FindByID(ctx, botId.String())
 	if err != nil {
@@ -284,13 +473,70 @@ func (a *BotAdapter) DeleteBot(w http.ResponseWriter, r *http.Request, botId gen
 func (a *BotAdapter) SendBotHeartbeat(w http.ResponseWriter, r *http.Request, botId generated.BotIdParam) {
 	ctx := r.Context()
 
+	if a.botService == nil && (a.registry == nil || a.botRepo == nil) {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Bot services not configured", nil)
+		return
+	}
+
 	var req generated.BotHeartbeatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
 		return
 	}
 
-	// Record heartbeat
+	// Use botService if available
+	if a.botService != nil {
+		// Update heartbeat through service
+		status := generatedToBotStatus(req.Status)
+		// Pass current job ID from request if provided
+		var currentJobID *string
+		if req.CurrentJobId != nil {
+			jobIDStr := req.CurrentJobId.String()
+			currentJobID = &jobIDStr
+		}
+		if err := a.botService.UpdateHeartbeat(ctx, botId.String(), status, currentJobID); err != nil {
+			a.logger.WithError(err).Error("failed to record heartbeat")
+			// Check if bot not found error
+			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "not_found") {
+				a.writeError(w, http.StatusNotFound, "BOT_NOT_FOUND", "Bot not found", err)
+				return
+			}
+			a.writeError(w, http.StatusInternalServerError, "HEARTBEAT_FAILED", "Failed to record heartbeat", err)
+			return
+		}
+
+		// Get current job if any
+		var assignedJobId *uuid.UUID
+		currentJob, err := a.botService.GetCurrentJob(ctx, botId.String())
+		if err == nil && currentJob != nil {
+			if id, err := uuid.Parse(currentJob.ID); err == nil {
+				assignedJobId = &id
+			}
+		}
+
+		response := generated.BotHeartbeatResponse{
+			Acknowledged:                 true,
+			AssignedJobId:                assignedJobId,
+			NextHeartbeatIntervalSeconds: 30,
+		}
+
+		// Publish SSE heartbeat event
+		if a.sse != nil {
+			event := sse.NewBotEvent("bot.heartbeat", botId, map[string]any{
+				"bot_id":    botId.String(),
+				"status":    req.Status,
+				"timestamp": time.Now(),
+			})
+			if err := a.sse.BroadcastToTopic("bot."+botId.String(), event); err != nil {
+				a.logger.WithError(err).Warn("failed to broadcast heartbeat event")
+			}
+		}
+
+		a.writeJSONResponse(w, http.StatusOK, response)
+		return
+	}
+
+	// Fallback: Record heartbeat using registry
 	if err := a.registry.RecordHeartbeat(ctx, botId.String()); err != nil {
 		a.logger.WithError(err).Error("failed to record heartbeat")
 		a.writeError(w, http.StatusInternalServerError, "HEARTBEAT_FAILED", "Failed to record heartbeat", err)
@@ -344,11 +590,24 @@ func (a *BotAdapter) SendBotHeartbeat(w http.ResponseWriter, r *http.Request, bo
 func (a *BotAdapter) GetBotJobs(w http.ResponseWriter, r *http.Request, botId generated.BotIdParam, params generated.GetBotJobsParams) {
 	ctx := r.Context()
 
-	// Verify bot exists
-	_, err := a.botRepo.FindByID(ctx, botId.String())
-	if err != nil {
-		a.writeError(w, http.StatusNotFound, "BOT_NOT_FOUND", "Bot not found", err)
+	if (a.botService == nil && a.jobService == nil) && (a.botRepo == nil || a.jobRepo == nil) {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Bot or job service not configured", nil)
 		return
+	}
+
+	// Verify bot exists - use service if available
+	if a.botService != nil {
+		_, err := a.botService.GetBot(ctx, botId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "BOT_NOT_FOUND", "Bot not found", err)
+			return
+		}
+	} else if a.botRepo != nil {
+		_, err := a.botRepo.FindByID(ctx, botId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "BOT_NOT_FOUND", "Bot not found", err)
+			return
+		}
 	}
 
 	// Build filter for jobs assigned to this bot
@@ -499,6 +758,84 @@ func (a *BotAdapter) convertJobToAPI(job *jobTypes.Job) generated.Job {
 	return apiJob
 }
 
+// convertCommonJobToAPI converts a common.Job to a generated.Job
+func (a *BotAdapter) convertCommonJobToAPI(job *common.Job) generated.Job {
+	// Try to parse ID as UUID, if it fails generate a deterministic UUID from the ID
+	jobID, err := uuid.Parse(job.ID)
+	if err != nil {
+		// Generate a deterministic UUID from the job ID using UUID v5 with DNS namespace
+		jobID = uuid.NewSHA1(uuid.NameSpaceDNS, []byte(job.ID))
+	}
+
+	apiJob := generated.Job{
+		Id:           jobID,
+		Name:         job.Name,
+		Status:       commonJobStatusToGenerated(job.Status),
+		CreatedAt:    job.CreatedAt,
+		TargetBinary: job.Target,
+		TimeoutAt:    job.TimeoutAt,
+		Fuzzer:       generated.FuzzerType(job.Fuzzer),
+	}
+
+	// Set campaign ID if exists
+	if job.CampaignID != nil {
+		if id, err := uuid.Parse(*job.CampaignID); err == nil {
+			apiJob.CampaignId = &id
+		}
+	}
+
+	// Set assigned bot ID
+	if job.AssignedBot != nil {
+		botID, err := uuid.Parse(*job.AssignedBot)
+		if err != nil {
+			botID = uuid.NewSHA1(uuid.NameSpaceDNS, []byte(*job.AssignedBot))
+		}
+		apiJob.AssignedBotId = &botID
+	}
+
+	if job.StartedAt != nil {
+		apiJob.StartedAt = job.StartedAt
+	}
+
+	if job.CompletedAt != nil {
+		apiJob.CompletedAt = job.CompletedAt
+	}
+
+	// Set priority
+	priority := job.Priority
+	apiJob.Priority = &priority
+
+	// Set coverage
+	enableCoverage := job.EnableCoverage
+	apiJob.EnableCoverage = &enableCoverage
+
+	return apiJob
+}
+
+// commonJobStatusToGenerated converts common.JobStatus to generated.JobStatus
+func commonJobStatusToGenerated(status common.JobStatus) generated.JobStatus {
+	switch status {
+	case common.JobStatusPending:
+		return generated.JobStatusPending
+	case common.JobStatusAssigned:
+		return generated.JobStatusAssigned
+	case common.JobStatusStarting:
+		return generated.JobStatusRunning
+	case common.JobStatusRunning:
+		return generated.JobStatusRunning
+	case common.JobStatusCompleted:
+		return generated.JobStatusCompleted
+	case common.JobStatusFailed:
+		return generated.JobStatusFailed
+	case common.JobStatusTimedOut:
+		return generated.JobStatusTimeout
+	case common.JobStatusCancelled:
+		return generated.JobStatusCancelled
+	default:
+		return generated.JobStatusPending
+	}
+}
+
 // Conversion helpers
 func botStatusToGenerated(status botTypes.Status) generated.BotStatus {
 	switch status {
@@ -577,6 +914,121 @@ func generatedUpdateToCapability(cap generated.BotUpdateRequestCapabilities) bot
 		return botTypes.CapabilityCoordination
 	default:
 		return botTypes.CapabilityFuzzing
+	}
+}
+
+// generatedToBotStatus converts generated.BotStatus to common.BotStatus
+func generatedToBotStatus(status generated.BotStatus) common.BotStatus {
+	switch status {
+	case generated.BotStatusIdle:
+		return common.BotStatusIdle
+	case generated.BotStatusBusy:
+		return common.BotStatusBusy
+	case generated.BotStatusError:
+		return common.BotStatusFailed
+	case generated.BotStatusMaintenance:
+		return common.BotStatusIdle // No direct mapping
+	case generated.BotStatusOffline:
+		return common.BotStatusTimedOut
+	default:
+		return common.BotStatusIdle
+	}
+}
+
+// commonBotStatusToGenerated converts common.BotStatus to generated.BotStatus
+func commonBotStatusToGenerated(status common.BotStatus) generated.BotStatus {
+	switch status {
+	case common.BotStatusIdle:
+		return generated.BotStatusIdle
+	case common.BotStatusBusy:
+		return generated.BotStatusBusy
+	case common.BotStatusRegistering:
+		return generated.BotStatusIdle
+	case common.BotStatusTimedOut:
+		return generated.BotStatusOffline
+	case common.BotStatusFailed:
+		return generated.BotStatusError
+	default:
+		return generated.BotStatusOffline
+	}
+}
+
+// convertCommonBotToAPIBot converts a common.Bot to a generated.Bot
+func (a *BotAdapter) convertCommonBotToAPIBot(bot *common.Bot) generated.Bot {
+	// Try to parse ID as UUID, if it fails generate a deterministic UUID from the ID
+	botID, err := uuid.Parse(bot.ID)
+	if err != nil {
+		// Generate a deterministic UUID from the bot ID using UUID v5 with DNS namespace
+		botID = uuid.NewSHA1(uuid.NameSpaceDNS, []byte(bot.ID))
+	}
+
+	apiBot := generated.Bot{
+		Id:            botID,
+		Name:          bot.Name,
+		Hostname:      bot.Hostname,
+		Status:        commonBotStatusToGenerated(bot.Status),
+		IsOnline:      bot.IsOnline,
+		RegisteredAt:  bot.RegisteredAt,
+		LastHeartbeat: bot.LastSeen,
+	}
+
+	// Convert capabilities
+	apiBot.Capabilities = make([]generated.BotCapabilities, len(bot.Capabilities))
+	for i, cap := range bot.Capabilities {
+		apiBot.Capabilities[i] = stringToCapability(cap)
+	}
+
+	// Set current job ID if exists
+	if bot.CurrentJob != nil {
+		if id, err := uuid.Parse(*bot.CurrentJob); err == nil {
+			apiBot.CurrentJobId = &id
+		}
+	}
+
+	// Set API endpoint if exists
+	if bot.APIEndpoint != "" {
+		apiBot.ApiEndpoint = &bot.APIEndpoint
+	}
+
+	return apiBot
+}
+
+// stringToCapability converts a string capability to generated.BotCapabilities
+func stringToCapability(cap string) generated.BotCapabilities {
+	switch cap {
+	case "fuzzing":
+		return generated.BotCapabilitiesFuzzing
+	case "analysis":
+		return generated.BotCapabilitiesAnalysis
+	case "reproduction":
+		return generated.BotCapabilitiesReproduction
+	case "coverage":
+		return generated.BotCapabilitiesCoverage
+	default:
+		return generated.BotCapabilitiesFuzzing
+	}
+}
+
+// capabilityToString converts generated.BotCreateRequestCapabilities to string
+func capabilityToString(cap generated.BotCreateRequestCapabilities) string {
+	// Pass through the capability string as-is to support fuzzer-specific capabilities
+	// like "afl++", "libfuzzer", "honggfuzz" etc.
+	capStr := string(cap)
+	if capStr != "" {
+		return capStr
+	}
+	// Only map known capabilities if needed for fallback
+	switch cap {
+	case generated.BotCreateRequestCapabilitiesFuzzing:
+		return "fuzzing"
+	case generated.BotCreateRequestCapabilitiesAnalysis:
+		return "analysis"
+	case generated.BotCreateRequestCapabilitiesReproduction:
+		return "reproduction"
+	case generated.BotCreateRequestCapabilitiesCoverage:
+		return "coverage"
+	default:
+		return "fuzzing"
 	}
 }
 
@@ -805,4 +1257,344 @@ func (a *BotAdapter) GetJobLogs(w http.ResponseWriter, r *http.Request, jobId ge
 
 func (a *BotAdapter) GetReadiness(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetNextJob assigns the next available job to a bot (from v3)
+func (a *BotAdapter) GetNextJob(w http.ResponseWriter, r *http.Request, botId generated.BotIdParam) {
+	ctx := r.Context()
+
+	if (a.botService == nil || a.jobService == nil) && (a.botRepo == nil || a.jobRepo == nil) {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Bot or job service not configured", nil)
+		return
+	}
+
+	// Use services if available
+	if a.botService != nil && a.jobService != nil {
+		// Verify bot exists and is available
+		bot, err := a.botService.GetBot(ctx, botId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "BOT_NOT_FOUND", "Bot not found", err)
+			return
+		}
+
+		if bot.Status != common.BotStatusIdle {
+			a.writeError(w, http.StatusConflict, "BOT_NOT_AVAILABLE", "Bot is not available for new jobs", nil)
+			return
+		}
+
+		// Assign next job through service
+		commonJob, err := a.jobService.AssignNextJob(ctx, botId.String())
+		if err != nil {
+			// No jobs available
+			a.writeJSONResponse(w, http.StatusOK, map[string]interface{}{
+				"job":     nil,
+				"message": "No pending jobs available",
+			})
+			return
+		}
+
+		apiJob := a.convertCommonJobToAPI(commonJob)
+		response := map[string]interface{}{
+			"job":              apiJob,
+			"lease_token":      "", // Service handles lease internally
+			"lease_expires_at": time.Now().Add(60 * time.Second),
+		}
+
+		a.writeJSONResponse(w, http.StatusOK, response)
+		return
+	}
+
+	// Fallback to repository
+	// Verify bot exists and is available
+	agent, err := a.botRepo.FindByID(ctx, botId.String())
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "BOT_NOT_FOUND", "Bot not found", err)
+		return
+	}
+
+	if agent.Status != botTypes.StatusIdle {
+		a.writeError(w, http.StatusConflict, "BOT_NOT_AVAILABLE", "Bot is not available for new jobs", nil)
+		return
+	}
+
+	// Find pending jobs
+	pendingStatus := jobTypes.StatusPending
+	filter := jobRepo.JobFilter{
+		Status: &pendingStatus,
+		Limit:  1,
+	}
+
+	jobs, err := a.jobRepo.List(ctx, filter)
+	if err != nil {
+		a.writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to fetch pending jobs", err)
+		return
+	}
+
+	if len(jobs) == 0 {
+		// No jobs available
+		a.writeJSONResponse(w, http.StatusOK, map[string]interface{}{
+			"job":     nil,
+			"message": "No pending jobs available",
+		})
+		return
+	}
+
+	job := jobs[0]
+
+	// Generate lease token
+	leaseToken := uuid.New().String()
+	leaseExpiresAt := time.Now().Add(60 * time.Second)
+
+	// Assign job to bot
+	job.Status = jobTypes.StatusQueued
+	job.LockedBy = botId.String()
+	job.LeaseToken = &leaseToken
+	job.LeaseExpiresAt = &leaseExpiresAt
+
+	if err := a.jobRepo.Update(ctx, job); err != nil {
+		a.writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "Failed to assign job", err)
+		return
+	}
+
+	// Update bot status
+	agent.Status = botTypes.StatusWorking
+	agent.SetMetadata("current_job_id", job.ID)
+	if err := a.botRepo.Update(ctx, agent); err != nil {
+		a.logger.WithError(err).Warn("failed to update bot status")
+	}
+
+	apiJob := a.convertJobToAPI(job)
+	response := map[string]interface{}{
+		"job":              apiJob,
+		"lease_token":      leaseToken,
+		"lease_expires_at": leaseExpiresAt,
+	}
+
+	a.writeJSONResponse(w, http.StatusOK, response)
+}
+
+// CompleteJob marks a job as completed by a bot (from v3)
+func (a *BotAdapter) CompleteJob(w http.ResponseWriter, r *http.Request, botId generated.BotIdParam) {
+	ctx := r.Context()
+
+	if (a.botService == nil || a.jobService == nil) && (a.botRepo == nil || a.jobRepo == nil) {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Bot or job service not configured", nil)
+		return
+	}
+
+	var req struct {
+		JobID        string `json:"job_id"`
+		LeaseToken   string `json:"lease_token"`
+		Success      bool   `json:"success"`
+		ErrorMessage string `json:"error_message,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
+		return
+	}
+
+	// Use services if available
+	if a.jobService != nil {
+		// Complete the job through the service
+		if err := a.jobService.CompleteJob(ctx, req.JobID, botId.String(), req.Success); err != nil {
+			a.logger.WithError(err).Error("failed to complete job")
+			a.writeError(w, http.StatusInternalServerError, "COMPLETION_FAILED", "Failed to complete job", err)
+			return
+		}
+
+		// Publish SSE event
+		if a.sse != nil {
+			jobUUID, _ := uuid.Parse(req.JobID)
+			if jobUUID == uuid.Nil {
+				jobUUID = uuid.NewSHA1(uuid.NameSpaceDNS, []byte(req.JobID))
+			}
+			campaignUUID := uuid.New()
+			eventType := "job.completed"
+			if !req.Success {
+				eventType = "job.failed"
+			}
+			event := sse.NewJobEvent(eventType, jobUUID, campaignUUID, map[string]any{
+				"job_id":    req.JobID,
+				"bot_id":    botId.String(),
+				"success":   req.Success,
+				"timestamp": time.Now(),
+			})
+			if err := a.sse.Broadcast(event); err != nil {
+				a.logger.WithError(err).Warn("failed to broadcast job completion event")
+			}
+		}
+
+		a.writeJSONResponse(w, http.StatusOK, map[string]interface{}{
+			"acknowledged": true,
+			"message":      "Job completion recorded",
+		})
+		return
+	}
+
+	// Get job
+	job, err := a.jobRepo.Get(ctx, req.JobID)
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+		return
+	}
+
+	// Verify lease token
+	if job.LeaseToken != nil && *job.LeaseToken != req.LeaseToken {
+		a.writeError(w, http.StatusUnauthorized, "INVALID_LEASE", "Invalid lease token", nil)
+		return
+	}
+
+	// Verify bot owns the job
+	if job.LockedBy != botId.String() {
+		a.writeError(w, http.StatusForbidden, "NOT_OWNER", "Bot does not own this job", nil)
+		return
+	}
+
+	// Update job status
+	now := time.Now()
+	job.CompletedAt = &now
+	if req.Success {
+		job.Status = jobTypes.StatusCompleted
+	} else {
+		job.Status = jobTypes.StatusFailed
+		if job.Metadata == nil {
+			job.Metadata = make(map[string]string)
+		}
+		job.Metadata["error_message"] = req.ErrorMessage
+	}
+
+	if err := a.jobRepo.Update(ctx, job); err != nil {
+		a.writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", "Failed to update job", err)
+		return
+	}
+
+	// Update bot status back to idle
+	agent, err := a.botRepo.FindByID(ctx, botId.String())
+	if err == nil {
+		agent.Status = botTypes.StatusIdle
+		if agent.Metadata != nil {
+			delete(agent.Metadata, "current_job_id")
+		}
+		if err := a.botRepo.Update(ctx, agent); err != nil {
+			a.logger.WithError(err).Warn("failed to update bot status")
+		}
+	}
+
+	// Publish SSE event
+	jobUUID := uuid.MustParse(job.ID)
+	campaignUUID := uuid.New()
+	eventType := "job.completed"
+	if !req.Success {
+		eventType = "job.failed"
+	}
+	event := sse.NewJobEvent(eventType, jobUUID, campaignUUID, map[string]any{
+		"job_id":    job.ID,
+		"bot_id":    botId.String(),
+		"success":   req.Success,
+		"timestamp": time.Now(),
+	})
+	if err := a.sse.Broadcast(event); err != nil {
+		a.logger.WithError(err).Warn("failed to broadcast job completion event")
+	}
+
+	a.writeJSONResponse(w, http.StatusOK, map[string]interface{}{
+		"acknowledged": true,
+		"message":      "Job completion recorded",
+	})
+}
+
+// GetBotMetrics returns metrics for a specific bot (from v3)
+func (a *BotAdapter) GetBotMetrics(w http.ResponseWriter, r *http.Request, botId generated.BotIdParam) {
+	ctx := r.Context()
+
+	if (a.botService == nil || a.jobService == nil) && (a.botRepo == nil || a.jobRepo == nil) {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Bot or job service not configured", nil)
+		return
+	}
+
+	// Use services if available
+	if a.botService != nil && a.jobService != nil {
+		bot, err := a.botService.GetBot(ctx, botId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "BOT_NOT_FOUND", "Bot not found", err)
+			return
+		}
+
+		// Basic metrics from bot info
+		metrics := map[string]interface{}{
+			"bot_id":         botId.String(),
+			"name":           bot.Name,
+			"status":         commonBotStatusToGenerated(bot.Status),
+			"last_heartbeat": bot.LastSeen,
+			"registered_at":  bot.RegisteredAt,
+			"timestamp":      time.Now(),
+		}
+
+		a.writeJSONResponse(w, http.StatusOK, metrics)
+		return
+	}
+
+	// Fallback: Verify bot exists
+	agent, err := a.botRepo.FindByID(ctx, botId.String())
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "BOT_NOT_FOUND", "Bot not found", err)
+		return
+	}
+
+	// Get job metrics for this bot
+	filter := jobRepo.JobFilter{
+		Limit: 1000, // Get all jobs to calculate metrics
+	}
+
+	jobs, err := a.jobRepo.List(ctx, filter)
+	if err != nil {
+		a.writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to fetch job metrics", err)
+		return
+	}
+
+	// Calculate metrics
+	var totalJobs, completedJobs, failedJobs int
+	var totalDuration time.Duration
+
+	for _, job := range jobs {
+		if job.LockedBy == botId.String() {
+			totalJobs++
+			switch job.Status {
+			case jobTypes.StatusCompleted:
+				completedJobs++
+				if job.StartedAt != nil && job.CompletedAt != nil {
+					totalDuration += job.CompletedAt.Sub(*job.StartedAt)
+				}
+			case jobTypes.StatusFailed:
+				failedJobs++
+			}
+		}
+	}
+
+	avgDuration := float64(0)
+	if completedJobs > 0 {
+		avgDuration = totalDuration.Seconds() / float64(completedJobs)
+	}
+
+	successRate := float64(0)
+	if totalJobs > 0 {
+		successRate = float64(completedJobs) / float64(totalJobs) * 100
+	}
+
+	metrics := map[string]interface{}{
+		"bot_id":                   botId.String(),
+		"name":                     agent.Name,
+		"status":                   botStatusToGenerated(agent.Status),
+		"total_jobs":               totalJobs,
+		"completed_jobs":           completedJobs,
+		"failed_jobs":              failedJobs,
+		"success_rate":             successRate,
+		"average_job_duration_sec": avgDuration,
+		"last_heartbeat":           agent.LastHeartbeat,
+		"registered_at":            agent.CreatedAt,
+		"timestamp":                time.Now(),
+	}
+
+	a.writeJSONResponse(w, http.StatusOK, metrics)
 }
