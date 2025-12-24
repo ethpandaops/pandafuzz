@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -661,17 +662,19 @@ func (a *SystemAdapter) SubmitBatchResults(w http.ResponseWriter, r *http.Reques
 // SubmitCrashResult handles POST /api/v1/results/crash
 func (a *SystemAdapter) SubmitCrashResult(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		JobID      string `json:"job_id"`
-		BotID      string `json:"bot_id"`
-		CrashType  string `json:"crash_type"`
-		Signal     int    `json:"signal"`
-		ExitCode   int    `json:"exit_code"`
-		InputData  string `json:"input_data"`
-		StackTrace string `json:"stack_trace"`
-		Hash       string `json:"hash"`
-		Size       int64  `json:"size"`
-		FilePath   string `json:"file_path"`
-		IsUnique   bool   `json:"is_unique"`
+		JobID       string `json:"job_id"`
+		BotID       string `json:"bot_id"`
+		CrashType   string `json:"crash_type"`
+		Type        string `json:"type"` // Alias for crash_type
+		Signal      int    `json:"signal"`
+		ExitCode    int    `json:"exit_code"`
+		InputData   string `json:"input_data"`   // Legacy field
+		InputBase64 string `json:"input_base64"` // Base64 encoded input from bot
+		StackTrace  string `json:"stack_trace"`
+		Hash        string `json:"hash"`
+		Size        int64  `json:"size"`
+		FilePath    string `json:"file_path"`
+		IsUnique    bool   `json:"is_unique"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -687,15 +690,38 @@ func (a *SystemAdapter) SubmitCrashResult(w http.ResponseWriter, r *http.Request
 	// Generate crash ID using UUID
 	crashID := uuid.New().String()
 
+	// Determine crash type (support both crash_type and type fields)
+	crashType := req.CrashType
+	if crashType == "" {
+		crashType = req.Type
+	}
+
+	// Decode crash input data - prefer InputBase64, fallback to InputData
+	var inputData []byte
+	if req.InputBase64 != "" {
+		decoded, err := base64.StdEncoding.DecodeString(req.InputBase64)
+		if err != nil {
+			a.logger.WithError(err).WithField("job_id", req.JobID).Warn("Failed to decode base64 crash input")
+		} else {
+			inputData = decoded
+			a.logger.WithFields(logrus.Fields{
+				"job_id":     req.JobID,
+				"input_size": len(inputData),
+			}).Debug("Decoded base64 crash input")
+		}
+	} else if req.InputData != "" {
+		inputData = []byte(req.InputData)
+	}
+
 	// Create crash result to store
 	crash := &common.CrashResult{
 		ID:         crashID,
 		JobID:      req.JobID,
 		BotID:      req.BotID,
-		Type:       req.CrashType,
+		Type:       crashType,
 		Signal:     req.Signal,
 		ExitCode:   req.ExitCode,
-		Input:      []byte(req.InputData),
+		Input:      inputData,
 		StackTrace: req.StackTrace,
 		Hash:       req.Hash,
 		Size:       req.Size,

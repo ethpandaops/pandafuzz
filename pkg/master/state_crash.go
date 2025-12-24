@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -60,6 +61,22 @@ func (ps *PersistentState) ProcessCrashResultWithRetry(ctx context.Context, cras
 				}).Info("Crash is unique")
 			}
 
+			// Decode base64 input if raw Input is empty but InputBase64 is present
+			if len(crash.Input) == 0 && crash.InputBase64 != "" {
+				decoded, err := base64.StdEncoding.DecodeString(crash.InputBase64)
+				if err != nil {
+					ps.logger.WithError(err).WithFields(logrus.Fields{
+						"crash_id": crash.ID,
+					}).Warn("Failed to decode base64 crash input")
+				} else {
+					crash.Input = decoded
+					ps.logger.WithFields(logrus.Fields{
+						"crash_id":   crash.ID,
+						"input_size": len(crash.Input),
+					}).Info("Decoded base64 crash input")
+				}
+			}
+
 			// Store crash input separately if provided
 			hasInput := len(crash.Input) > 0
 
@@ -69,10 +86,6 @@ func (ps *PersistentState) ProcessCrashResultWithRetry(ctx context.Context, cras
 					"crash_id":   crash.ID,
 					"input_size": len(crash.Input),
 				}).Info("Received crash with input data")
-			} else if crash.InputBase64 != "" {
-				ps.logger.WithFields(logrus.Fields{
-					"crash_id": crash.ID,
-				}).Info("Received crash with base64 input")
 			} else {
 				ps.logger.WithFields(logrus.Fields{
 					"crash_id": crash.ID,
