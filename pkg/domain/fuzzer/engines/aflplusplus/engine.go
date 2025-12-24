@@ -66,9 +66,10 @@ type Engine struct {
 	lastPendingFavs  uint64
 
 	// Crash tracking
-	crashes      map[string]*types.CrashInfo
-	crashesMutex sync.RWMutex
-	seenCrashes  map[string]bool
+	crashes          map[string]*types.CrashInfo
+	crashesMutex     sync.RWMutex
+	seenCrashes      map[string]bool
+	seenCrashesMutex sync.Mutex
 
 	// Coverage tracking
 	coverageData  map[string]interface{}
@@ -290,7 +291,11 @@ func (e *Engine) Stop() error {
 
 	e.log.Info("Stopping AFL++...")
 
-	// Cancel context to signal shutdown
+	// Mark as not running FIRST to prevent race conditions
+	// This ensures monitorCrashes will exit on next iteration
+	e.isRunning.Store(false)
+
+	// Cancel context to signal shutdown to all goroutines
 	if e.cancelFunc != nil {
 		e.cancelFunc()
 	}
@@ -305,8 +310,9 @@ func (e *Engine) Stop() error {
 		}
 	}
 
-	// Give process time to exit gracefully
-	done := make(chan bool)
+	// Wait for ALL monitoring goroutines to fully exit
+	// This ensures no concurrent access to seenCrashes map
+	done := make(chan bool, 1)
 	go func() {
 		e.wg.Wait()
 		done <- true
@@ -314,8 +320,8 @@ func (e *Engine) Stop() error {
 
 	select {
 	case <-done:
-		// Process exited gracefully
-		e.log.Info("AFL++ process exited gracefully")
+		// All goroutines exited gracefully
+		e.log.Info("AFL++ monitoring goroutines exited gracefully")
 	case <-time.After(5 * time.Second):
 		// Force kill if not exited
 		if e.cmd != nil && e.cmd.Process != nil {
@@ -339,14 +345,33 @@ func (e *Engine) Stop() error {
 		}
 	}
 
-	e.isRunning.Store(false)
+	// NOW do final crash scan - all monitoring goroutines have exited
+	// This is safe because no concurrent access to seenCrashes or crashChan
+	e.log.Info("Performing final crash scan (all goroutines stopped)...")
+	e.checkForCrashesWithTimeout(3 * time.Second)
 
-	// Close channels
+	// Close channels AFTER final scan completes
 	close(e.crashChan)
 	close(e.progressChan)
 
 	e.log.Info("AFL++ stopped")
 	return nil
+}
+
+// checkForCrashesWithTimeout wraps checkForCrashes with a timeout
+func (e *Engine) checkForCrashesWithTimeout(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		e.checkForCrashes()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		e.log.Debug("Final crash scan completed")
+	case <-time.After(timeout):
+		e.log.Warn("Final crash scan timed out, some crashes may be missed")
+	}
 }
 
 // GetStats returns current fuzzing statistics
@@ -416,6 +441,17 @@ func (e *Engine) Configure(config *types.FuzzerConfig) error {
 		return errors.New("cannot configure while fuzzer is running")
 	}
 	e.config = config
+
+	// Set target binary from config if not already set
+	if e.target == "" && config.Target != "" {
+		e.target = config.Target
+		e.log.WithField("target", e.target).Info("Set target binary from config")
+	}
+
+	// Set target args from config
+	if len(e.args) == 0 && len(config.TargetArgs) > 0 {
+		e.args = config.TargetArgs
+	}
 
 	// Set output directory from config if not already set
 	if e.outputDir == "" && config.OutputDir != "" {
@@ -594,9 +630,26 @@ func (e *Engine) ensureDirectories() error {
 	dirs := []string{}
 
 	if e.inputDir != "" {
-		// Check if input dir exists
+		// Create input dir if it doesn't exist
 		if _, err := os.Stat(e.inputDir); os.IsNotExist(err) {
-			return fmt.Errorf("input directory does not exist: %s", e.inputDir)
+			if err := os.MkdirAll(e.inputDir, 0755); err != nil {
+				return fmt.Errorf("failed to create input directory %s: %w", e.inputDir, err)
+			}
+			e.log.WithField("input_dir", e.inputDir).Info("Created input directory")
+		}
+
+		// Check if input directory is empty and create a default seed
+		entries, err := os.ReadDir(e.inputDir)
+		if err != nil {
+			return fmt.Errorf("failed to read input directory: %w", err)
+		}
+		if len(entries) == 0 {
+			// Create a default seed file so AFL++ can start fuzzing
+			seedPath := filepath.Join(e.inputDir, "seed_default")
+			if err := os.WriteFile(seedPath, []byte("AAAA"), 0644); err != nil {
+				return fmt.Errorf("failed to create default seed file: %w", err)
+			}
+			e.log.WithField("seed_file", seedPath).Info("Created default seed file")
 		}
 	}
 
@@ -624,6 +677,12 @@ func (e *Engine) processOutput(reader io.Reader, source string) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		e.log.WithField("source", source).Debug(line)
+
+		// Write to output file if configured
+		if e.config != nil && e.config.OutputWriter != nil {
+			timestamp := time.Now().Format(time.RFC3339)
+			fmt.Fprintf(e.config.OutputWriter, "%s [%s] %s\n", timestamp, source, line)
+		}
 
 		// AFL++ doesn't output stats to stdout/stderr in the same way as libfuzzer
 		// Stats are read from files in the output directory
@@ -798,30 +857,44 @@ func (e *Engine) checkForCrashes() {
 	// AFL++ creates instance directories for crashes
 	// Default is "default" when not using -M (main) or -S (secondary)
 	var crashDir string
-	if e.config.AFLPlusPlusOptions.MainNode {
+	if e.config != nil && e.config.AFLPlusPlusOptions.MainNode {
 		crashDir = filepath.Join(e.outputDir, "main", "crashes")
-	} else if e.config.AFLPlusPlusOptions.SecondaryNode {
+	} else if e.config != nil && e.config.AFLPlusPlusOptions.SecondaryNode {
 		crashDir = filepath.Join(e.outputDir, "secondary", "crashes")
 	} else {
 		// Default instance when no -M or -S is specified
 		crashDir = filepath.Join(e.outputDir, "default", "crashes")
 	}
 
+	e.log.WithField("crash_dir", crashDir).Debug("Checking for crashes")
+
 	files, err := os.ReadDir(crashDir)
 	if err != nil {
+		e.log.WithFields(logrus.Fields{
+			"crash_dir": crashDir,
+			"error":     err,
+		}).Debug("Could not read crash directory")
 		return // Crashes directory might not exist yet
 	}
+
+	e.log.WithFields(logrus.Fields{
+		"crash_dir":  crashDir,
+		"file_count": len(files),
+	}).Debug("Found files in crash directory")
 
 	for _, file := range files {
 		if file.IsDir() || strings.HasSuffix(file.Name(), ".txt") {
 			continue
 		}
 
-		// Check if we've seen this crash before
+		// Check if we've seen this crash before (with mutex protection)
+		e.seenCrashesMutex.Lock()
 		if e.seenCrashes[file.Name()] {
+			e.seenCrashesMutex.Unlock()
 			continue
 		}
 		e.seenCrashes[file.Name()] = true
+		e.seenCrashesMutex.Unlock()
 
 		// Read crash file
 		crashPath := filepath.Join(crashDir, file.Name())
@@ -862,9 +935,17 @@ func (e *Engine) checkForCrashes() {
 		e.stats.LastCrashTime = &now
 		e.statsMutex.Unlock()
 
+		e.log.WithFields(logrus.Fields{
+			"crash_id":   crashID,
+			"crash_file": file.Name(),
+			"crash_path": crashPath,
+			"input_size": len(input),
+		}).Info("New crash discovered")
+
 		// Send to channel
 		select {
 		case e.crashChan <- crash:
+			e.log.WithField("crash_id", crashID).Debug("Sent crash to channel")
 		default:
 			e.log.Warn("Crash channel full, dropping crash notification")
 		}

@@ -113,7 +113,7 @@ function Bots() {
               <TableCell>Status</TableCell>
               <TableCell>Name</TableCell>
               <TableCell>Hostname</TableCell>
-              <TableCell>IP Address</TableCell>
+              <TableCell>API Endpoint</TableCell>
               <TableCell>Capabilities</TableCell>
               <TableCell>Current Job</TableCell>
               <TableCell>Last Seen</TableCell>
@@ -136,7 +136,7 @@ function Bots() {
                 </TableCell>
                 <TableCell>{bot.name || bot.hostname}</TableCell>
                 <TableCell>{bot.hostname}</TableCell>
-                <TableCell>{bot.ip}</TableCell>
+                <TableCell>{bot.api_endpoint || '-'}</TableCell>
                 <TableCell>
                   <Box display="flex" gap={0.5} flexWrap="wrap">
                     {bot.capabilities.map((cap) => (
@@ -145,13 +145,13 @@ function Bots() {
                   </Box>
                 </TableCell>
                 <TableCell>
-                  {bot.current_job ? (
-                    <Chip label={bot.current_job} size="small" color="primary" />
+                  {bot.current_job_id ? (
+                    <Chip label={bot.current_job_id} size="small" color="primary" />
                   ) : (
                     '-'
                   )}
                 </TableCell>
-                <TableCell>{formatLastSeen(bot.last_seen)}</TableCell>
+                <TableCell>{formatLastSeen(bot.last_heartbeat)}</TableCell>
                 <TableCell>
                   <IconButton
                     size="small"
@@ -199,21 +199,21 @@ function Bots() {
                 <strong>Hostname:</strong> {selectedBot.hostname}
               </Typography>
               <Typography variant="subtitle1" gutterBottom>
-                <strong>IP Address:</strong> {selectedBot.ip}
+                <strong>API Endpoint:</strong> {selectedBot.api_endpoint || '-'}
               </Typography>
               <Typography variant="subtitle1" gutterBottom>
                 <strong>Status:</strong> {selectedBot.status}
+              </Typography>
+              <Typography variant="subtitle1" gutterBottom>
+                <strong>Online:</strong> {selectedBot.is_online ? 'Yes' : 'No'}
               </Typography>
               <Typography variant="subtitle1" gutterBottom>
                 <strong>Registered:</strong>{' '}
                 {formatDateTime(selectedBot.registered_at)}
               </Typography>
               <Typography variant="subtitle1" gutterBottom>
-                <strong>Last Seen:</strong>{' '}
-                {formatDateTime(selectedBot.last_seen)}
-              </Typography>
-              <Typography variant="subtitle1" gutterBottom>
-                <strong>Failure Count:</strong> {selectedBot.failure_count}
+                <strong>Last Heartbeat:</strong>{' '}
+                {formatDateTime(selectedBot.last_heartbeat)}
               </Typography>
               <Typography variant="subtitle1" gutterBottom>
                 <strong>Capabilities:</strong>

@@ -1232,37 +1232,29 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 		dirsToCheck = append(dirsToCheck, corpusDir)
 	}
 
-	// Check AFL++ output directories
+	// Check AFL++ output directories using dynamic discovery
+	// AFL++ creates instance directories: default (no flags), main (-M), secondary (-S), or custom names
 	aflOutput := filepath.Join(job.WorkDir, "output")
 	if stat, err := os.Stat(aflOutput); err == nil && stat.IsDir() {
-		// AFL++ stores crashes in output/afl_output/default/crashes/ when running without -M or -S flags
-		aflCrashesDir := filepath.Join(aflOutput, "afl_output", "default", "crashes")
-		if stat, err := os.Stat(aflCrashesDir); err == nil && stat.IsDir() {
-			dirsToCheck = append(dirsToCheck, aflCrashesDir)
-			a.logger.WithFields(logrus.Fields{
-				"job_id":          job.ID,
-				"afl_crashes_dir": aflCrashesDir,
-			}).Debug("Found AFL++ crashes directory (default instance)")
-		}
-
-		// Also check for main node crashes (when using -M flag)
-		aflMainCrashesDir := filepath.Join(aflOutput, "afl_output", "main", "crashes")
-		if stat, err := os.Stat(aflMainCrashesDir); err == nil && stat.IsDir() {
-			dirsToCheck = append(dirsToCheck, aflMainCrashesDir)
-			a.logger.WithFields(logrus.Fields{
-				"job_id":          job.ID,
-				"afl_crashes_dir": aflMainCrashesDir,
-			}).Debug("Found AFL++ crashes directory (main node)")
-		}
-
-		// Also check for secondary node crashes (when using -S flag)
-		aflSecondaryCrashesDir := filepath.Join(aflOutput, "afl_output", "secondary", "crashes")
-		if stat, err := os.Stat(aflSecondaryCrashesDir); err == nil && stat.IsDir() {
-			dirsToCheck = append(dirsToCheck, aflSecondaryCrashesDir)
-			a.logger.WithFields(logrus.Fields{
-				"job_id":          job.ID,
-				"afl_crashes_dir": aflSecondaryCrashesDir,
-			}).Debug("Found AFL++ crashes directory (secondary node)")
+		// Use glob pattern to find ALL instance crash directories dynamically
+		// This handles custom instance names like "-M worker_1" or "-S fuzzer_2"
+		crashPattern := filepath.Join(aflOutput, "*", "crashes")
+		crashDirs, err := filepath.Glob(crashPattern)
+		if err != nil {
+			a.logger.WithError(err).WithField("pattern", crashPattern).Debug("Failed to glob for AFL++ crash directories")
+		} else {
+			for _, crashDir := range crashDirs {
+				if stat, err := os.Stat(crashDir); err == nil && stat.IsDir() {
+					dirsToCheck = append(dirsToCheck, crashDir)
+					// Extract instance name from path for logging
+					instanceName := filepath.Base(filepath.Dir(crashDir))
+					a.logger.WithFields(logrus.Fields{
+						"job_id":          job.ID,
+						"afl_crashes_dir": crashDir,
+						"instance_name":   instanceName,
+					}).Debug("Found AFL++ crashes directory")
+				}
+			}
 		}
 	}
 
@@ -1333,12 +1325,13 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 			if strings.HasPrefix(entry.Name(), "crash-") {
 				isCrashFile = true
 				crashType = "libfuzzer"
-			} else if (strings.Contains(dir, filepath.Join("afl_output", "default", "crashes")) ||
-				strings.Contains(dir, filepath.Join("afl_output", "main", "crashes")) ||
-				strings.Contains(dir, filepath.Join("afl_output", "secondary", "crashes"))) &&
+			} else if strings.Contains(dir, "crashes") &&
+				strings.Contains(dir, filepath.Join("output", "")) &&
+				!strings.Contains(dir, "libfuzzer") &&
+				!strings.Contains(dir, "honggfuzz") &&
 				!strings.HasPrefix(entry.Name(), "README") {
-				// AFL++ crash files are in output/afl_output/<instance>/crashes/ directory
-				// The instance can be "default" (no -M/-S flag), "main" (-M flag), or "secondary" (-S flag)
+				// AFL++ crash files are in output/<instance>/crashes/ directory
+				// The instance can be any name: default, main, secondary, or custom names from -M/-S flags
 				// Skip README files that AFL++ creates
 				isCrashFile = true
 				crashType = "afl++"

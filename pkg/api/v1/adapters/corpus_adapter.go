@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 // CorpusAdapter handles corpus-related API requests
 type CorpusAdapter struct {
 	corpusService common.CorpusService
+	storage       common.Storage
 	sse           *sse.Manager
 	logger        logrus.FieldLogger
 }
@@ -28,11 +30,13 @@ type CorpusAdapter struct {
 // NewCorpusAdapter creates a new corpus adapter
 func NewCorpusAdapter(
 	corpusService common.CorpusService,
+	storage common.Storage,
 	sse *sse.Manager,
 	logger logrus.FieldLogger,
 ) *CorpusAdapter {
 	return &CorpusAdapter{
 		corpusService: corpusService,
+		storage:       storage,
 		sse:           sse,
 		logger:        logger.WithField("adapter", "corpus"),
 	}
@@ -487,4 +491,294 @@ func (a *CorpusAdapter) PromoteCrashToCorpus(w http.ResponseWriter, r *http.Requ
 	}
 
 	a.writeJSONResponse(w, http.StatusCreated, response)
+}
+
+// ListCorpusCollections returns all corpus collections
+func (a *CorpusAdapter) ListCorpusCollections(w http.ResponseWriter, r *http.Request, params generated.ListCorpusCollectionsParams) {
+	ctx := r.Context()
+	a.logger.Debug("listing corpus collections")
+
+	if a.storage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "Storage not configured", nil)
+		return
+	}
+
+	collections, err := a.storage.GetCorpusCollections(ctx)
+	if err != nil {
+		a.logger.WithError(err).Error("failed to get corpus collections")
+		a.writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to list corpus collections", err)
+		return
+	}
+
+	// Apply pagination if specified
+	total := len(collections)
+	limit := 50
+	offset := 0
+	if params.Limit != nil {
+		limit = *params.Limit
+	}
+	if params.Offset != nil {
+		offset = *params.Offset
+	}
+
+	// Apply pagination to results
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	if offset > total {
+		offset = total
+	}
+	pagedCollections := collections[offset:end]
+
+	a.writeJSONResponse(w, http.StatusOK, map[string]interface{}{
+		"collections": pagedCollections,
+		"pagination": map[string]interface{}{
+			"total":    total,
+			"limit":    limit,
+			"offset":   offset,
+			"has_more": end < total,
+		},
+	})
+}
+
+// CreateCorpusCollection creates a new corpus collection
+func (a *CorpusAdapter) CreateCorpusCollection(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	a.logger.Debug("creating corpus collection")
+
+	if a.storage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "Storage not configured", nil)
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Tags        []string `json:"tags"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
+		return
+	}
+
+	if req.Name == "" {
+		a.writeError(w, http.StatusBadRequest, "MISSING_NAME", "Collection name is required", nil)
+		return
+	}
+
+	// Create collection
+	collection := &common.CorpusCollection{
+		ID:          uuid.New().String(),
+		Name:        req.Name,
+		Description: req.Description,
+		Tags:        req.Tags,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+
+	if err := a.storage.CreateCorpusCollection(ctx, collection); err != nil {
+		a.logger.WithError(err).Error("failed to create corpus collection")
+		a.writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to create corpus collection", err)
+		return
+	}
+
+	a.writeJSONResponse(w, http.StatusCreated, collection)
+}
+
+// GetCorpusCollection returns a specific corpus collection
+func (a *CorpusAdapter) GetCorpusCollection(w http.ResponseWriter, r *http.Request, collectionID string) {
+	ctx := r.Context()
+	a.logger.WithField("collection_id", collectionID).Debug("getting corpus collection")
+
+	if a.storage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "Storage not configured", nil)
+		return
+	}
+
+	collection, err := a.storage.GetCorpusCollection(ctx, collectionID)
+	if err != nil {
+		a.logger.WithError(err).WithField("collection_id", collectionID).Error("failed to get corpus collection")
+		a.writeError(w, http.StatusNotFound, "NOT_FOUND", "Corpus collection not found", err)
+		return
+	}
+
+	a.writeJSONResponse(w, http.StatusOK, collection)
+}
+
+// UpdateCorpusCollection updates a corpus collection
+func (a *CorpusAdapter) UpdateCorpusCollection(w http.ResponseWriter, r *http.Request, collectionID string) {
+	ctx := r.Context()
+	a.logger.WithField("collection_id", collectionID).Debug("updating corpus collection")
+
+	if a.storage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "Storage not configured", nil)
+		return
+	}
+
+	// Get existing collection
+	collection, err := a.storage.GetCorpusCollection(ctx, collectionID)
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "NOT_FOUND", "Corpus collection not found", err)
+		return
+	}
+
+	// Parse request body for updates
+	var req struct {
+		Name        *string  `json:"name"`
+		Description *string  `json:"description"`
+		Tags        []string `json:"tags"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
+		return
+	}
+
+	// Apply updates
+	if req.Name != nil {
+		collection.Name = *req.Name
+	}
+	if req.Description != nil {
+		collection.Description = *req.Description
+	}
+	if req.Tags != nil {
+		collection.Tags = req.Tags
+	}
+	collection.UpdatedAt = time.Now()
+
+	if err := a.storage.UpdateCorpusCollection(ctx, collection); err != nil {
+		a.logger.WithError(err).Error("failed to update corpus collection")
+		a.writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to update corpus collection", err)
+		return
+	}
+
+	a.writeJSONResponse(w, http.StatusOK, collection)
+}
+
+// DeleteCorpusCollection deletes a corpus collection
+func (a *CorpusAdapter) DeleteCorpusCollection(w http.ResponseWriter, r *http.Request, collectionID string) {
+	ctx := r.Context()
+	a.logger.WithField("collection_id", collectionID).Debug("deleting corpus collection")
+
+	if a.storage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "Storage not configured", nil)
+		return
+	}
+
+	if err := a.storage.DeleteCorpusCollection(ctx, collectionID); err != nil {
+		a.logger.WithError(err).Error("failed to delete corpus collection")
+		a.writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to delete corpus collection", err)
+		return
+	}
+
+	a.writeJSONResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Corpus collection deleted successfully",
+	})
+}
+
+// UploadCorpusCollectionFiles uploads files to a corpus collection
+func (a *CorpusAdapter) UploadCorpusCollectionFiles(w http.ResponseWriter, r *http.Request, collectionID string) {
+	ctx := r.Context()
+	a.logger.WithField("collection_id", collectionID).Debug("uploading files to corpus collection")
+
+	if a.storage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "Storage not configured", nil)
+		return
+	}
+
+	// Verify collection exists
+	_, err := a.storage.GetCorpusCollection(ctx, collectionID)
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "NOT_FOUND", "Corpus collection not found", err)
+		return
+	}
+
+	// Parse multipart form
+	if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB max
+		a.writeError(w, http.StatusBadRequest, "PARSE_ERROR", "Failed to parse multipart form", err)
+		return
+	}
+
+	files := r.MultipartForm.File["files"]
+	if len(files) == 0 {
+		a.writeError(w, http.StatusBadRequest, "NO_FILES", "No files provided", nil)
+		return
+	}
+
+	uploadedFiles := make([]*common.CorpusCollectionFile, 0, len(files))
+	for _, fileHeader := range files {
+		file, err := fileHeader.Open()
+		if err != nil {
+			a.logger.WithError(err).WithField("filename", fileHeader.Filename).Warn("failed to open uploaded file")
+			continue
+		}
+		defer file.Close()
+
+		// Read file content
+		content, err := io.ReadAll(file)
+		if err != nil {
+			a.logger.WithError(err).WithField("filename", fileHeader.Filename).Warn("failed to read uploaded file")
+			continue
+		}
+
+		// Calculate proper hash
+		hash := fmt.Sprintf("sha256:%x", sha256.Sum256(content))
+
+		// Create corpus collection file record
+		collectionFile := &common.CorpusCollectionFile{
+			ID:           uuid.New().String(),
+			CollectionID: collectionID,
+			Filename:     fileHeader.Filename,
+			Size:         int64(len(content)),
+			Hash:         hash,
+			UploadedAt:   time.Now(),
+		}
+
+		if err := a.storage.AddCorpusCollectionFile(ctx, collectionFile); err != nil {
+			a.logger.WithError(err).WithField("filename", fileHeader.Filename).Warn("failed to add corpus collection file")
+			continue
+		}
+
+		uploadedFiles = append(uploadedFiles, collectionFile)
+	}
+
+	a.writeJSONResponse(w, http.StatusCreated, map[string]interface{}{
+		"success":        true,
+		"uploaded_count": len(uploadedFiles),
+		"files":          uploadedFiles,
+	})
+}
+
+// ListCorpusCollectionFiles lists files in a corpus collection
+func (a *CorpusAdapter) ListCorpusCollectionFiles(w http.ResponseWriter, r *http.Request, collectionID string) {
+	ctx := r.Context()
+	a.logger.WithField("collection_id", collectionID).Debug("listing corpus collection files")
+
+	if a.storage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "Storage not configured", nil)
+		return
+	}
+
+	// Verify collection exists
+	_, err := a.storage.GetCorpusCollection(ctx, collectionID)
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "NOT_FOUND", "Corpus collection not found", err)
+		return
+	}
+
+	files, err := a.storage.GetCorpusCollectionFiles(ctx, collectionID)
+	if err != nil {
+		a.logger.WithError(err).Error("failed to get corpus collection files")
+		a.writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to list corpus collection files", err)
+		return
+	}
+
+	a.writeJSONResponse(w, http.StatusOK, map[string]interface{}{
+		"files": files,
+		"total": len(files),
+	})
 }

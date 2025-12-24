@@ -87,6 +87,8 @@ function calculateFileHash(content: Buffer): string {
   return crypto.createHash('sha256').update(content).digest('hex');
 }
 
+// Raw coverage download tests - API endpoints now implemented
+// Note: Some tests may still need actual coverage data from running bots
 test.describe('Raw AFL++ Coverage File Downloads', () => {
   test.beforeEach(async ({ page }) => {
     await waitForAPI(page);

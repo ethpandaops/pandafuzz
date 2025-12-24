@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Master server with Web UI
   master:
@@ -12,6 +10,9 @@ services:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: pandafuzz-master
     restart: unless-stopped
+    depends_on:
+      minio:
+        condition: service_healthy
     ports:
       - "8080:8080"  # Web UI and API port (changed from 8080 to avoid conflicts)
       - "9090:9090"  # Metrics port

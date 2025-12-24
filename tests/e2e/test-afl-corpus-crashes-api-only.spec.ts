@@ -54,6 +54,7 @@ function createCrashCorpus() {
   ];
 }
 
+// Note: These tests validate the corpus collection API endpoints
 test.describe('AFL++ Corpus Collection and Crash Detection (API Only)', () => {
   test('should create corpus collection, submit AFL++ job, and monitor for crashes', async ({ page }) => {
     await waitForAPI(page);

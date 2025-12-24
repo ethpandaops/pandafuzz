@@ -58,10 +58,14 @@ func NewStack(logger logrus.FieldLogger) *Stack {
 			Logger:         logger.WithField("middleware", "tracing"),
 		},
 		validationConfig: &ValidationConfig{
-			MaxRequestSize:       10 * 1024 * 1024, // 10MB
-			RequiredContentTypes: []string{"application/json"},
-			SkipPaths:            []string{"/health", "/ready"},
-			Logger:               logger.WithField("middleware", "validation"),
+			MaxRequestSize: 100 * 1024 * 1024, // 100MB to allow binary uploads
+			RequiredContentTypes: []string{
+				"application/json",
+				"application/octet-stream",
+				"multipart/form-data",
+			},
+			SkipPaths: []string{"/health", "/ready"},
+			Logger:    logger.WithField("middleware", "validation"),
 		},
 	}
 }

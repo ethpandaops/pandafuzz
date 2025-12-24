@@ -3,6 +3,7 @@ package adapters
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -19,6 +20,7 @@ import (
 type SystemAdapter struct {
 	botService service.BotService
 	jobService service.JobService
+	storage    common.Storage
 	sseManager *sse.Manager
 	version    *common.VersionInfo
 	startTime  time.Time
@@ -29,6 +31,7 @@ type SystemAdapter struct {
 func NewSystemAdapter(
 	botService service.BotService,
 	jobService service.JobService,
+	storage common.Storage,
 	sseManager *sse.Manager,
 	version *common.VersionInfo,
 	logger logrus.FieldLogger,
@@ -36,6 +39,7 @@ func NewSystemAdapter(
 	return &SystemAdapter{
 		botService: botService,
 		jobService: jobService,
+		storage:    storage,
 		sseManager: sseManager,
 		version:    version,
 		startTime:  time.Now(),
@@ -663,6 +667,10 @@ func (a *SystemAdapter) SubmitCrashResult(w http.ResponseWriter, r *http.Request
 		ExitCode   int    `json:"exit_code"`
 		InputData  string `json:"input_data"`
 		StackTrace string `json:"stack_trace"`
+		Hash       string `json:"hash"`
+		Size       int64  `json:"size"`
+		FilePath   string `json:"file_path"`
+		IsUnique   bool   `json:"is_unique"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -675,13 +683,76 @@ func (a *SystemAdapter) SubmitCrashResult(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Process crash result
+	// Generate crash ID
 	crashID := fmt.Sprintf("crash_%d", time.Now().UnixNano())
+
+	// Create crash result to store
+	crash := &common.CrashResult{
+		ID:         crashID,
+		JobID:      req.JobID,
+		BotID:      req.BotID,
+		Type:       req.CrashType,
+		Signal:     req.Signal,
+		ExitCode:   req.ExitCode,
+		Input:      []byte(req.InputData),
+		StackTrace: req.StackTrace,
+		Hash:       req.Hash,
+		Size:       req.Size,
+		FilePath:   req.FilePath,
+		IsUnique:   req.IsUnique,
+		Timestamp:  time.Now(),
+	}
+
+	// Store the crash in storage
+	ctx := r.Context()
+	isUnique := true
+	if a.storage != nil {
+		if err := a.storage.CreateCrash(ctx, crash); err != nil {
+			if errors.Is(err, common.ErrDuplicateCrash) {
+				// Duplicate crash is not an error - just mark as not unique
+				isUnique = false
+				a.logger.WithFields(logrus.Fields{
+					"job_id": req.JobID,
+					"hash":   req.Hash,
+				}).Debug("Duplicate crash submitted, skipped storage")
+			} else {
+				a.logger.WithError(err).WithFields(logrus.Fields{
+					"job_id":   req.JobID,
+					"crash_id": crashID,
+				}).Error("Failed to store crash")
+				a.writeError(w, http.StatusInternalServerError, "Failed to store crash")
+				return
+			}
+		} else {
+			a.logger.WithFields(logrus.Fields{
+				"job_id":   req.JobID,
+				"bot_id":   req.BotID,
+				"crash_id": crashID,
+				"hash":     req.Hash,
+			}).Info("Crash stored in database")
+
+			// Store crash input data separately if available
+			if len(crash.Input) > 0 {
+				if err := a.storage.StoreCrashInput(ctx, crashID, crash.Input); err != nil {
+					a.logger.WithError(err).WithFields(logrus.Fields{
+						"crash_id":   crashID,
+						"input_size": len(crash.Input),
+					}).Warn("Failed to store crash input (crash metadata was saved)")
+					// Don't fail the request - crash metadata is already stored
+				} else {
+					a.logger.WithFields(logrus.Fields{
+						"crash_id":   crashID,
+						"input_size": len(crash.Input),
+					}).Debug("Crash input stored successfully")
+				}
+			}
+		}
+	}
 
 	response := map[string]interface{}{
 		"success":      true,
 		"crash_id":     crashID,
-		"is_unique":    true,
+		"is_unique":    isUnique,
 		"processed_at": time.Now(),
 		"message":      "Crash result submitted successfully",
 	}

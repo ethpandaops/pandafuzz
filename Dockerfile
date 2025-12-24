@@ -14,33 +14,36 @@ RUN apt-get update && apt-get install -y \
     zlib1g-dev \
     pkg-config \
     clang \
+    binutils-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
-# Build HongFuzz from source - use the latest release which has better build support
+# Build HongFuzz from source with full instrumentation support
+# The hfuzz_cc compiler wrappers provide the instrumentation needed for fuzzing
+# HFBUILD_USE_BFD=0 disables the optional BFD disassembler support to avoid dependency issues
 RUN git clone --depth 1 --branch 2.6 https://github.com/google/honggfuzz.git && \
     cd honggfuzz && \
-    # Disable BFD support which causes compilation issues
-    sed -i 's/linux\/bfd.c//g' Makefile && \
-    sed -i 's/linux\/bfd.o//g' Makefile && \
-    sed -i 's/-lbfd//g' Makefile && \
-    sed -i 's/-lopcodes//g' Makefile && \
-    sed -i 's/-liberty//g' Makefile && \
-    # Create stub bfd.c to satisfy dependencies
-    mkdir -p linux && \
-    echo '#include <stdlib.h>' > linux/bfd.c && \
-    echo 'void arch_bfdResolveSyms(void* a, void* b, void* c, void* d) { (void)a; (void)b; (void)c; (void)d; }' >> linux/bfd.c && \
-    echo 'void arch_bfdDisasm(void* a, void* b, void* c, void* d) { (void)a; (void)b; (void)c; (void)d; }' >> linux/bfd.c && \
-    echo 'char* arch_bfdDemangle(const char* str) { return (char*)str; }' >> linux/bfd.c && \
-    # Build HongFuzz
-    NO_BFD=1 make && \
-    # Install binaries
+    # Build HongFuzz with clang for better instrumentation support
+    # BUILD_LINUX_NO_BFD=true disables the BFD disassembler which requires binutils headers
+    CC=clang CXX=clang++ make BUILD_LINUX_NO_BFD=true && \
+    # Install the main honggfuzz binary
     cp honggfuzz /usr/bin/ && \
-    # Create wrapper scripts if they don't exist
-    test -f hfuzz-cc && cp hfuzz-cc /usr/bin/ || echo '#!/bin/bash\nexec gcc "$@"' > /usr/bin/hfuzz-cc && \
-    test -f hfuzz-clang && cp hfuzz-clang /usr/bin/ || echo '#!/bin/bash\nexec clang "$@"' > /usr/bin/hfuzz-clang && \
+    # Install the hfuzz_cc compiler wrappers (these provide instrumentation)
+    cp hfuzz_cc/hfuzz-cc /usr/bin/ && \
+    cp hfuzz_cc/hfuzz-clang /usr/bin/ && \
+    cp hfuzz_cc/hfuzz-clang++ /usr/bin/ && \
+    cp hfuzz_cc/hfuzz-g++ /usr/bin/ && \
+    cp hfuzz_cc/hfuzz-gcc /usr/bin/ && \
     chmod +x /usr/bin/hfuzz-* && \
+    # Install the libhfuzz libraries needed for instrumentation
+    mkdir -p /usr/local/lib/hfuzz && \
+    cp libhfuzz/*.a /usr/local/lib/hfuzz/ 2>/dev/null || true && \
+    cp libhfuzz/*.o /usr/local/lib/hfuzz/ 2>/dev/null || true && \
+    # Verify installation
+    echo "HongFuzz build completed:" && \
+    ls -la /usr/bin/hfuzz-* && \
+    ls -la /usr/local/lib/hfuzz/ 2>/dev/null || echo "No libhfuzz files found" && \
     cd / && rm -rf /build
 
 # Build stage for web UI
@@ -261,8 +264,14 @@ RUN apt-get update && apt-get install -y \
     liblzma5 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy HongFuzz binaries from builder stage
+# Copy HongFuzz binaries and compiler wrappers from builder stage
 COPY --from=honggfuzz-builder /usr/bin/honggfuzz /usr/local/bin/
+COPY --from=honggfuzz-builder /usr/bin/hfuzz-cc /usr/local/bin/
+COPY --from=honggfuzz-builder /usr/bin/hfuzz-clang /usr/local/bin/
+COPY --from=honggfuzz-builder /usr/bin/hfuzz-clang++ /usr/local/bin/
+COPY --from=honggfuzz-builder /usr/bin/hfuzz-g++ /usr/local/bin/
+COPY --from=honggfuzz-builder /usr/bin/hfuzz-gcc /usr/local/bin/
+COPY --from=honggfuzz-builder /usr/local/lib/hfuzz /usr/local/lib/hfuzz
 
 # Install coverage tools
 # Note: genhtml is part of lcov package, afl-cov needs to be installed from source

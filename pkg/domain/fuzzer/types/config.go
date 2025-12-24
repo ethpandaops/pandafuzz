@@ -3,11 +3,16 @@ package types
 import (
 	"errors"
 	"fmt"
+	"io"
 	"time"
 )
 
 // FuzzerConfig represents configuration for a fuzzer instance
 type FuzzerConfig struct {
+	// Target binary configuration
+	Target     string   `json:"target,omitempty"`      // Path to target binary
+	TargetArgs []string `json:"target_args,omitempty"` // Arguments to pass to target
+
 	// Common configuration options
 	Timeout         time.Duration     `json:"timeout,omitempty"`
 	MaxDuration     time.Duration     `json:"max_duration,omitempty"` // Maximum time to run fuzzer before graceful exit
@@ -35,6 +40,9 @@ type FuzzerConfig struct {
 	// Advanced options
 	ExtraArgs     []string          `json:"extra_args,omitempty"`
 	CustomOptions map[string]string `json:"custom_options,omitempty"`
+
+	// Output writer for capturing fuzzer output to log file
+	OutputWriter io.Writer `json:"-"`
 }
 
 // LibFuzzerOptions contains libFuzzer-specific configuration
@@ -123,6 +131,8 @@ type HonggfuzzOptions struct {
 	ExitUponCrash       bool     `json:"exit_upon_crash,omitempty"`
 	PostProcessorCmd    string   `json:"post_processor_cmd,omitempty"`
 	SocketFuzzing       bool     `json:"socket_fuzzing,omitempty"`
+	StdinMode           bool     `json:"stdin_mode,omitempty"`      // Use stdin for input instead of file (-s flag)
+	Persistent          bool     `json:"persistent,omitempty"`      // Use persistent mode for targets with HF_ITER
 	Sancov              bool     `json:"sancov,omitempty"`          // Enable sanitizer coverage
 	CoverageReport      bool     `json:"coverage_report,omitempty"` // Generate coverage report
 	NetDriver           bool     `json:"net_driver,omitempty"`
@@ -273,9 +283,15 @@ func (o *LibFuzzerOptions) ValidateCoverage(enableCoverage bool) error {
 		return nil
 	}
 
-	// When coverage is enabled, at least one coverage option should be set
+	// When coverage is enabled and no specific options are set, enable sensible defaults
+	// that provide maximum information to the end user
 	if o.UseCounters == 0 && o.PrintCoveragePCs == 0 && o.PrintCoverage == 0 {
-		return errors.New("at least one coverage option must be enabled (use_counters, print_coverage_pcs, or print_coverage)")
+		// Enable counter-based coverage (more precise coverage tracking)
+		o.UseCounters = 1
+		// Enable coverage summary printing
+		o.PrintCoverage = 1
+		// Enable final stats printing for comprehensive information
+		o.PrintFinalStats = 1
 	}
 
 	return nil

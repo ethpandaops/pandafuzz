@@ -313,6 +313,12 @@ func (e *Engine) Configure(config *types.FuzzerConfig) error {
 		return errors.New("cannot configure while fuzzer is running")
 	}
 	e.config = config
+
+	// Set target from config if not already set
+	if e.target == "" && config.Target != "" {
+		e.target = config.Target
+	}
+
 	return nil
 }
 
@@ -419,6 +425,12 @@ func (e *Engine) processStdout() {
 	for e.stdoutScanner.Scan() {
 		line := e.stdoutScanner.Text()
 		e.parseLine(line)
+
+		// Write to output file if configured
+		if e.config != nil && e.config.OutputWriter != nil {
+			timestamp := time.Now().Format(time.RFC3339)
+			fmt.Fprintf(e.config.OutputWriter, "%s [stdout] %s\n", timestamp, line)
+		}
 	}
 }
 
@@ -430,6 +442,12 @@ func (e *Engine) processStderr() {
 	for e.stderrScanner.Scan() {
 		line := e.stderrScanner.Text()
 		e.parseLine(line)
+
+		// Write to output file if configured
+		if e.config != nil && e.config.OutputWriter != nil {
+			timestamp := time.Now().Format(time.RFC3339)
+			fmt.Fprintf(e.config.OutputWriter, "%s [stderr] %s\n", timestamp, line)
+		}
 
 		// Check for crashes in stderr
 		if e.crashRegex.MatchString(line) {

@@ -60,29 +60,72 @@ func (a *CampaignAdapter) ListCampaigns(w http.ResponseWriter, r *http.Request, 
 		offset = *params.Offset
 	}
 
-	// Get campaigns from repository
-	campaigns, total, err := a.repository.List(ctx, offset, limit)
-	if err != nil {
-		a.logger.WithError(err).Error("failed to list campaigns")
-		a.writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve campaigns", err)
-		return
-	}
+	var apiCampaigns []generated.Campaign
+	var total int
 
-	// Filter by status if specified
-	if params.Status != nil {
-		filtered := make([]*campaignTypes.Campaign, 0)
-		for _, campaign := range campaigns {
-			if campaignStatusToGenerated(campaign.Status) == *params.Status {
-				filtered = append(filtered, campaign)
-			}
+	// Try repository first, fall back to service if repository is nil
+	if a.repository != nil {
+		// Get campaigns from repository
+		campaigns, t, err := a.repository.List(ctx, offset, limit)
+		if err != nil {
+			a.logger.WithError(err).Error("failed to list campaigns from repository")
+			a.writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve campaigns", err)
+			return
 		}
-		campaigns = filtered
-	}
+		total = t
 
-	// Convert to API types
-	apiCampaigns := make([]generated.Campaign, len(campaigns))
-	for i, campaign := range campaigns {
-		apiCampaigns[i] = a.convertCampaignToAPI(campaign)
+		// Filter by status if specified
+		if params.Status != nil {
+			filtered := make([]*campaignTypes.Campaign, 0, len(campaigns))
+			for _, campaign := range campaigns {
+				if campaignStatusToGenerated(campaign.Status) == *params.Status {
+					filtered = append(filtered, campaign)
+				}
+			}
+			campaigns = filtered
+		}
+
+		// Convert to API types
+		apiCampaigns = make([]generated.Campaign, len(campaigns))
+		for i, campaign := range campaigns {
+			apiCampaigns[i] = a.convertCampaignToAPI(campaign)
+		}
+	} else if a.service != nil {
+		// Use service if repository is not available
+		filters := common.CampaignFilters{}
+		if params.Status != nil {
+			filters.Status = string(*params.Status)
+		}
+
+		campaigns, err := a.service.List(ctx, filters)
+		if err != nil {
+			a.logger.WithError(err).Error("failed to list campaigns from service")
+			a.writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve campaigns", err)
+			return
+		}
+		total = len(campaigns)
+
+		// Apply pagination manually
+		start := offset
+		if start > len(campaigns) {
+			start = len(campaigns)
+		}
+		end := offset + limit
+		if end > len(campaigns) {
+			end = len(campaigns)
+		}
+		paginatedCampaigns := campaigns[start:end]
+
+		// Convert to API types
+		apiCampaigns = make([]generated.Campaign, len(paginatedCampaigns))
+		for i, campaign := range paginatedCampaigns {
+			apiCampaigns[i] = a.convertCommonCampaignToAPI(campaign)
+		}
+	} else {
+		// Neither repository nor service available
+		a.logger.Error("neither repository nor service is available for listing campaigns")
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Campaign service not available", nil)
+		return
 	}
 
 	// Create pagination info
@@ -184,15 +227,33 @@ func (a *CampaignAdapter) CreateCampaign(w http.ResponseWriter, r *http.Request)
 func (a *CampaignAdapter) GetCampaign(w http.ResponseWriter, r *http.Request, campaignId generated.CampaignIdParam, params generated.GetCampaignParams) {
 	ctx := r.Context()
 
-	campaign, err := a.repository.FindByID(ctx, campaignId.String())
-	if err != nil {
-		a.logger.WithError(err).WithField("campaign_id", campaignId).Error("failed to get campaign")
-		a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+	// Try repository first, fall back to service
+	if a.repository != nil {
+		campaign, err := a.repository.FindByID(ctx, campaignId.String())
+		if err != nil {
+			a.logger.WithError(err).WithField("campaign_id", campaignId).Error("failed to get campaign")
+			a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+			return
+		}
+		apiCampaign := a.convertCampaignToAPI(campaign)
+		a.writeJSONResponse(w, http.StatusOK, apiCampaign)
 		return
 	}
 
-	apiCampaign := a.convertCampaignToAPI(campaign)
-	a.writeJSONResponse(w, http.StatusOK, apiCampaign)
+	// Fall back to service
+	if a.service != nil {
+		campaign, err := a.service.Get(ctx, campaignId.String())
+		if err != nil {
+			a.logger.WithError(err).WithField("campaign_id", campaignId).Error("failed to get campaign")
+			a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+			return
+		}
+		apiCampaign := a.convertCommonCampaignToAPI(campaign)
+		a.writeJSONResponse(w, http.StatusOK, apiCampaign)
+		return
+	}
+
+	a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Campaign service not available", nil)
 }
 
 // UpdateCampaign updates an existing campaign
@@ -282,30 +343,53 @@ func (a *CampaignAdapter) UpdateCampaign(w http.ResponseWriter, r *http.Request,
 func (a *CampaignAdapter) DeleteCampaign(w http.ResponseWriter, r *http.Request, campaignId generated.CampaignIdParam) {
 	ctx := r.Context()
 
-	// Get campaign to check its status
-	campaign, err := a.repository.FindByID(ctx, campaignId.String())
-	if err != nil {
-		a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+	var campaignID string
+	var isRunning bool
+
+	// Get campaign to check its status - try repository first, then service
+	if a.repository != nil {
+		campaign, err := a.repository.FindByID(ctx, campaignId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+			return
+		}
+		campaignID = campaign.ID
+		isRunning = campaign.Status == campaignTypes.StateActive
+	} else if a.service != nil {
+		campaign, err := a.service.Get(ctx, campaignId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+			return
+		}
+		campaignID = campaign.ID
+		isRunning = campaign.Status == common.CampaignStatusRunning
+	} else {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Campaign service not available", nil)
 		return
 	}
 
 	// Check if campaign can be deleted
-	if campaign.Status == campaignTypes.StateActive {
+	if isRunning {
 		a.writeError(w, http.StatusConflict, "INVALID_STATUS", "Cannot delete running campaign", nil)
 		return
 	}
 
 	// Delete campaign using service
-	if err := a.service.Delete(ctx, campaign.ID); err != nil {
+	if a.service == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Campaign service not available", nil)
+		return
+	}
+
+	if err := a.service.Delete(ctx, campaignID); err != nil {
 		a.logger.WithError(err).Error("failed to delete campaign")
 		a.writeError(w, http.StatusInternalServerError, "DELETE_FAILED", "Failed to delete campaign", err)
 		return
 	}
 
 	// Publish SSE event
-	campaignUUID := uuid.MustParse(campaign.ID)
+	campaignUUID := uuid.MustParse(campaignID)
 	event := sse.NewCampaignEvent("campaign.deleted", campaignUUID, map[string]any{
-		"campaign_id": campaign.ID,
+		"campaign_id": campaignID,
 		"timestamp":   time.Now(),
 	})
 	if err := a.sse.Broadcast(event); err != nil {
@@ -319,37 +403,67 @@ func (a *CampaignAdapter) DeleteCampaign(w http.ResponseWriter, r *http.Request,
 func (a *CampaignAdapter) StartCampaign(w http.ResponseWriter, r *http.Request, campaignId generated.CampaignIdParam) {
 	ctx := r.Context()
 
-	// Get campaign
-	campaign, err := a.repository.FindByID(ctx, campaignId.String())
-	if err != nil {
-		a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+	var campaignID string
+	var isRunning bool
+	var apiCampaign generated.Campaign
+
+	// Get campaign - try repository first, then service
+	if a.repository != nil {
+		campaign, err := a.repository.FindByID(ctx, campaignId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+			return
+		}
+		campaignID = campaign.ID
+		isRunning = campaign.Status == campaignTypes.StateActive
+		apiCampaign = a.convertCampaignToAPI(campaign)
+	} else if a.service != nil {
+		campaign, err := a.service.Get(ctx, campaignId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+			return
+		}
+		campaignID = campaign.ID
+		isRunning = campaign.Status == common.CampaignStatusRunning
+		apiCampaign = a.convertCommonCampaignToAPI(campaign)
+	} else {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Campaign service not available", nil)
 		return
 	}
 
 	// Check if campaign can be started
-	if campaign.Status == campaignTypes.StateActive {
+	if isRunning {
 		a.writeError(w, http.StatusConflict, "ALREADY_RUNNING", "Campaign is already running", nil)
 		return
 	}
 
 	// Start campaign using service
-	if err := a.service.RestartCampaign(ctx, campaign.ID); err != nil {
+	if a.service == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Campaign service not available", nil)
+		return
+	}
+
+	if err := a.service.RestartCampaign(ctx, campaignID); err != nil {
 		a.logger.WithError(err).Error("failed to start campaign")
 		a.writeError(w, http.StatusInternalServerError, "START_FAILED", "Failed to start campaign", err)
 		return
 	}
 
-	// Get updated campaign
-	updatedCampaign, err := a.repository.FindByID(ctx, campaignId.String())
-	if err != nil {
-		a.logger.WithError(err).Warn("failed to get updated campaign after start")
-		updatedCampaign = campaign
+	// Get updated campaign for response
+	if a.repository != nil {
+		updatedCampaign, err := a.repository.FindByID(ctx, campaignId.String())
+		if err == nil {
+			apiCampaign = a.convertCampaignToAPI(updatedCampaign)
+		}
+	} else if a.service != nil {
+		updatedCampaign, err := a.service.Get(ctx, campaignId.String())
+		if err == nil {
+			apiCampaign = a.convertCommonCampaignToAPI(updatedCampaign)
+		}
 	}
 
-	apiCampaign := a.convertCampaignToAPI(updatedCampaign)
-
 	// Publish SSE event
-	campaignUUID := uuid.MustParse(campaign.ID)
+	campaignUUID := uuid.MustParse(campaignID)
 	event := sse.NewCampaignEvent("campaign.started", campaignUUID, map[string]any{
 		"campaign":  apiCampaign,
 		"timestamp": time.Now(),
@@ -371,15 +485,36 @@ func (a *CampaignAdapter) StopCampaign(w http.ResponseWriter, r *http.Request, c
 		req = generated.StopCampaignJSONBody{}
 	}
 
-	// Get campaign
-	campaign, err := a.repository.FindByID(ctx, campaignId.String())
-	if err != nil {
-		a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+	var campaignID string
+	var isRunning bool
+	var apiCampaign generated.Campaign
+
+	// Get campaign - try repository first, then service
+	if a.repository != nil {
+		campaign, err := a.repository.FindByID(ctx, campaignId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+			return
+		}
+		campaignID = campaign.ID
+		isRunning = campaign.Status == campaignTypes.StateActive
+		apiCampaign = a.convertCampaignToAPI(campaign)
+	} else if a.service != nil {
+		campaign, err := a.service.Get(ctx, campaignId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+			return
+		}
+		campaignID = campaign.ID
+		isRunning = campaign.Status == common.CampaignStatusRunning
+		apiCampaign = a.convertCommonCampaignToAPI(campaign)
+	} else {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Campaign service not available", nil)
 		return
 	}
 
 	// Check if campaign is running
-	if campaign.Status != campaignTypes.StateActive {
+	if !isRunning {
 		a.writeError(w, http.StatusConflict, "NOT_RUNNING", "Campaign is not running", nil)
 		return
 	}
@@ -390,25 +525,34 @@ func (a *CampaignAdapter) StopCampaign(w http.ResponseWriter, r *http.Request, c
 	}
 
 	// Stop campaign using service
+	if a.service == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Campaign service not available", nil)
+		return
+	}
+
 	pausedStatus := common.CampaignStatusPaused
 	updates := common.CampaignUpdates{Status: &pausedStatus}
-	if err := a.service.Update(ctx, campaign.ID, updates); err != nil {
+	if err := a.service.Update(ctx, campaignID, updates); err != nil {
 		a.logger.WithError(err).Error("failed to stop campaign")
 		a.writeError(w, http.StatusInternalServerError, "STOP_FAILED", "Failed to stop campaign", err)
 		return
 	}
 
-	// Get updated campaign
-	updatedCampaign, err := a.repository.FindByID(ctx, campaignId.String())
-	if err != nil {
-		a.logger.WithError(err).Warn("failed to get updated campaign after stop")
-		updatedCampaign = campaign
+	// Get updated campaign for response
+	if a.repository != nil {
+		updatedCampaign, err := a.repository.FindByID(ctx, campaignId.String())
+		if err == nil {
+			apiCampaign = a.convertCampaignToAPI(updatedCampaign)
+		}
+	} else if a.service != nil {
+		updatedCampaign, err := a.service.Get(ctx, campaignId.String())
+		if err == nil {
+			apiCampaign = a.convertCommonCampaignToAPI(updatedCampaign)
+		}
 	}
 
-	apiCampaign := a.convertCampaignToAPI(updatedCampaign)
-
 	// Publish SSE event
-	campaignUUID := uuid.MustParse(campaign.ID)
+	campaignUUID := uuid.MustParse(campaignID)
 	event := sse.NewCampaignEvent("campaign.stopped", campaignUUID, map[string]any{
 		"campaign":  apiCampaign,
 		"reason":    reason,
@@ -425,10 +569,31 @@ func (a *CampaignAdapter) StopCampaign(w http.ResponseWriter, r *http.Request, c
 func (a *CampaignAdapter) GetCampaignStats(w http.ResponseWriter, r *http.Request, campaignId generated.CampaignIdParam) {
 	ctx := r.Context()
 
-	// Verify campaign exists
-	campaign, err := a.repository.FindByID(ctx, campaignId.String())
-	if err != nil {
-		a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+	// Verify campaign exists - try repository first, then service
+	var campaign *campaignTypes.Campaign
+	if a.repository != nil {
+		c, err := a.repository.FindByID(ctx, campaignId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+			return
+		}
+		campaign = c
+	} else if a.service != nil {
+		c, err := a.service.Get(ctx, campaignId.String())
+		if err != nil {
+			a.writeError(w, http.StatusNotFound, "CAMPAIGN_NOT_FOUND", "Campaign not found", err)
+			return
+		}
+		// Convert common.Campaign to campaignTypes.Campaign for stats
+		campaign = &campaignTypes.Campaign{
+			ID:          c.ID,
+			Name:        c.Name,
+			Description: c.Description,
+			CreatedAt:   c.CreatedAt,
+			UpdatedAt:   c.UpdatedAt,
+		}
+	} else {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Campaign service not available", nil)
 		return
 	}
 
@@ -574,6 +739,25 @@ func generatedToCampaignStatus(status generated.CampaignStatus) campaignTypes.St
 		return campaignTypes.StateCompleted // Map archived to completed since no archived state
 	default:
 		return campaignTypes.StateDraft
+	}
+}
+
+func generatedToCommonCampaignStatus(status generated.CampaignStatus) common.CampaignStatus {
+	switch status {
+	case "draft":
+		return common.CampaignStatusPending
+	case "active":
+		return common.CampaignStatusRunning
+	case "paused":
+		return common.CampaignStatusPaused
+	case "completed":
+		return common.CampaignStatusCompleted
+	case "cancelled":
+		return common.CampaignStatusCancelled
+	case "archived":
+		return common.CampaignStatusCompleted
+	default:
+		return common.CampaignStatusPending
 	}
 }
 

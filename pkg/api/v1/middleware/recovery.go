@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethpandaops/pandafuzz/pkg/interfaces/api/rest/v1"
+	"github.com/ethpandaops/pandafuzz/pkg/api/v1/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -211,7 +211,7 @@ func defaultRecoveryHandler(w http.ResponseWriter, r *http.Request, info PanicIn
 	}
 
 	// Write error response using RFC 7807 format
-	v1.WriteErrorWithDetails(w, http.StatusInternalServerError, "Internal server error", details)
+	errors.WriteErrorWithDetails(w, http.StatusInternalServerError, "Internal server error", details)
 }
 
 // captureStack captures the current stack trace

@@ -124,6 +124,17 @@ type CoverageResult struct {
 	ExecCount int64     `json:"exec_count" db:"exec_count"` // Total executions
 }
 
+// JobLog represents a single log entry for a job
+type JobLog struct {
+	ID        int64                  `json:"id" db:"id"`
+	JobID     string                 `json:"job_id" db:"job_id"`
+	Level     string                 `json:"level" db:"level"`
+	Source    string                 `json:"source" db:"source"`
+	Message   string                 `json:"message" db:"message"`
+	Timestamp time.Time              `json:"timestamp" db:"timestamp"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty" db:"metadata"`
+}
+
 // Persistent storage structures
 type JobAssignment struct {
 	JobID     string    `json:"job_id" db:"job_id"`

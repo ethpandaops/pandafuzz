@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/ethpandaops/pandafuzz/pkg/api/v1/generated"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
@@ -207,4 +208,73 @@ func (h *Handlers) HandleDeleteCorpusEntry(w http.ResponseWriter, r *http.Reques
 func (h *Handlers) HandleDownloadCorpusFile(w http.ResponseWriter, r *http.Request) {
 	entryId := h.extractCorpusEntryID(r)
 	h.adapter.DownloadCorpusFile(w, r, entryId)
+}
+
+// HandlePromoteCrashToCorpus handles POST /api/v1/corpus/promote
+func (h *Handlers) HandlePromoteCrashToCorpus(w http.ResponseWriter, r *http.Request) {
+	h.adapter.PromoteCrashToCorpus(w, r)
+}
+
+// extractCollectionIDAsUUID extracts collection ID from URL parameters as UUID
+func (h *Handlers) extractCollectionIDAsUUID(r *http.Request) openapi_types.UUID {
+	idStr := chi.URLParam(r, "collectionId")
+	parsedUUID, _ := uuid.Parse(idStr)
+	return openapi_types.UUID(parsedUUID)
+}
+
+// HandleListCorpusCollections handles GET /api/v1/corpus/collections
+func (h *Handlers) HandleListCorpusCollections(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters
+	params := generated.ListCorpusCollectionsParams{}
+
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limit, err := strconv.Atoi(limitStr); err == nil {
+			limitVal := limit
+			params.Limit = &limitVal
+		}
+	}
+
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if offset, err := strconv.Atoi(offsetStr); err == nil {
+			offsetVal := offset
+			params.Offset = &offsetVal
+		}
+	}
+
+	h.adapter.ListCorpusCollections(w, r, params)
+}
+
+// HandleCreateCorpusCollection handles POST /api/v1/corpus/collections
+func (h *Handlers) HandleCreateCorpusCollection(w http.ResponseWriter, r *http.Request) {
+	h.adapter.CreateCorpusCollection(w, r)
+}
+
+// HandleGetCorpusCollection handles GET /api/v1/corpus/collections/{collectionId}
+func (h *Handlers) HandleGetCorpusCollection(w http.ResponseWriter, r *http.Request) {
+	collectionId := h.extractCollectionIDAsUUID(r)
+	h.adapter.GetCorpusCollection(w, r, collectionId)
+}
+
+// HandleUpdateCorpusCollection handles PUT /api/v1/corpus/collections/{collectionId}
+func (h *Handlers) HandleUpdateCorpusCollection(w http.ResponseWriter, r *http.Request) {
+	collectionId := h.extractCollectionIDAsUUID(r)
+	h.adapter.UpdateCorpusCollection(w, r, collectionId)
+}
+
+// HandleDeleteCorpusCollection handles DELETE /api/v1/corpus/collections/{collectionId}
+func (h *Handlers) HandleDeleteCorpusCollection(w http.ResponseWriter, r *http.Request) {
+	collectionId := h.extractCollectionIDAsUUID(r)
+	h.adapter.DeleteCorpusCollection(w, r, collectionId)
+}
+
+// HandleUploadCorpusCollectionFiles handles POST /api/v1/corpus/collections/{collectionId}/upload
+func (h *Handlers) HandleUploadCorpusCollectionFiles(w http.ResponseWriter, r *http.Request) {
+	collectionId := h.extractCollectionIDAsUUID(r)
+	h.adapter.UploadCorpusCollectionFiles(w, r, collectionId)
+}
+
+// HandleListCorpusCollectionFiles handles GET /api/v1/corpus/collections/{collectionId}/files
+func (h *Handlers) HandleListCorpusCollectionFiles(w http.ResponseWriter, r *http.Request) {
+	collectionId := h.extractCollectionIDAsUUID(r)
+	h.adapter.ListCorpusCollectionFiles(w, r, collectionId)
 }

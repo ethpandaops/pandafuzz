@@ -40,25 +40,27 @@ const (
 
 // Re-export sentinel errors
 var (
-	ErrCampaignNotFound     = pkgerrors.ErrCampaignNotFound
-	ErrCampaignRunning      = pkgerrors.ErrCampaignRunning
-	ErrInvalidStackTrace    = pkgerrors.ErrInvalidStackTrace
-	ErrCorpusFileTooLarge   = pkgerrors.ErrCorpusFileTooLarge
-	ErrDuplicateCorpusFile  = pkgerrors.ErrDuplicateCorpusFile
-	ErrCampaignCompleted    = pkgerrors.ErrCampaignCompleted
-	ErrCampaignPaused       = pkgerrors.ErrCampaignPaused
-	ErrNoCampaignJobs       = pkgerrors.ErrNoCampaignJobs
-	ErrInvalidCampaignState = pkgerrors.ErrInvalidCampaignState
-	ErrCrashGroupNotFound   = pkgerrors.ErrCrashGroupNotFound
-	ErrCorpusFileNotFound   = pkgerrors.ErrCorpusFileNotFound
-	ErrBinaryHashMismatch   = pkgerrors.ErrBinaryHashMismatch
-	ErrKeyNotFound          = pkgerrors.ErrKeyNotFound
-	ErrTransactionFail      = pkgerrors.ErrTransactionFail
-	ErrDatabaseClosed       = pkgerrors.ErrDatabaseClosed
-	ErrInvalidConfig        = pkgerrors.ErrInvalidConfig
-	ErrMigrationFailed      = pkgerrors.ErrMigrationFailed
-	ErrBackupFailed         = pkgerrors.ErrBackupFailed
-	ErrRestoreFailed        = pkgerrors.ErrRestoreFailed
+	ErrCampaignNotFound        = pkgerrors.ErrCampaignNotFound
+	ErrCampaignRunning         = pkgerrors.ErrCampaignRunning
+	ErrInvalidStackTrace       = pkgerrors.ErrInvalidStackTrace
+	ErrCorpusFileTooLarge      = pkgerrors.ErrCorpusFileTooLarge
+	ErrDuplicateCorpusFile     = pkgerrors.ErrDuplicateCorpusFile
+	ErrCampaignCompleted       = pkgerrors.ErrCampaignCompleted
+	ErrCampaignPaused          = pkgerrors.ErrCampaignPaused
+	ErrNoCampaignJobs          = pkgerrors.ErrNoCampaignJobs
+	ErrInvalidCampaignState    = pkgerrors.ErrInvalidCampaignState
+	ErrCrashGroupNotFound      = pkgerrors.ErrCrashGroupNotFound
+	ErrCorpusFileNotFound      = pkgerrors.ErrCorpusFileNotFound
+	ErrBinaryHashMismatch      = pkgerrors.ErrBinaryHashMismatch
+	ErrKeyNotFound             = pkgerrors.ErrKeyNotFound
+	ErrTransactionFail         = pkgerrors.ErrTransactionFail
+	ErrDatabaseClosed          = pkgerrors.ErrDatabaseClosed
+	ErrInvalidConfig           = pkgerrors.ErrInvalidConfig
+	ErrMigrationFailed         = pkgerrors.ErrMigrationFailed
+	ErrBackupFailed            = pkgerrors.ErrBackupFailed
+	ErrRestoreFailed           = pkgerrors.ErrRestoreFailed
+	ErrQuarantinedFileNotFound = pkgerrors.ErrQuarantinedFileNotFound
+	ErrDuplicateCrash          = pkgerrors.ErrDuplicateCrash
 )
 
 // Re-export constructor functions

@@ -14,13 +14,10 @@ import (
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	_ "github.com/ethpandaops/pandafuzz/pkg/config"
-	"github.com/ethpandaops/pandafuzz/pkg/interfaces/api/rest/v1"
-	"github.com/ethpandaops/pandafuzz/pkg/interfaces/api/rest/v2"
 	"github.com/ethpandaops/pandafuzz/pkg/master"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
 	"github.com/ethpandaops/pandafuzz/pkg/storage"
 	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
-	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
 
@@ -431,6 +428,10 @@ func initializeDependencies(config *common.MasterConfig, logger *logrus.Logger) 
 	timeoutMgr := master.NewTimeoutManager(state, config, logger)
 	recoveryMgr := master.NewRecoveryManager(state, timeoutMgr, config, logger)
 
+	// Set the storage interface on PersistentState so services can use it
+	// The db (SQLiteStorage) implements common.Storage
+	state.Storage = db.(common.Storage)
+
 	// Create storage backend
 	storageBackend, err := backend.NewStorageBackend(config.Storage, logger)
 	if err != nil {
@@ -520,181 +521,5 @@ func createHTTPServer(config *common.MasterConfig, deps *Dependencies, logger *l
 		ReadTimeout:  config.Server.ReadTimeout,
 		WriteTimeout: config.Server.WriteTimeout,
 		IdleTimeout:  config.Server.IdleTimeout,
-	}
-}
-
-// setupAPIRoutes configures all API routes
-func setupAPIRoutes(router *mux.Router, config *common.MasterConfig, deps *Dependencies, masterServer *master.Server, logger *logrus.Logger) {
-	// Get services from the service manager
-	botService := deps.Services.Bot
-	jobService := deps.Services.Job
-	resultService := deps.Services.Result
-	campaignService := deps.Services.Campaign
-	corpusService := deps.Services.Corpus
-
-	// Get storage from state adapter
-	storage := deps.StateAdapter.GetStorage()
-	if storage == nil {
-		// Fallback: try to get storage directly from the database
-		if storageDB, ok := deps.Database.(common.Storage); ok {
-			storage = storageDB
-		}
-	}
-
-	// API v1 routes using new package structure
-	apiV1 := router.PathPrefix("/api/v1").Subrouter()
-	v1Router := v1.NewRouter(&v1.RouterConfig{
-		BotService:      botService,
-		JobService:      jobService,
-		ResultService:   resultService,
-		CampaignService: campaignService,
-		CorpusService:   corpusService,
-		Storage:         storage,
-		Logger:          logger,
-		EnableCORS:      config.Server.EnableCORS,
-		EnableMetrics:   config.Monitoring.MetricsEnabled,
-		EnableRateLimit: config.Server.RateLimitRPS > 0,
-		RateLimitRPS:    config.Server.RateLimitRPS,
-	})
-	v1Router.SetupRoutes(apiV1)
-
-	// API v2 routes (temporarily stubbed)
-	apiV2 := router.PathPrefix("/api/v2").Subrouter()
-	v2Router := v2.NewRouter(&v2.RouterConfig{
-		Logger: logger,
-	})
-	v2Router.SetupRoutes(apiV2)
-
-	// Legacy routes that haven't been migrated yet
-	// The master server still handles some routes directly
-	// These will be gradually migrated to the new structure
-}
-
-// Middleware functions
-
-func loggingMiddleware(logger *logrus.Logger) mux.MiddlewareFunc {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-
-			// Wrap ResponseWriter to capture status code
-			wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
-
-			next.ServeHTTP(wrapped, r)
-
-			logger.WithFields(logrus.Fields{
-				"method":     r.Method,
-				"path":       r.URL.Path,
-				"status":     wrapped.statusCode,
-				"duration":   time.Since(start),
-				"remote":     r.RemoteAddr,
-				"user_agent": r.UserAgent(),
-			}).Info("HTTP request")
-		})
-	}
-}
-
-func recoveryMiddleware(logger *logrus.Logger) mux.MiddlewareFunc {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
-				if err := recover(); err != nil {
-					logger.WithFields(logrus.Fields{
-						"error":  err,
-						"method": r.Method,
-						"path":   r.URL.Path,
-					}).Error("Panic recovered")
-
-					http.Error(w, "Internal server error", http.StatusInternalServerError)
-				}
-			}()
-
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-func metricsMiddleware() mux.MiddlewareFunc {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Basic metrics tracking
-			// In a full implementation, this would integrate with Prometheus
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-func corsMiddleware() mux.MiddlewareFunc {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-			if r.Method == "OPTIONS" {
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-// responseWriter wraps http.ResponseWriter to capture status code
-type responseWriter struct {
-	http.ResponseWriter
-	statusCode int
-}
-
-func (rw *responseWriter) WriteHeader(code int) {
-	rw.statusCode = code
-	rw.ResponseWriter.WriteHeader(code)
-}
-
-// Handler functions
-
-func handleHealth(deps *Dependencies) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-
-		// Check database health
-		if err := deps.Database.Ping(ctx); err != nil {
-			http.Error(w, "Database unhealthy", http.StatusServiceUnavailable)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"healthy"}`))
-	}
-}
-
-func handleStatus(deps *Dependencies, versionInfo *common.VersionInfo) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		status := map[string]interface{}{
-			"status":     "running",
-			"version":    versionInfo.Version,
-			"build_time": versionInfo.BuildTime,
-			"git_commit": versionInfo.GitCommit,
-			"uptime":     time.Since(time.Now()).String(), // This would need to track actual start time
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-
-		// Simple JSON encoding
-		fmt.Fprintf(w, `{"status":"%s","version":"%s","build_time":"%s","git_commit":"%s"}`,
-			status["status"], status["version"], status["build_time"], status["git_commit"])
-	}
-}
-
-func handleMetrics() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Basic metrics endpoint
-		// In a full implementation, this would return Prometheus metrics
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("# Basic metrics\n"))
 	}
 }

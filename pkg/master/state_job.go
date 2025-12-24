@@ -12,6 +12,48 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// parseFlexibleTimestamp parses timestamps in multiple formats:
+// - RFC3339 format (2006-01-02T15:04:05Z07:00) - Go's standard format
+// - SQLite format with space (2006-01-02 15:04:05.999999999-07:00) - SQLite's default format
+// - SQLite format with space and Z (2006-01-02 15:04:05Z) - SQLite UTC format
+func parseFlexibleTimestamp(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, fmt.Errorf("empty timestamp string")
+	}
+
+	// Try RFC3339 first (most common for JSON)
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+
+	// Try RFC3339Nano
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, nil
+	}
+
+	// Try SQLite's space-separated format with timezone
+	if t, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", s); err == nil {
+		return t, nil
+	}
+
+	// Try SQLite's space-separated format with Z suffix
+	if t, err := time.Parse("2006-01-02 15:04:05.999999999Z", s); err == nil {
+		return t, nil
+	}
+
+	// Try SQLite's space-separated format with +00:00
+	if t, err := time.Parse("2006-01-02 15:04:05.999999999+00:00", s); err == nil {
+		return t, nil
+	}
+
+	// Try SQLite's simple datetime format
+	if t, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
+		return t, nil
+	}
+
+	return time.Time{}, fmt.Errorf("unable to parse timestamp: %s", s)
+}
+
 // Job operations with retry logic
 
 // SaveJobWithRetry persists a job to database with retry logic
@@ -266,11 +308,12 @@ func (ps *PersistentState) ListJobsSorted(ctx context.Context, sortBy string, so
 			job.Progress = int(progress)
 		}
 
-		// Parse time fields
+		// Parse time fields using flexible timestamp parser to handle both
+		// RFC3339 and SQLite's space-separated format
 		if createdAt, ok := row["created_at"].(time.Time); ok {
 			job.CreatedAt = createdAt
 		} else if createdAt, ok := row["created_at"].(string); ok {
-			if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+			if t, err := parseFlexibleTimestamp(createdAt); err == nil {
 				job.CreatedAt = t
 			}
 		}
@@ -278,7 +321,7 @@ func (ps *PersistentState) ListJobsSorted(ctx context.Context, sortBy string, so
 		if startedAt, ok := row["started_at"].(time.Time); ok {
 			job.StartedAt = &startedAt
 		} else if startedAt, ok := row["started_at"].(string); ok && startedAt != "" {
-			if t, err := time.Parse(time.RFC3339, startedAt); err == nil {
+			if t, err := parseFlexibleTimestamp(startedAt); err == nil {
 				job.StartedAt = &t
 			}
 		}
@@ -286,7 +329,7 @@ func (ps *PersistentState) ListJobsSorted(ctx context.Context, sortBy string, so
 		if completedAt, ok := row["completed_at"].(time.Time); ok {
 			job.CompletedAt = &completedAt
 		} else if completedAt, ok := row["completed_at"].(string); ok && completedAt != "" {
-			if t, err := time.Parse(time.RFC3339, completedAt); err == nil {
+			if t, err := parseFlexibleTimestamp(completedAt); err == nil {
 				job.CompletedAt = &t
 			}
 		}
@@ -294,7 +337,7 @@ func (ps *PersistentState) ListJobsSorted(ctx context.Context, sortBy string, so
 		if timeoutAt, ok := row["timeout_at"].(time.Time); ok {
 			job.TimeoutAt = timeoutAt
 		} else if timeoutAt, ok := row["timeout_at"].(string); ok {
-			if t, err := time.Parse(time.RFC3339, timeoutAt); err == nil {
+			if t, err := parseFlexibleTimestamp(timeoutAt); err == nil {
 				job.TimeoutAt = t
 			}
 		}

@@ -6,11 +6,16 @@ export interface Bot {
   hostname: string;
   status: BotStatus;
   capabilities: string[];
-  current_job?: string;
-  last_seen: string;
+  current_job_id?: string | null;
+  last_heartbeat: string;
   registered_at: string;
-  ip: string;
-  failure_count: number;
+  api_endpoint?: string;
+  is_online: boolean;
+  // Legacy fields for backward compatibility
+  current_job?: string;
+  last_seen?: string;
+  ip?: string;
+  failure_count?: number;
 }
 
 export enum BotStatus {

@@ -372,6 +372,7 @@ func setupWorkingDirectory(workDir string, resources common.BotResourceConfig, l
 		"coverage",
 		"logs",
 		"temp",
+		"binaries",
 	}
 
 	for _, subdir := range subdirs {

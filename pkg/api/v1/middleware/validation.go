@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ethpandaops/pandafuzz/pkg/interfaces/api/rest/v1"
+	"github.com/ethpandaops/pandafuzz/pkg/api/v1/errors"
 	"github.com/go-playground/validator/v10"
 	"github.com/sirupsen/logrus"
 )
@@ -60,9 +60,10 @@ type RequestValidator struct {
 // DefaultValidationConfig returns a default validation configuration
 func DefaultValidationConfig() ValidationConfig {
 	return ValidationConfig{
-		MaxRequestSize: 10 * 1024 * 1024, // 10MB
+		MaxRequestSize: 100 * 1024 * 1024, // 100MB to allow binary uploads
 		RequiredContentTypes: []string{
 			"application/json",
+			"application/octet-stream",
 			"application/x-www-form-urlencoded",
 			"multipart/form-data",
 		},
@@ -143,7 +144,7 @@ func ValidateRequestWithConfig(config ValidationConfig) func(http.Handler) http.
 					"max_size":       config.MaxRequestSize,
 				}).Warn("Request body too large")
 
-				v1.WriteErrorWithDetails(w, http.StatusRequestEntityTooLarge, "Request body too large", map[string]interface{}{
+				errors.WriteErrorWithDetails(w, http.StatusRequestEntityTooLarge, "Request body too large", map[string]interface{}{
 					"max_size_bytes": config.MaxRequestSize,
 					"received_bytes": r.ContentLength,
 				})
@@ -160,7 +161,7 @@ func ValidateRequestWithConfig(config ValidationConfig) func(http.Handler) http.
 						"allowed":      config.RequiredContentTypes,
 					}).Warn("Invalid content type")
 
-					v1.WriteErrorWithDetails(w, http.StatusUnsupportedMediaType, "Unsupported content type", map[string]interface{}{
+					errors.WriteErrorWithDetails(w, http.StatusUnsupportedMediaType, "Unsupported content type", map[string]interface{}{
 						"received":      contentType,
 						"allowed_types": config.RequiredContentTypes,
 					})
@@ -169,27 +170,27 @@ func ValidateRequestWithConfig(config ValidationConfig) func(http.Handler) http.
 			}
 
 			// Validate query parameters
-			if errors := validator.validateQueryParams(r); len(errors) > 0 {
+			if validationErrs := validator.validateQueryParams(r); len(validationErrs) > 0 {
 				config.Logger.WithFields(logrus.Fields{
 					"path":   r.URL.Path,
-					"errors": errors,
+					"errors": validationErrs,
 				}).Warn("Query parameter validation failed")
 
-				v1.WriteErrorWithDetails(w, http.StatusBadRequest, "Invalid query parameters", map[string]interface{}{
-					"validation_errors": errors,
+				errors.WriteErrorWithDetails(w, http.StatusBadRequest, "Invalid query parameters", map[string]interface{}{
+					"validation_errors": validationErrs,
 				})
 				return
 			}
 
 			// Validate path parameters
-			if errors := validator.validatePathParams(r); len(errors) > 0 {
+			if validationErrs := validator.validatePathParams(r); len(validationErrs) > 0 {
 				config.Logger.WithFields(logrus.Fields{
 					"path":   r.URL.Path,
-					"errors": errors,
+					"errors": validationErrs,
 				}).Warn("Path parameter validation failed")
 
-				v1.WriteErrorWithDetails(w, http.StatusBadRequest, "Invalid path parameters", map[string]interface{}{
-					"validation_errors": errors,
+				errors.WriteErrorWithDetails(w, http.StatusBadRequest, "Invalid path parameters", map[string]interface{}{
+					"validation_errors": validationErrs,
 				})
 				return
 			}
@@ -213,7 +214,7 @@ func (rv *RequestValidator) validateJSONBody(w http.ResponseWriter, r *http.Requ
 	body, err := io.ReadAll(io.LimitReader(r.Body, rv.config.MaxRequestSize))
 	if err != nil {
 		rv.config.Logger.WithError(err).Error("Failed to read request body")
-		v1.WriteError(w, http.StatusBadRequest, "Failed to read request body")
+		errors.WriteErrorSimple(w, http.StatusBadRequest, "Failed to read request body")
 		return err
 	}
 
@@ -247,7 +248,7 @@ func (rv *RequestValidator) validateJSONBody(w http.ResponseWriter, r *http.Requ
 			}
 		}
 
-		v1.WriteErrorWithDetails(w, http.StatusBadRequest, "Invalid JSON format", details)
+		errors.WriteErrorWithDetails(w, http.StatusBadRequest, "Invalid JSON format", details)
 		return err
 	}
 
@@ -255,7 +256,7 @@ func (rv *RequestValidator) validateJSONBody(w http.ResponseWriter, r *http.Requ
 	if rv.config.StrictMode {
 		if err := rv.validateJSONStructure(jsonData); err != nil {
 			rv.config.Logger.WithError(err).Warn("JSON structure validation failed")
-			v1.WriteErrorWithDetails(w, http.StatusBadRequest, "Invalid JSON structure", map[string]interface{}{
+			errors.WriteErrorWithDetails(w, http.StatusBadRequest, "Invalid JSON structure", map[string]interface{}{
 				"validation_errors": err.Error(),
 			})
 			return err

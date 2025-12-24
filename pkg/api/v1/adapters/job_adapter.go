@@ -1,10 +1,13 @@
 package adapters
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -23,11 +26,13 @@ import (
 
 // JobAdapter implements the job-related endpoints of the generated ServerInterface
 type JobAdapter struct {
-	repository jobRepo.JobRepository
-	executor   executor.Executor
-	jobService service.JobService
-	sse        *sse.Manager
-	logger     logrus.FieldLogger
+	repository  jobRepo.JobRepository
+	executor    executor.Executor
+	jobService  service.JobService
+	storage     common.Storage
+	fileStorage common.FileStorage
+	sse         *sse.Manager
+	logger      logrus.FieldLogger
 }
 
 // NewJobAdapter creates a new job adapter
@@ -35,16 +40,25 @@ func NewJobAdapter(
 	repository jobRepo.JobRepository,
 	executor executor.Executor,
 	jobService service.JobService,
+	storage common.Storage,
+	fileStorage common.FileStorage,
 	sse *sse.Manager,
 	logger logrus.FieldLogger,
 ) *JobAdapter {
 	return &JobAdapter{
-		repository: repository,
-		executor:   executor,
-		jobService: jobService,
-		sse:        sse,
-		logger:     logger.WithField("component", "job_adapter"),
+		repository:  repository,
+		executor:    executor,
+		jobService:  jobService,
+		storage:     storage,
+		fileStorage: fileStorage,
+		sse:         sse,
+		logger:      logger.WithField("component", "job_adapter"),
 	}
+}
+
+// SetStorage sets the storage backend for the adapter
+func (a *JobAdapter) SetStorage(storage common.Storage) {
+	a.storage = storage
 }
 
 // ListJobs retrieves jobs with filtering and pagination
@@ -531,6 +545,166 @@ func (a *JobAdapter) GetJobLogs(w http.ResponseWriter, r *http.Request, jobId ge
 	a.writeJSONResponse(w, http.StatusOK, response)
 }
 
+// PushJobLogs receives log data from bots and stores it
+func (a *JobAdapter) PushJobLogs(w http.ResponseWriter, r *http.Request, jobId string) {
+	ctx := r.Context()
+
+	if a.storage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Storage not configured", nil)
+		return
+	}
+
+	// Read the raw log content from the request body
+	body, err := readRequestBody(r, 10*1024*1024) // 10MB max
+	if err != nil {
+		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Failed to read log content", err)
+		return
+	}
+
+	// Parse the log content - each line is a log entry
+	// Format: TIMESTAMP level=LEVEL source=SOURCE msg="MESSAGE"
+	// Or simpler format: [TIMESTAMP] [LEVEL] [SOURCE] MESSAGE
+	lines := strings.Split(string(body), "\n")
+	logs := make([]*common.JobLog, 0, len(lines))
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		log := parseLogLine(line)
+		if log != nil {
+			log.JobID = jobId
+			logs = append(logs, log)
+		}
+	}
+
+	if len(logs) == 0 {
+		a.writeError(w, http.StatusBadRequest, "INVALID_CONTENT", "No valid log entries found", nil)
+		return
+	}
+
+	// Store logs in database
+	if err := a.storage.StoreJobLogs(ctx, jobId, logs); err != nil {
+		a.writeError(w, http.StatusInternalServerError, "STORAGE_ERROR", "Failed to store logs", err)
+		return
+	}
+
+	a.logger.WithFields(logrus.Fields{
+		"job_id":    jobId,
+		"log_count": len(logs),
+	}).Info("Stored job logs from bot")
+
+	// Return success response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "success",
+		"log_count": len(logs),
+	})
+}
+
+// parseLogLine parses a single log line into a JobLog
+func parseLogLine(line string) *common.JobLog {
+	// Try to parse different log formats
+	log := &common.JobLog{
+		Timestamp: time.Now(),
+	}
+
+	// Format 1: TIMESTAMP level=LEVEL source=SOURCE msg="MESSAGE"
+	if strings.Contains(line, "level=") && strings.Contains(line, "msg=") {
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) >= 1 {
+			// Try to parse timestamp
+			if t, err := time.Parse(time.RFC3339, parts[0]); err == nil {
+				log.Timestamp = t
+			}
+		}
+
+		// Parse key=value pairs
+		if idx := strings.Index(line, "level="); idx >= 0 {
+			rest := line[idx+6:]
+			if spaceIdx := strings.IndexAny(rest, " \t"); spaceIdx > 0 {
+				log.Level = rest[:spaceIdx]
+			} else {
+				log.Level = rest
+			}
+		}
+
+		if idx := strings.Index(line, "source="); idx >= 0 {
+			rest := line[idx+7:]
+			if spaceIdx := strings.IndexAny(rest, " \t"); spaceIdx > 0 {
+				log.Source = rest[:spaceIdx]
+			} else {
+				log.Source = rest
+			}
+		}
+
+		if idx := strings.Index(line, "msg=\""); idx >= 0 {
+			rest := line[idx+5:]
+			if endIdx := strings.Index(rest, "\""); endIdx > 0 {
+				log.Message = rest[:endIdx]
+			} else {
+				log.Message = rest
+			}
+		} else if idx := strings.Index(line, "msg="); idx >= 0 {
+			log.Message = line[idx+4:]
+		}
+
+		return log
+	}
+
+	// Format 2: [TIMESTAMP] [LEVEL] [SOURCE] MESSAGE
+	if strings.HasPrefix(line, "[") {
+		// Parse bracket-delimited format
+		parts := strings.SplitN(line, "]", 4)
+		if len(parts) >= 4 {
+			if t, err := time.Parse("2006-01-02T15:04:05", strings.TrimPrefix(parts[0], "[")); err == nil {
+				log.Timestamp = t
+			}
+			log.Level = strings.TrimPrefix(strings.TrimSpace(parts[1]), "[")
+			log.Source = strings.TrimPrefix(strings.TrimSpace(parts[2]), "[")
+			log.Message = strings.TrimSpace(parts[3])
+			return log
+		}
+	}
+
+	// Format 3: Simple text - treat entire line as message
+	log.Level = "info"
+	log.Source = "unknown"
+	log.Message = line
+	return log
+}
+
+// readRequestBody reads the request body with a size limit
+func readRequestBody(r *http.Request, maxSize int64) ([]byte, error) {
+	if r.ContentLength > maxSize {
+		return nil, fmt.Errorf("request body too large: %d > %d", r.ContentLength, maxSize)
+	}
+
+	// Create a limited reader
+	limitedReader := http.MaxBytesReader(nil, r.Body, maxSize)
+	defer r.Body.Close()
+
+	body := make([]byte, 0, r.ContentLength)
+	buf := make([]byte, 4096)
+	for {
+		n, err := limitedReader.Read(buf)
+		if n > 0 {
+			body = append(body, buf[:n]...)
+		}
+		if err != nil {
+			if err.Error() == "http: request body too large" {
+				return nil, fmt.Errorf("request body too large")
+			}
+			break
+		}
+	}
+
+	return body, nil
+}
+
 // GetJobCoverage retrieves job coverage reports
 func (a *JobAdapter) GetJobCoverage(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam, params generated.GetJobCoverageParams) {
 	ctx := r.Context()
@@ -780,29 +954,45 @@ func (a *JobAdapter) getJobLogs(ctx context.Context, jobID string, params genera
 	Source    *string                            `json:"source,omitempty"`
 	Timestamp time.Time                          `json:"timestamp"`
 } {
-	// Mock implementation - in reality, this would fetch from log storage
-	logs := []struct {
+	// Define the result type matching the return signature
+	type logEntry = struct {
 		Level     generated.JobLogsResponseLogsLevel `json:"level"`
 		Message   string                             `json:"message"`
 		Metadata  *map[string]interface{}            `json:"metadata,omitempty"`
 		Source    *string                            `json:"source,omitempty"`
 		Timestamp time.Time                          `json:"timestamp"`
-	}{
-		{
-			Level:     "info",
-			Message:   fmt.Sprintf("Job %s started", jobID),
-			Source:    &[]string{"job_manager"}[0],
-			Timestamp: time.Now().Add(-5 * time.Minute),
-		},
-		{
-			Level:     "info",
-			Message:   "Fuzzing in progress...",
-			Source:    &[]string{"fuzzer"}[0],
-			Timestamp: time.Now().Add(-2 * time.Minute),
-		},
 	}
 
-	return logs
+	// Try to fetch from real storage
+	if a.storage != nil {
+		limit := 1000
+		offset := 0
+		storedLogs, _, err := a.storage.GetJobLogs(ctx, jobID, limit, offset)
+		if err == nil && len(storedLogs) > 0 {
+			logs := make([]logEntry, 0, len(storedLogs))
+			for _, log := range storedLogs {
+				entry := logEntry{
+					Level:     generated.JobLogsResponseLogsLevel(log.Level),
+					Message:   log.Message,
+					Timestamp: log.Timestamp,
+				}
+				if log.Source != "" {
+					source := log.Source
+					entry.Source = &source
+				}
+				if log.Metadata != nil {
+					meta := log.Metadata
+					entry.Metadata = &meta
+				}
+				logs = append(logs, entry)
+			}
+			return logs
+		}
+	}
+
+	// Fallback to empty response if no logs found
+	// Return empty slice (not nil) so JSON serializes to [] instead of null
+	return []logEntry{}
 }
 
 func (a *JobAdapter) getCoverageReports(ctx context.Context, jobID string, params generated.GetJobCoverageParams) []generated.CoverageReport {
@@ -1206,24 +1396,48 @@ func (a *JobAdapter) GetJobCrashes(w http.ResponseWriter, r *http.Request, jobId
 		}
 	}
 
-	// Return mock data - in production, this would fetch from crash repository
-	crashes := []map[string]interface{}{
-		{
-			"id":            uuid.New().String(),
-			"job_id":        jobId.String(),
-			"type":          "segfault",
-			"signal":        11,
-			"hash":          "abc123",
-			"discovered_at": time.Now().Add(-30 * time.Minute),
-			"is_unique":     true,
-		},
+	// Fetch crashes from storage
+	var crashes []map[string]interface{}
+	if a.storage != nil {
+		storedCrashes, err := a.storage.ListCrashes(ctx, jobId.String(), 100, 0)
+		if err != nil {
+			a.logger.WithError(err).Error("Failed to list crashes from storage")
+			// Continue with empty list rather than failing
+		} else {
+			for _, crash := range storedCrashes {
+				crashMap := map[string]interface{}{
+					"id":            crash.ID,
+					"job_id":        crash.JobID,
+					"type":          crash.Type,
+					"signal":        crash.Signal,
+					"hash":          crash.Hash,
+					"discovered_at": crash.Timestamp,
+					"is_unique":     crash.IsUnique,
+				}
+				if crash.ExitCode != 0 {
+					crashMap["exit_code"] = crash.ExitCode
+				}
+				if crash.FilePath != "" {
+					crashMap["file_path"] = crash.FilePath
+				}
+				crashes = append(crashes, crashMap)
+			}
+		}
+	}
+
+	// Count unique crashes
+	uniqueCount := 0
+	for _, c := range crashes {
+		if isUnique, ok := c["is_unique"].(bool); ok && isUnique {
+			uniqueCount++
+		}
 	}
 
 	response := map[string]interface{}{
 		"job_id":       jobId.String(),
 		"crashes":      crashes,
 		"total_count":  len(crashes),
-		"unique_count": len(crashes),
+		"unique_count": uniqueCount,
 		"timestamp":    time.Now(),
 	}
 
@@ -1304,4 +1518,390 @@ func (a *JobAdapter) convertCommonJobToAPI(job *common.Job) generated.Job {
 	apiJob.EnableCoverage = &enableCoverage
 
 	return apiJob
+}
+
+// DownloadJobBinary handles downloading the binary for a job
+// The bot calls this endpoint to download the fuzz target binary before executing the job
+func (a *JobAdapter) DownloadJobBinary(w http.ResponseWriter, r *http.Request, jobID string) {
+	ctx := r.Context()
+
+	a.logger.WithFields(logrus.Fields{
+		"job_id": jobID,
+	}).Info("Binary download requested")
+
+	// Check if file storage is configured
+	if a.fileStorage == nil {
+		a.logger.Error("File storage not configured for binary download")
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "File storage not configured", nil)
+		return
+	}
+
+	// Get the job to find the target binary path
+	var targetBinary string
+	if a.repository != nil {
+		job, err := a.repository.Get(ctx, jobID)
+		if err != nil {
+			a.logger.WithError(err).WithField("job_id", jobID).Error("Failed to get job")
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
+		targetBinary = job.TargetBinary
+	} else if a.jobService != nil {
+		job, err := a.jobService.GetJob(ctx, jobID)
+		if err != nil {
+			a.logger.WithError(err).WithField("job_id", jobID).Error("Failed to get job")
+			a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+			return
+		}
+		// common.Job uses Target field instead of TargetBinary
+		targetBinary = job.Target
+	} else {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Job service not configured", nil)
+		return
+	}
+
+	if targetBinary == "" {
+		a.logger.WithField("job_id", jobID).Error("Job has no target binary specified")
+		a.writeError(w, http.StatusBadRequest, "NO_TARGET_BINARY", "Job has no target binary specified", nil)
+		return
+	}
+
+	// Convert the target binary path to storage path
+	// Bot expects: /app/work/binaries/fuzz_target
+	// Master stores at: binaries/fuzz_target (relative to storage base path)
+	// We need to extract just the filename or relative path within binaries/
+	storagePath := extractBinaryStoragePath(targetBinary)
+
+	a.logger.WithFields(logrus.Fields{
+		"job_id":        jobID,
+		"target_binary": targetBinary,
+		"storage_path":  storagePath,
+	}).Debug("Attempting to read binary from storage")
+
+	// Read the binary from storage
+	data, err := a.fileStorage.ReadFile(ctx, storagePath)
+	if err != nil {
+		a.logger.WithError(err).WithFields(logrus.Fields{
+			"job_id":        jobID,
+			"storage_path":  storagePath,
+			"target_binary": targetBinary,
+		}).Error("Failed to read binary from storage")
+		a.writeError(w, http.StatusNotFound, "BINARY_NOT_FOUND", "Binary file not found in storage", err)
+		return
+	}
+
+	// Get the filename for Content-Disposition header
+	filename := filepath.Base(targetBinary)
+
+	a.logger.WithFields(logrus.Fields{
+		"job_id":   jobID,
+		"filename": filename,
+		"size":     len(data),
+	}).Info("Binary download successful")
+
+	// Set response headers
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.WriteHeader(http.StatusOK)
+
+	// Write the binary data
+	if _, err := w.Write(data); err != nil {
+		a.logger.WithError(err).Error("Failed to write binary to response")
+	}
+}
+
+// extractBinaryStoragePath converts a target binary path to a storage-relative path
+// Examples:
+//   - /app/work/binaries/fuzz_target -> binaries/fuzz_target
+//   - binaries/fuzz_target -> binaries/fuzz_target
+//   - /app/data/binaries/fuzz_target -> binaries/fuzz_target
+//   - fuzz_target -> binaries/fuzz_target
+func extractBinaryStoragePath(targetBinary string) string {
+	// Common prefixes to strip
+	prefixes := []string{
+		"/app/work/binaries/",
+		"/app/data/binaries/",
+		"/app/work/",
+		"/app/data/",
+	}
+
+	path := targetBinary
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(path, prefix) {
+			path = strings.TrimPrefix(path, prefix)
+			break
+		}
+	}
+
+	// If the path already starts with "binaries/", keep it
+	if strings.HasPrefix(path, "binaries/") {
+		return path
+	}
+
+	// Otherwise, prepend "binaries/"
+	return filepath.Join("binaries", path)
+}
+
+// UploadBinary handles uploading a binary file to storage
+// This allows test scripts and external tools to upload fuzz targets
+func (a *JobAdapter) UploadBinary(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Check if file storage is configured
+	if a.fileStorage == nil {
+		a.logger.Error("File storage not configured for binary upload")
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "File storage not configured", nil)
+		return
+	}
+
+	// Get the binary name from query parameter or form field
+	binaryName := r.URL.Query().Get("name")
+	if binaryName == "" {
+		binaryName = r.FormValue("name")
+	}
+	if binaryName == "" {
+		a.writeError(w, http.StatusBadRequest, "MISSING_NAME", "Binary name is required (use 'name' query parameter or form field)", nil)
+		return
+	}
+
+	// Sanitize the binary name to prevent path traversal
+	binaryName = filepath.Base(binaryName)
+	if binaryName == "." || binaryName == ".." {
+		a.writeError(w, http.StatusBadRequest, "INVALID_NAME", "Invalid binary name", nil)
+		return
+	}
+
+	// Read the binary data from request body
+	data, err := readRequestBody(r, 100*1024*1024) // 100MB max
+	if err != nil {
+		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Failed to read binary data", err)
+		return
+	}
+
+	if len(data) == 0 {
+		a.writeError(w, http.StatusBadRequest, "EMPTY_BINARY", "Binary data is empty", nil)
+		return
+	}
+
+	// Store the binary in the binaries/ directory
+	storagePath := filepath.Join("binaries", binaryName)
+
+	a.logger.WithFields(logrus.Fields{
+		"binary_name":  binaryName,
+		"storage_path": storagePath,
+		"size":         len(data),
+	}).Info("Uploading binary to storage")
+
+	if err := a.fileStorage.SaveFile(ctx, storagePath, data); err != nil {
+		a.logger.WithError(err).WithField("storage_path", storagePath).Error("Failed to save binary to storage")
+		a.writeError(w, http.StatusInternalServerError, "STORAGE_ERROR", "Failed to save binary", err)
+		return
+	}
+
+	a.logger.WithFields(logrus.Fields{
+		"binary_name":  binaryName,
+		"storage_path": storagePath,
+		"size":         len(data),
+	}).Info("Binary uploaded successfully")
+
+	// Return success response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":       "success",
+		"binary_name":  binaryName,
+		"storage_path": storagePath,
+		"size":         len(data),
+	})
+}
+
+// ListRawCoverage lists available raw coverage files for a job
+func (a *JobAdapter) ListRawCoverage(w http.ResponseWriter, r *http.Request, jobID string) {
+	ctx := r.Context()
+
+	// Verify job exists
+	_, err := a.repository.Get(ctx, jobID)
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+		return
+	}
+
+	// Define the file types available for AFL++
+	fileTypes := []string{"fuzzer_stats", "plot_data", "fuzz_bitmap"}
+
+	// Build response with file info
+	type RawCoverageFile struct {
+		FileType    string `json:"file_type"`
+		Description string `json:"description"`
+		Available   bool   `json:"available"`
+		Path        string `json:"path,omitempty"`
+	}
+
+	files := make([]RawCoverageFile, 0, len(fileTypes))
+	for _, ft := range fileTypes {
+		// Construct the expected path
+		path := filepath.Join("coverage", jobID, ft)
+
+		// Try to check if file exists in storage
+		available := false
+		if a.fileStorage != nil {
+			// Check if the file exists
+			if _, err := a.fileStorage.ReadFile(ctx, path); err == nil {
+				available = true
+			}
+		}
+
+		description := ""
+		switch ft {
+		case "fuzzer_stats":
+			description = "AFL++ statistics and metrics"
+		case "plot_data":
+			description = "Time-series coverage data for plotting"
+		case "fuzz_bitmap":
+			description = "Binary coverage bitmap data"
+		}
+
+		file := RawCoverageFile{
+			FileType:    ft,
+			Description: description,
+			Available:   available,
+		}
+		if available {
+			file.Path = path
+		}
+		files = append(files, file)
+	}
+
+	response := map[string]interface{}{
+		"job_id": jobID,
+		"files":  files,
+	}
+
+	a.writeJSONResponse(w, http.StatusOK, response)
+}
+
+// DownloadRawCoverageFile downloads a specific raw coverage file
+func (a *JobAdapter) DownloadRawCoverageFile(w http.ResponseWriter, r *http.Request, jobID string, fileType string) {
+	ctx := r.Context()
+
+	// Validate file type
+	validTypes := map[string]bool{
+		"fuzzer_stats": true,
+		"plot_data":    true,
+		"fuzz_bitmap":  true,
+	}
+
+	if !validTypes[fileType] {
+		a.writeError(w, http.StatusBadRequest, "INVALID_FILE_TYPE", "Invalid file type. Must be one of: fuzzer_stats, plot_data, fuzz_bitmap", nil)
+		return
+	}
+
+	// Verify job exists
+	_, err := a.repository.Get(ctx, jobID)
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+		return
+	}
+
+	// Construct file path
+	filePath := filepath.Join("coverage", jobID, fileType)
+
+	// Read file from storage
+	if a.fileStorage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "File storage not configured", nil)
+		return
+	}
+
+	data, err := a.fileStorage.ReadFile(ctx, filePath)
+	if err != nil {
+		a.logger.WithError(err).WithFields(logrus.Fields{
+			"job_id":    jobID,
+			"file_type": fileType,
+			"path":      filePath,
+		}).Warn("Raw coverage file not found")
+		a.writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "Coverage file not found", err)
+		return
+	}
+
+	// Set response headers
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s_%s\"", jobID[:8], fileType))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.WriteHeader(http.StatusOK)
+
+	if _, err := w.Write(data); err != nil {
+		a.logger.WithError(err).Error("Failed to write coverage file to response")
+	}
+}
+
+// DownloadRawCoverageZip downloads all raw coverage files as a ZIP archive
+func (a *JobAdapter) DownloadRawCoverageZip(w http.ResponseWriter, r *http.Request, jobID string) {
+	ctx := r.Context()
+
+	// Verify job exists
+	_, err := a.repository.Get(ctx, jobID)
+	if err != nil {
+		a.writeError(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found", err)
+		return
+	}
+
+	if a.fileStorage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "File storage not configured", nil)
+		return
+	}
+
+	// Create ZIP archive in memory
+	var buf bytes.Buffer
+	zipWriter := zip.NewWriter(&buf)
+
+	fileTypes := []string{"fuzzer_stats", "plot_data", "fuzz_bitmap"}
+	filesAdded := 0
+
+	for _, fileType := range fileTypes {
+		filePath := filepath.Join("coverage", jobID, fileType)
+		data, err := a.fileStorage.ReadFile(ctx, filePath)
+		if err != nil {
+			// Skip files that don't exist
+			a.logger.WithError(err).WithFields(logrus.Fields{
+				"job_id":    jobID,
+				"file_type": fileType,
+			}).Debug("Raw coverage file not found, skipping")
+			continue
+		}
+
+		// Add file to ZIP
+		fileWriter, err := zipWriter.Create(fileType)
+		if err != nil {
+			a.logger.WithError(err).Error("Failed to create zip entry")
+			continue
+		}
+
+		if _, err := fileWriter.Write(data); err != nil {
+			a.logger.WithError(err).Error("Failed to write to zip entry")
+			continue
+		}
+
+		filesAdded++
+	}
+
+	if err := zipWriter.Close(); err != nil {
+		a.writeError(w, http.StatusInternalServerError, "ZIP_ERROR", "Failed to create ZIP archive", err)
+		return
+	}
+
+	if filesAdded == 0 {
+		a.writeError(w, http.StatusNotFound, "NO_FILES", "No raw coverage files found for this job", nil)
+		return
+	}
+
+	// Set response headers
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"coverage_%s.zip\"", jobID[:8]))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", buf.Len()))
+	w.WriteHeader(http.StatusOK)
+
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		a.logger.WithError(err).Error("Failed to write ZIP to response")
+	}
 }

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethpandaops/pandafuzz/pkg/interfaces/api/rest/v1"
+	"github.com/ethpandaops/pandafuzz/pkg/api/v1/errors"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
@@ -289,7 +289,7 @@ func RateLimitWithConfig(config RateLimitConfig) func(http.Handler) http.Handler
 				w.Header().Set("X-RateLimit-Remaining", "0")
 				w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(retryAfter).Unix(), 10))
 
-				v1.WriteErrorWithDetails(w, http.StatusTooManyRequests, "Rate limit exceeded", map[string]interface{}{
+				errors.WriteErrorWithDetails(w, http.StatusTooManyRequests, "Rate limit exceeded", map[string]interface{}{
 					"retry_after_seconds": int(retryAfter.Seconds()),
 					"limit_per_second":    config.Rate,
 				})

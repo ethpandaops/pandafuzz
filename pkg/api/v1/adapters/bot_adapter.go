@@ -32,9 +32,6 @@ type BotAdapter struct {
 	logger     logrus.FieldLogger
 }
 
-// Compile-time check to ensure BotAdapter implements part of ServerInterface
-var _ generated.ServerInterface = (*BotAdapter)(nil)
-
 // NewBotAdapter creates a new bot adapter
 func NewBotAdapter(
 	registry *registry.Service,

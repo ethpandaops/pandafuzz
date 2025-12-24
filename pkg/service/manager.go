@@ -55,14 +55,14 @@ func NewManager(
 	collector := monitoringService.GetCollector()
 
 	// Create campaign-related services
-	// Note: These need proper initialization with required dependencies
-	// For now, we'll leave them nil as they need refactoring
 	var campaignService common.CampaignService
 	var corpusService common.CorpusService
 
-	// Initialize corpus service if storage is available
+	// Initialize campaign and corpus services if storage is available
 	if storageProvider, ok := state.(interface{ GetStorage() common.Storage }); ok {
 		if storage := storageProvider.GetStorage(); storage != nil {
+			// Initialize campaign service (jobService can be nil for basic operations)
+			campaignService = NewCampaignService(storage, nil, logger)
 			// Create file storage based on configuration
 			var fileStorage common.FileStorage
 			var corpusDir string

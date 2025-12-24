@@ -96,9 +96,17 @@ func (ps *PersistentState) ProcessCrashResultWithRetry(ctx context.Context, cras
 				crash.Input = nil
 			}
 
-			// Store crash result (without input data)
-			if err := tx.Store(ctx, "crash:"+crash.ID, crash); err != nil {
-				return common.NewDatabaseError("save_crash", err)
+			// Store crash result in the crashes table (not as key-value object)
+			// This ensures ListCrashes can find the crashes properly
+			if sqliteDB, ok := ps.db.(*storage.SQLiteStorage); ok {
+				if err := sqliteDB.CreateCrash(ctx, crash); err != nil {
+					return common.NewDatabaseError("save_crash", err)
+				}
+			} else {
+				// Fallback for other databases - use key-value store
+				if err := tx.Store(ctx, "crash:"+crash.ID, crash); err != nil {
+					return common.NewDatabaseError("save_crash", err)
+				}
 			}
 
 			ps.mu.Lock()

@@ -51,71 +51,16 @@ func NewCrashAdapter(
 	}
 }
 
-// ListCrashes returns a list of crashes
+// ListCrashes returns a list of crashes from the database
 func (a *CrashAdapter) ListCrashes(w http.ResponseWriter, r *http.Request, params generated.ListCrashesParams) {
+	ctx := r.Context()
 	a.logger.Debug("listing crashes")
 
-	// Mock implementation - replace with actual service calls
-	groupId := "group_001"
-	stackTrace := "SEGV at 0x00007fff...\nBacktrace:\n#0 0x00007fff..."
-	metadata1 := generated.Metadata{
-		"fuzzer":     "libfuzzer",
-		"iterations": 1000000,
+	// Extract job ID filter if provided
+	jobID := ""
+	if params.JobId != nil {
+		jobID = params.JobId.String()
 	}
-
-	crashes := []generated.Crash{
-		{
-			Id:             openapi_types.UUID(uuid.New()),
-			JobId:          openapi_types.UUID(uuid.New()),
-			CampaignId:     openapi_types.UUID(uuid.New()),
-			BotId:          openapi_types.UUID(uuid.New()),
-			Hash:           "sha256:crash1234...",
-			InputSizeBytes: 512,
-			StackTrace:     &stackTrace,
-			Signal:         &[]int{11}[0], // SIGSEGV
-			ExitCode:       &[]int{139}[0],
-			DiscoveredAt:   time.Now().Add(-2 * time.Hour),
-			Severity:       generated.CrashSeverityCritical,
-			Type:           generated.CrashTypeSegfault,
-			GroupId:        &groupId,
-			IsUnique:       &[]bool{true}[0],
-			Triaged:        &[]bool{false}[0],
-			Tags:           &[]string{"heap-overflow", "asan"},
-			Metadata:       &metadata1,
-		},
-		{
-			Id:             openapi_types.UUID(uuid.New()),
-			JobId:          openapi_types.UUID(uuid.New()),
-			CampaignId:     openapi_types.UUID(uuid.New()),
-			BotId:          openapi_types.UUID(uuid.New()),
-			Hash:           "sha256:crash5678...",
-			InputSizeBytes: 1024,
-			StackTrace:     &[]string{"Assertion failed: index < size\nBacktrace:\n#0 0x00007fff..."}[0],
-			Signal:         &[]int{6}[0], // SIGABRT
-			ExitCode:       &[]int{134}[0],
-			DiscoveredAt:   time.Now().Add(-1 * time.Hour),
-			Severity:       generated.CrashSeverityHigh,
-			Type:           generated.CrashTypeAssertion,
-			GroupId:        &[]string{"group_002"}[0],
-			IsUnique:       &[]bool{true}[0],
-			Triaged:        &[]bool{true}[0],
-			Tags:           &[]string{"assertion", "bounds-check"},
-		},
-	}
-
-	// Apply filtering
-	filteredCrashes := crashes
-	if params.Severity != nil {
-		filtered := []generated.Crash{}
-		for _, crash := range filteredCrashes {
-			if crash.Severity == *params.Severity {
-				filtered = append(filtered, crash)
-			}
-		}
-		filteredCrashes = filtered
-	}
-
-	// Status filtering removed since Status field doesn't exist in Crash type
 
 	// Apply pagination
 	limit := 10
@@ -127,22 +72,43 @@ func (a *CrashAdapter) ListCrashes(w http.ResponseWriter, r *http.Request, param
 		offset = *params.Offset
 	}
 
-	// Ensure we don't go out of bounds
-	start := offset
-	end := offset + limit
-	if start > len(filteredCrashes) {
-		start = len(filteredCrashes)
-	}
-	if end > len(filteredCrashes) {
-		end = len(filteredCrashes)
+	// Query crashes from storage
+	crashes, err := a.storage.ListCrashes(ctx, jobID, limit, offset)
+	if err != nil {
+		a.logger.WithError(err).Error("failed to list crashes")
+		a.writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to list crashes", err)
+		return
 	}
 
-	paginatedCrashes := filteredCrashes[start:end]
+	// Convert to API types
+	apiCrashes := make([]generated.Crash, 0, len(crashes))
+	for _, crash := range crashes {
+		apiCrash := a.convertToAPICrash(crash)
+
+		// Apply severity filter if specified
+		if params.Severity != nil && apiCrash.Severity != *params.Severity {
+			continue
+		}
+
+		// Apply crash type filter if specified
+		if params.CrashType != nil && apiCrash.Type != *params.CrashType {
+			continue
+		}
+
+		apiCrashes = append(apiCrashes, apiCrash)
+	}
+
+	// Get total count for pagination
+	totalCount, err := a.storage.GetCrashCount(ctx, jobID)
+	if err != nil {
+		a.logger.WithError(err).Warn("failed to get crash count, using list length")
+		totalCount = len(apiCrashes)
+	}
 
 	response := generated.CrashListResponse{
-		Data: paginatedCrashes,
+		Data: apiCrashes,
 		Pagination: generated.Pagination{
-			Total:  len(filteredCrashes),
+			Total:  totalCount,
 			Limit:  limit,
 			Offset: offset,
 		},
@@ -151,42 +117,131 @@ func (a *CrashAdapter) ListCrashes(w http.ResponseWriter, r *http.Request, param
 	a.writeJSONResponse(w, http.StatusOK, response)
 }
 
-// GetCrash retrieves a single crash
+// convertToAPICrash converts a common.CrashResult to generated.Crash
+func (a *CrashAdapter) convertToAPICrash(crash *common.CrashResult) generated.Crash {
+	// Parse UUIDs
+	crashID, _ := uuid.Parse(crash.ID)
+	jobID, _ := uuid.Parse(crash.JobID)
+	botID, _ := uuid.Parse(crash.BotID)
+	campaignID, _ := uuid.Parse(crash.CampaignID)
+
+	// Map crash type string to enum
+	crashType := a.mapCrashType(crash.Type)
+	severity := a.determineSeverity(crash)
+
+	apiCrash := generated.Crash{
+		Id:             openapi_types.UUID(crashID),
+		JobId:          openapi_types.UUID(jobID),
+		BotId:          openapi_types.UUID(botID),
+		CampaignId:     openapi_types.UUID(campaignID),
+		Hash:           crash.Hash,
+		InputSizeBytes: int(crash.Size),
+		DiscoveredAt:   crash.Timestamp,
+		Severity:       severity,
+		Type:           crashType,
+		IsUnique:       &crash.IsUnique,
+	}
+
+	// Optional fields
+	if crash.Signal != 0 {
+		apiCrash.Signal = &crash.Signal
+	}
+	if crash.ExitCode != 0 {
+		apiCrash.ExitCode = &crash.ExitCode
+	}
+	if crash.StackTrace != "" {
+		apiCrash.StackTrace = &crash.StackTrace
+	}
+	if crash.Reproducible {
+		apiCrash.ReproductionInfo = &struct {
+			Environment             *map[string]string `json:"environment,omitempty"`
+			LastReproductionAttempt *time.Time         `json:"last_reproduction_attempt,omitempty"`
+			Reproducible            *bool              `json:"reproducible,omitempty"`
+			ReproductionRate        *float32           `json:"reproduction_rate,omitempty"`
+		}{
+			Reproducible: &crash.Reproducible,
+		}
+	}
+
+	return apiCrash
+}
+
+// mapCrashType maps a crash type string to the API enum
+func (a *CrashAdapter) mapCrashType(crashType string) generated.CrashType {
+	switch strings.ToLower(crashType) {
+	case "segfault", "sigsegv":
+		return generated.CrashTypeSegfault
+	case "abort", "sigabrt":
+		return generated.CrashTypeAbort
+	case "assertion":
+		return generated.CrashTypeAssertion
+	case "timeout":
+		return generated.CrashTypeTimeout
+	case "heap_overflow", "heap-overflow":
+		return generated.CrashTypeHeapOverflow
+	case "stack_overflow", "stack-overflow":
+		return generated.CrashTypeStackOverflow
+	case "use_after_free", "use-after-free":
+		return generated.CrashTypeUseAfterFree
+	case "double_free", "double-free":
+		return generated.CrashTypeDoubleFree
+	case "memory_leak", "memory-leak":
+		return generated.CrashTypeMemoryLeak
+	default:
+		return generated.CrashTypeOther
+	}
+}
+
+// determineSeverity determines crash severity based on crash type and signal
+func (a *CrashAdapter) determineSeverity(crash *common.CrashResult) generated.CrashSeverity {
+	// Critical: memory corruption issues
+	switch strings.ToLower(crash.Type) {
+	case "use_after_free", "use-after-free", "double_free", "double-free", "heap_overflow", "heap-overflow":
+		return generated.CrashSeverityCritical
+	case "stack_overflow", "stack-overflow":
+		return generated.CrashSeverityCritical
+	}
+
+	// High: segfaults and aborts
+	switch crash.Signal {
+	case 11: // SIGSEGV
+		return generated.CrashSeverityHigh
+	case 6: // SIGABRT
+		return generated.CrashSeverityHigh
+	case 8: // SIGFPE
+		return generated.CrashSeverityMedium
+	}
+
+	// Medium: assertions and timeouts
+	switch strings.ToLower(crash.Type) {
+	case "assertion":
+		return generated.CrashSeverityMedium
+	case "timeout":
+		return generated.CrashSeverityLow
+	case "memory_leak", "memory-leak":
+		return generated.CrashSeverityLow
+	}
+
+	return generated.CrashSeverityMedium
+}
+
+// GetCrash retrieves a single crash from the database
 func (a *CrashAdapter) GetCrash(w http.ResponseWriter, r *http.Request, crashId generated.CrashIdParam, params generated.GetCrashParams) {
+	ctx := r.Context()
 	a.logger.WithField("crash_id", crashId).Debug("getting crash")
 
-	// Mock implementation
-	stackTrace := "SEGV at 0x00007fff...\nBacktrace:\n#0 0x00007fff..."
-	groupId := "group_001"
-	metadata := generated.Metadata{
-		"fuzzer":     "libfuzzer",
-		"iterations": 1000000,
+	// Fetch crash from storage
+	crash, err := a.storage.GetCrash(ctx, crashId.String())
+	if err != nil {
+		a.logger.WithError(err).WithField("crash_id", crashId).Error("failed to get crash")
+		a.writeError(w, http.StatusNotFound, "NOT_FOUND", "Crash not found", err)
+		return
 	}
 
-	crash := generated.Crash{
-		Id:             openapi_types.UUID(crashId),
-		JobId:          openapi_types.UUID(uuid.New()),
-		CampaignId:     openapi_types.UUID(uuid.New()),
-		BotId:          openapi_types.UUID(uuid.New()),
-		Hash:           "sha256:crash1234...",
-		InputSizeBytes: 512,
-		StackTrace:     &stackTrace,
-		Signal:         &[]int{11}[0], // SIGSEGV
-		ExitCode:       &[]int{139}[0],
-		DiscoveredAt:   time.Now().Add(-2 * time.Hour),
-		Severity:       generated.CrashSeverityCritical,
-		Type:           generated.CrashTypeSegfault,
-		GroupId:        &groupId,
-		IsUnique:       &[]bool{true}[0],
-		Triaged:        &[]bool{false}[0],
-		Tags:           &[]string{"heap-overflow", "asan"},
-		Metadata:       &metadata,
-	}
+	// Convert to API type
+	apiCrash := a.convertToAPICrash(crash)
 
-	// Analysis feature not available in current generated types
-	// TODO: Re-enable when CrashAnalysis type is added to OpenAPI spec
-
-	a.writeJSONResponse(w, http.StatusOK, crash)
+	a.writeJSONResponse(w, http.StatusOK, apiCrash)
 }
 
 // DeduplicateCrash marks a crash as duplicate
@@ -451,18 +506,40 @@ func generateCrashHash(input string) string {
 
 // GetCrashInput returns the raw input data for a crash (from v3)
 func (a *CrashAdapter) GetCrashInput(w http.ResponseWriter, r *http.Request, crashId generated.CrashIdParam) {
+	ctx := r.Context()
 	a.logger.WithField("crash_id", crashId).Debug("getting crash input")
 
-	// In production, this would fetch from storage
-	// Mock implementation returns sample data
-	inputData := []byte("Mock crash input data for " + crashId.String())
+	// Fetch crash from storage
+	crash, err := a.storage.GetCrash(ctx, crashId.String())
+	if err != nil {
+		a.logger.WithError(err).WithField("crash_id", crashId).Error("failed to get crash")
+		a.writeError(w, http.StatusNotFound, "NOT_FOUND", "Crash not found", err)
+		return
+	}
+
+	// Get input data - either from Input field or from file path
+	var inputData []byte
+	if len(crash.Input) > 0 {
+		inputData = crash.Input
+	} else if crash.InputBase64 != "" {
+		// Decode from base64 if stored that way
+		inputData, err = hex.DecodeString(crash.InputBase64)
+		if err != nil {
+			// Try treating it as raw string if not hex
+			inputData = []byte(crash.InputBase64)
+		}
+	} else {
+		// Return empty response if no input data available
+		inputData = []byte{}
+	}
 
 	// Set headers for binary download
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"crash_%s.bin\"", crashId.String()[:8]))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(inputData)))
 	w.Header().Set("X-Crash-ID", crashId.String())
-	w.Header().Set("X-Crash-Hash", generateCrashHash(string(inputData)))
+	w.Header().Set("X-Crash-Hash", crash.Hash)
+	w.Header().Set("X-Crash-Size", fmt.Sprintf("%d", crash.Size))
 
 	w.WriteHeader(http.StatusOK)
 	w.Write(inputData)

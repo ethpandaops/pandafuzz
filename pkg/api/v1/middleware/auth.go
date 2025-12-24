@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethpandaops/pandafuzz/pkg/interfaces/api/rest/v1"
+	"github.com/ethpandaops/pandafuzz/pkg/api/v1/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -86,13 +86,13 @@ func JWTAuthWithConfig(config AuthConfig) func(http.Handler) http.Handler {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
 				config.Logger.WithField("path", r.URL.Path).Warn("Missing Authorization header")
-				v1.WriteError(w, http.StatusUnauthorized, "Missing Authorization header")
+				errors.WriteErrorSimple(w, http.StatusUnauthorized, "Missing Authorization header")
 				return
 			}
 
 			if !strings.HasPrefix(authHeader, "Bearer ") {
 				config.Logger.WithField("path", r.URL.Path).Warn("Invalid Authorization header format")
-				v1.WriteError(w, http.StatusUnauthorized, "Invalid Authorization header format")
+				errors.WriteErrorSimple(w, http.StatusUnauthorized, "Invalid Authorization header format")
 				return
 			}
 
@@ -103,7 +103,7 @@ func JWTAuthWithConfig(config AuthConfig) func(http.Handler) http.Handler {
 					"path":  r.URL.Path,
 					"error": err.Error(),
 				}).Warn("Invalid JWT token")
-				v1.WriteError(w, http.StatusUnauthorized, "Invalid or expired token")
+				errors.WriteErrorSimple(w, http.StatusUnauthorized, "Invalid or expired token")
 				return
 			}
 
@@ -114,7 +114,7 @@ func JWTAuthWithConfig(config AuthConfig) func(http.Handler) http.Handler {
 					"expires_at": claims.ExpiresAt,
 					"user_id":    claims.UserID,
 				}).Warn("Expired JWT token")
-				v1.WriteError(w, http.StatusUnauthorized, "Token has expired")
+				errors.WriteErrorSimple(w, http.StatusUnauthorized, "Token has expired")
 				return
 			}
 
@@ -169,13 +169,13 @@ func APIKeyAuthWithConfig(config AuthConfig) func(http.Handler) http.Handler {
 
 			if apiKey == "" {
 				config.Logger.WithField("path", r.URL.Path).Warn("Missing API key")
-				v1.WriteError(w, http.StatusUnauthorized, "Missing API key")
+				errors.WriteErrorSimple(w, http.StatusUnauthorized, "Missing API key")
 				return
 			}
 
 			if config.APIKeyValidator == nil {
 				config.Logger.WithField("path", r.URL.Path).Error("API key validator not configured")
-				v1.WriteError(w, http.StatusInternalServerError, "Authentication not properly configured")
+				errors.WriteErrorSimple(w, http.StatusInternalServerError, "Authentication not properly configured")
 				return
 			}
 
@@ -185,7 +185,7 @@ func APIKeyAuthWithConfig(config AuthConfig) func(http.Handler) http.Handler {
 					"path":  r.URL.Path,
 					"error": err.Error(),
 				}).Warn("Invalid API key")
-				v1.WriteError(w, http.StatusUnauthorized, "Invalid API key")
+				errors.WriteErrorSimple(w, http.StatusUnauthorized, "Invalid API key")
 				return
 			}
 
@@ -244,7 +244,7 @@ func RequirePermissionWithConfig(permission string, logger logrus.FieldLogger) f
 				}).Warn("No authentication context found")
 			}
 
-			v1.WriteErrorWithDetails(w, http.StatusForbidden, "Insufficient permissions", map[string]interface{}{
+			errors.WriteErrorWithDetails(w, http.StatusForbidden, "Insufficient permissions", map[string]interface{}{
 				"required_permission": permission,
 			})
 		})

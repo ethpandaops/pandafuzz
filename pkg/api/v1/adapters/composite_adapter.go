@@ -234,6 +234,21 @@ func (a *CompositeAdapter) GetJobLogs(w http.ResponseWriter, r *http.Request, jo
 	a.jobAdapter.GetJobLogs(w, r, jobId, params)
 }
 
+// PushJobLogs receives log data from bots and stores it
+func (a *CompositeAdapter) PushJobLogs(w http.ResponseWriter, r *http.Request, jobId string) {
+	a.jobAdapter.PushJobLogs(w, r, jobId)
+}
+
+// DownloadJobBinary downloads the binary for a job
+func (a *CompositeAdapter) DownloadJobBinary(w http.ResponseWriter, r *http.Request, jobId string) {
+	a.jobAdapter.DownloadJobBinary(w, r, jobId)
+}
+
+// UploadBinary uploads a binary to storage
+func (a *CompositeAdapter) UploadBinary(w http.ResponseWriter, r *http.Request) {
+	a.jobAdapter.UploadBinary(w, r)
+}
+
 // Event stream endpoint
 func (a *CompositeAdapter) GetEventStream(w http.ResponseWriter, r *http.Request, params generated.GetEventStreamParams) {
 	// Set SSE headers
@@ -575,4 +590,46 @@ func (a *CompositeAdapter) SubmitCoverageResult(w http.ResponseWriter, r *http.R
 
 func (a *CompositeAdapter) SubmitCorpusUpdate(w http.ResponseWriter, r *http.Request) {
 	a.systemAdapter.SubmitCorpusUpdate(w, r)
+}
+
+// Raw coverage endpoints
+func (a *CompositeAdapter) ListRawCoverage(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam) {
+	a.jobAdapter.ListRawCoverage(w, r, jobId.String())
+}
+
+func (a *CompositeAdapter) DownloadRawCoverageFile(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam, fileType string) {
+	a.jobAdapter.DownloadRawCoverageFile(w, r, jobId.String(), fileType)
+}
+
+func (a *CompositeAdapter) DownloadRawCoverageZip(w http.ResponseWriter, r *http.Request, jobId generated.JobIdParam) {
+	a.jobAdapter.DownloadRawCoverageZip(w, r, jobId.String())
+}
+
+// Corpus collection endpoints
+func (a *CompositeAdapter) ListCorpusCollections(w http.ResponseWriter, r *http.Request, params generated.ListCorpusCollectionsParams) {
+	a.corpusAdapter.ListCorpusCollections(w, r, params)
+}
+
+func (a *CompositeAdapter) CreateCorpusCollection(w http.ResponseWriter, r *http.Request) {
+	a.corpusAdapter.CreateCorpusCollection(w, r)
+}
+
+func (a *CompositeAdapter) GetCorpusCollection(w http.ResponseWriter, r *http.Request, collectionId openapi_types.UUID) {
+	a.corpusAdapter.GetCorpusCollection(w, r, collectionId.String())
+}
+
+func (a *CompositeAdapter) UpdateCorpusCollection(w http.ResponseWriter, r *http.Request, collectionId openapi_types.UUID) {
+	a.corpusAdapter.UpdateCorpusCollection(w, r, collectionId.String())
+}
+
+func (a *CompositeAdapter) DeleteCorpusCollection(w http.ResponseWriter, r *http.Request, collectionId openapi_types.UUID) {
+	a.corpusAdapter.DeleteCorpusCollection(w, r, collectionId.String())
+}
+
+func (a *CompositeAdapter) UploadCorpusCollectionFiles(w http.ResponseWriter, r *http.Request, collectionId openapi_types.UUID) {
+	a.corpusAdapter.UploadCorpusCollectionFiles(w, r, collectionId.String())
+}
+
+func (a *CompositeAdapter) ListCorpusCollectionFiles(w http.ResponseWriter, r *http.Request, collectionId openapi_types.UUID) {
+	a.corpusAdapter.ListCorpusCollectionFiles(w, r, collectionId.String())
 }

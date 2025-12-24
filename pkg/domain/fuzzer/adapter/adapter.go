@@ -456,9 +456,19 @@ func (a *FuzzerAdapter) monitorCrashes() {
 				continue
 			}
 
+			a.log.WithFields(logrus.Fields{
+				"crash_id":    crashInfo.ID,
+				"fuzzer_type": crashInfo.FuzzerType,
+			}).Info("Received crash from engine channel")
+
 			// Convert domain crash to common crash
 			crash := a.convertCrash(crashInfo)
 			a.addCrash(crash)
+
+			a.log.WithFields(logrus.Fields{
+				"crash_id":      crash.ID,
+				"total_crashes": len(a.crashes),
+			}).Debug("Added crash to adapter")
 
 			// Notify handler
 			if a.handler != nil {
@@ -511,7 +521,21 @@ func (a *FuzzerAdapter) monitorProgress() {
 }
 
 func (a *FuzzerAdapter) convertConfig(config FuzzConfig) *types.FuzzerConfig {
+	// Determine coverage format - use "lcov" as default for AFL++
+	coverageFormat := ""
+	if config.Coverage != "" {
+		// Check if format is specified in options
+		if fmt, ok := config.FuzzerOptions["coverage_format"].(string); ok && fmt != "" {
+			coverageFormat = fmt
+		} else {
+			// Default to lcov for AFL++/coverage collection
+			coverageFormat = "lcov"
+		}
+	}
+
 	domainConfig := &types.FuzzerConfig{
+		Target:         config.Target,
+		TargetArgs:     config.TargetArgs,
 		Timeout:        config.Timeout,
 		MaxDuration:    config.Duration,
 		MemoryLimit:    uint64(config.MemoryLimit),
@@ -519,8 +543,10 @@ func (a *FuzzerAdapter) convertConfig(config FuzzConfig) *types.FuzzerConfig {
 		SeedCorpus:     config.SeedDirectory,
 		OutputDir:      config.OutputDirectory,
 		EnableCoverage: config.Coverage != "",
-		CoverageFormat: string(config.Coverage),
+		CoverageFormat: coverageFormat,
 		CoverageDir:    config.OutputDirectory,
+		Workers:        1, // Default to 1 worker (required for fuzzer validation)
+		OutputWriter:   config.OutputWriter,
 	}
 
 	// Set fuzzer-specific options based on fuzzer type

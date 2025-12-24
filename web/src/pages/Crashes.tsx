@@ -81,8 +81,8 @@ function Crashes() {
 
   const downloadCrash = async (crash: CrashResult) => {
     try {
-      // Use the new API endpoint to download crash input
-      const response = await fetch(`/api/v1/results/crashes/${crash.id}/input`);
+      // Use the unified API endpoint to download crash input
+      const response = await fetch(`/api/v3/crashes/${crash.id}/input`);
       if (!response.ok) {
         throw new Error('Failed to download crash input');
       }

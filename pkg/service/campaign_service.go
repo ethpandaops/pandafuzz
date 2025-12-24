@@ -209,14 +209,16 @@ func (cs *campaignService) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("cannot delete running campaign")
 	}
 
-	// Cancel all associated jobs
-	jobs, err := cs.storage.GetCampaignJobs(ctx, id)
-	if err == nil {
-		for _, job := range jobs {
-			if job.Status == common.JobStatusRunning || job.Status == common.JobStatusPending {
-				cs.jobService.UpdateJob(ctx, job.ID, map[string]interface{}{
-					"status": common.JobStatusCancelled,
-				})
+	// Cancel all associated jobs (only if jobService is available)
+	if cs.jobService != nil {
+		jobs, err := cs.storage.GetCampaignJobs(ctx, id)
+		if err == nil {
+			for _, job := range jobs {
+				if job.Status == common.JobStatusRunning || job.Status == common.JobStatusPending {
+					cs.jobService.UpdateJob(ctx, job.ID, map[string]interface{}{
+						"status": common.JobStatusCancelled,
+					})
+				}
 			}
 		}
 	}
@@ -293,6 +295,12 @@ func (cs *campaignService) createJobsForCampaign(ctx context.Context, campaign *
 	jobsToCreate := campaign.MaxJobs - activeJobs
 	if jobsToCreate <= 0 {
 		return nil // Already at max jobs
+	}
+
+	// Check if jobService is available
+	if cs.jobService == nil {
+		cs.logger.Warn("Job service not available, cannot create jobs for campaign restart")
+		return fmt.Errorf("job service not available for campaign restart")
 	}
 
 	// Create new jobs

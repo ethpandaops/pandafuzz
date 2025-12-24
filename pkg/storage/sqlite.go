@@ -193,7 +193,8 @@ func (s *SQLiteStorage) createTablesContext(ctx context.Context) error {
 		stack_trace TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(job_id) REFERENCES jobs(id),
-		FOREIGN KEY(bot_id) REFERENCES bots(id)
+		FOREIGN KEY(bot_id) REFERENCES bots(id),
+		UNIQUE(hash, job_id)
 	);
 
 	-- Coverage results
@@ -284,6 +285,19 @@ func (s *SQLiteStorage) createTablesContext(ctx context.Context) error {
 		FOREIGN KEY(report_id) REFERENCES coverage_reports(id) ON DELETE CASCADE
 	);
 
+	-- Job logs table for storing execution logs
+	CREATE TABLE IF NOT EXISTS job_logs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		job_id TEXT NOT NULL,
+		level TEXT NOT NULL,
+		source TEXT,
+		message TEXT NOT NULL,
+		timestamp DATETIME NOT NULL,
+		metadata TEXT, -- JSON object
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+	);
+
 	-- Create indexes for performance
 	CREATE INDEX IF NOT EXISTS idx_bots_status ON bots(status);
 	CREATE INDEX IF NOT EXISTS idx_bots_timeout ON bots(timeout_at);
@@ -301,6 +315,8 @@ func (s *SQLiteStorage) createTablesContext(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_coverage_reports_file_type ON coverage_reports(file_type);
 	CREATE INDEX IF NOT EXISTS idx_coverage_metadata_job_id ON coverage_metadata(job_id);
 	CREATE INDEX IF NOT EXISTS idx_coverage_metadata_report_id ON coverage_metadata(report_id);
+	CREATE INDEX IF NOT EXISTS idx_job_logs_job_id ON job_logs(job_id);
+	CREATE INDEX IF NOT EXISTS idx_job_logs_timestamp ON job_logs(timestamp DESC);
 	`
 
 	_, err := s.db.ExecContext(ctx, schema)
@@ -637,9 +653,15 @@ func (s *SQLiteStorage) storeBotContext(ctx context.Context, id, data string) er
 }
 
 func (s *SQLiteStorage) getBotContext(ctx context.Context, id string) (string, error) {
-	query := `SELECT json_object('id', id, 'name', name, 'hostname', hostname, 'status', status, 'last_seen', last_seen,
-			         'registered_at', registered_at, 'current_job', current_job, 'capabilities', json(capabilities),
-			         'timeout_at', timeout_at, 'is_online', json(CASE WHEN is_online THEN 'true' ELSE 'false' END), 'failure_count', failure_count, 'api_endpoint', api_endpoint) FROM bots WHERE id = ?`
+	// Use replace() to convert SQLite's space-separated timestamps to RFC3339 'T' format
+	// This ensures Go's time.Time JSON unmarshaler can parse the timestamps correctly
+	query := `SELECT json_object('id', id, 'name', name, 'hostname', hostname, 'status', status,
+			         'last_seen', replace(last_seen, ' ', 'T'),
+			         'registered_at', replace(registered_at, ' ', 'T'),
+			         'current_job', current_job, 'capabilities', json(capabilities),
+			         'timeout_at', replace(timeout_at, ' ', 'T'),
+			         'is_online', json(CASE WHEN is_online THEN 'true' ELSE 'false' END),
+			         'failure_count', failure_count, 'api_endpoint', api_endpoint) FROM bots WHERE id = ?`
 
 	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (string, error) {
 		var data string
@@ -670,9 +692,15 @@ func (s *SQLiteStorage) storeJobContext(ctx context.Context, id, data string) er
 }
 
 func (s *SQLiteStorage) getJobContext(ctx context.Context, id string) (string, error) {
+	// Use replace() to convert SQLite's space-separated timestamps to RFC3339 'T' format
+	// Use COALESCE with replace to handle NULL timestamp fields (started_at, completed_at)
 	query := `SELECT json_object('id', id, 'name', name, 'target', target, 'fuzzer', fuzzer, 'status', status,
-			         'assigned_bot', assigned_bot, 'created_at', created_at, 'started_at', started_at,
-			         'completed_at', completed_at, 'timeout_at', timeout_at, 'work_dir', work_dir,
+			         'assigned_bot', assigned_bot,
+			         'created_at', replace(created_at, ' ', 'T'),
+			         'started_at', CASE WHEN started_at IS NOT NULL THEN replace(started_at, ' ', 'T') ELSE NULL END,
+			         'completed_at', CASE WHEN completed_at IS NOT NULL THEN replace(completed_at, ' ', 'T') ELSE NULL END,
+			         'timeout_at', replace(timeout_at, ' ', 'T'),
+			         'work_dir', work_dir,
 			         'config', json(config), 'collection_id', collection_id, 'campaign_id', campaign_id,
 			         'use_campaign_corpus', json(CASE WHEN use_campaign_corpus THEN 'true' ELSE 'false' END),
 			         'enable_coverage', json(CASE WHEN enable_coverage THEN 'true' ELSE 'false' END),
@@ -705,8 +733,10 @@ func (s *SQLiteStorage) storeCrashContext(ctx context.Context, id, data string) 
 }
 
 func (s *SQLiteStorage) getCrashContext(ctx context.Context, id string) (string, error) {
+	// Use replace() to convert SQLite's space-separated timestamps to RFC3339 'T' format
 	query := `SELECT json_object('id', id, 'job_id', job_id, 'bot_id', bot_id, 'hash', hash, 'file_path', file_path,
-			         'type', type, 'signal', signal, 'exit_code', exit_code, 'timestamp', timestamp,
+			         'type', type, 'signal', signal, 'exit_code', exit_code,
+			         'timestamp', replace(timestamp, ' ', 'T'),
 			         'size', size, 'is_unique', is_unique, 'output', output, 'stack_trace', stack_trace) FROM crashes WHERE id = ?`
 
 	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (string, error) {
@@ -734,8 +764,11 @@ func (s *SQLiteStorage) storeCoverageContext(ctx context.Context, id, data strin
 }
 
 func (s *SQLiteStorage) getCoverageContext(ctx context.Context, id string) (string, error) {
+	// Use replace() to convert SQLite's space-separated timestamps to RFC3339 'T' format
 	query := `SELECT json_object('id', id, 'job_id', job_id, 'bot_id', bot_id, 'edges', edges,
-			         'new_edges', new_edges, 'timestamp', timestamp, 'exec_count', exec_count) FROM coverage WHERE id = ?`
+			         'new_edges', new_edges,
+			         'timestamp', replace(timestamp, ' ', 'T'),
+			         'exec_count', exec_count) FROM coverage WHERE id = ?`
 
 	return RetryableQueryRow(ctx, s.db, s.config, query, func(row *sql.Row) (string, error) {
 		var data string
@@ -2000,17 +2033,30 @@ func (s *SQLiteStorage) DeleteJob(ctx context.Context, id string) error {
 }
 
 // CreateCrash creates a new crash result in the database
+// Uses INSERT OR IGNORE to handle duplicate (hash, job_id) combinations idempotently
+// Returns ErrDuplicateCrash if the crash already exists (same hash for same job)
 func (s *SQLiteStorage) CreateCrash(ctx context.Context, crash *common.CrashResult) error {
 	return ExecuteWithRetry(ctx, s.config, func() error {
-		_, err := s.db.ExecContext(ctx, `
-			INSERT INTO crashes (
+		result, err := s.db.ExecContext(ctx, `
+			INSERT OR IGNORE INTO crashes (
 				id, job_id, bot_id, hash, file_path, type, signal, exit_code,
 				timestamp, size, is_unique, output, stack_trace
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`, crash.ID, crash.JobID, crash.BotID, crash.Hash, crash.FilePath,
 			crash.Type, crash.Signal, crash.ExitCode, crash.Timestamp, crash.Size,
 			crash.IsUnique, crash.Output, crash.StackTrace)
-		return err
+		if err != nil {
+			return err
+		}
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			s.logger.WithFields(logrus.Fields{
+				"job_id": crash.JobID,
+				"hash":   crash.Hash,
+			}).Debug("Crash already exists (duplicate hash for job), skipped insertion")
+			return common.ErrDuplicateCrash
+		}
+		return nil
 	})
 }
 
@@ -2057,6 +2103,24 @@ func (s *SQLiteStorage) ListCrashes(ctx context.Context, jobID string, limit, of
 	})
 
 	return crashes, err
+}
+
+// GetCrashCount returns the total count of crashes, optionally filtered by job ID
+func (s *SQLiteStorage) GetCrashCount(ctx context.Context, jobID string) (int, error) {
+	query := `SELECT COUNT(*) FROM crashes`
+	args := []interface{}{}
+
+	if jobID != "" {
+		query += " WHERE job_id = ?"
+		args = append(args, jobID)
+	}
+
+	var count int
+	err := ExecuteWithRetry(ctx, s.config, func() error {
+		return s.db.QueryRowContext(ctx, query, args...).Scan(&count)
+	})
+
+	return count, err
 }
 
 // CreateCoverage creates a new coverage result

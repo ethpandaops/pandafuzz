@@ -113,13 +113,6 @@ func (s *Server) Start() error {
 
 	s.logger.Info("Starting master HTTP server")
 
-	// Initialize API v1 if services are available
-	if s.services != nil {
-		if err := s.initializeAPIv1(); err != nil {
-			return common.NewSystemError("initialize_api_v1", err)
-		}
-	}
-
 	// Setup router and middleware
 	if err := s.setupRouter(); err != nil {
 		return common.NewSystemError("setup_router", err)
@@ -332,6 +325,13 @@ func (s *Server) InitializeStorage() error {
 	// Now initialize services with the storage backend
 	s.initializeServices()
 
+	// Initialize API v1 now that services are ready
+	if s.services != nil {
+		if err := s.initializeAPIv1(); err != nil {
+			return fmt.Errorf("failed to initialize API v1: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -385,6 +385,19 @@ func (s *Server) GetStorageBackend() backend.StorageBackend {
 	return s.storageBackend
 }
 
+// getFileStorage returns the file storage instance for binary downloads
+func (s *Server) getFileStorage() common.FileStorage {
+	if s.storageBackend != nil {
+		return service.NewBackendFileStorage(s.storageBackend, s.logger)
+	}
+	// Fallback to local file storage
+	basePath := "./storage"
+	if s.config.Storage.Type == "filesystem" {
+		basePath = s.config.Storage.Filesystem.BasePath
+	}
+	return service.NewLocalFileStorage(basePath, s.logger)
+}
+
 // initializeAPIv1 creates and initializes the API v1 instance
 func (s *Server) initializeAPIv1() error {
 	if s.services == nil {
@@ -414,6 +427,15 @@ func (s *Server) initializeAPIv1() error {
 		apiConfig.RequestTimeout = s.config.Timeouts.HTTPRequest
 	}
 
+	// Create file storage for binary download endpoint
+	fileStorage := s.getFileStorage()
+
+	// Get storage from persistent state (set in main.go)
+	var storage common.Storage
+	if s.state != nil {
+		storage = s.state.Storage
+	}
+
 	// Create services struct for API v1
 	services := apiv1.Services{
 		Bot:             s.services.Bot,
@@ -425,6 +447,8 @@ func (s *Server) initializeAPIv1() error {
 		Monitoring:      s.services.Monitoring,
 		Reproducibility: s.services.Reproducibility,
 		CrashMinimizer:  s.services.CrashMinimizer,
+		FileStorage:     fileStorage,
+		Storage:         storage,
 	}
 
 	// Create API v1 instance

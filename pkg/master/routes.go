@@ -53,10 +53,11 @@ func (s *Server) setupChiRouter() error {
 	// WebSocket endpoint for real-time updates
 	s.chiRouter.Get("/ws", s.handleWebSocket)
 
-	// Mount unified API v1 routes (includes all v3 features)
+	// Mount unified API routes (includes all v3 features)
 	if s.apiV1 != nil {
 		s.chiRouter.Mount("/api/v1", s.apiV1.GetRouter())
-		s.logger.Info("Unified API v1 routes mounted on Chi router")
+		s.chiRouter.Mount("/api/v3", s.apiV1.GetRouter())
+		s.logger.Info("API routes mounted at /api/v1 and /api/v3")
 	}
 
 	// Serve static files for web UI
@@ -75,25 +76,18 @@ type spaFileHandler struct {
 }
 
 func (h *spaFileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Check if it's an API, metrics, CSS, JS, or other API endpoint
+	// Only skip paths that are handled by explicit routes on the Chi router
+	// API routes are mounted at /api/v1 and /api/v3
+	// Other explicit routes: /metrics, /health, /status, /ws
+	// Static assets: /static/, /css/, /js/
 	if strings.HasPrefix(r.URL.Path, "/api/") ||
 		strings.HasPrefix(r.URL.Path, "/metrics") ||
 		strings.HasPrefix(r.URL.Path, "/health") ||
 		strings.HasPrefix(r.URL.Path, "/status") ||
+		strings.HasPrefix(r.URL.Path, "/ws") ||
 		strings.HasPrefix(r.URL.Path, "/css/") ||
-		strings.HasPrefix(r.URL.Path, "/js/") ||
-		strings.HasPrefix(r.URL.Path, "/jobs") ||
-		strings.HasPrefix(r.URL.Path, "/bots") ||
-		strings.HasPrefix(r.URL.Path, "/results") ||
-		strings.HasPrefix(r.URL.Path, "/campaigns") ||
-		strings.HasPrefix(r.URL.Path, "/corpus") ||
-		strings.HasPrefix(r.URL.Path, "/crashes") ||
-		strings.HasPrefix(r.URL.Path, "/system") ||
-		strings.HasPrefix(r.URL.Path, "/timeouts") ||
-		strings.HasPrefix(r.URL.Path, "/analytics") ||
-		strings.HasPrefix(r.URL.Path, "/quarantine") ||
-		strings.HasPrefix(r.URL.Path, "/reproduction") {
-		// These are handled by other routes
+		strings.HasPrefix(r.URL.Path, "/js/") {
+		// These are handled by other Chi routes - don't serve index.html
 		http.NotFound(w, r)
 		return
 	}

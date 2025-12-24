@@ -78,11 +78,6 @@ func (h *Handlers) HandleGetJobCrashes(w http.ResponseWriter, r *http.Request) {
 	h.adapter.GetJobCrashes(w, r, jobId)
 }
 
-// HandlePromoteCrashToCorpus handles POST /api/v1/corpus/promote
-func (h *Handlers) HandlePromoteCrashToCorpus(w http.ResponseWriter, r *http.Request) {
-	h.adapter.PromoteCrashToCorpus(w, r)
-}
-
 // HandleGetCrashInput handles GET /api/v1/crashes/{id}/input
 func (h *Handlers) HandleGetCrashInput(w http.ResponseWriter, r *http.Request) {
 	crashId := h.extractCrashID(r)

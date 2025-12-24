@@ -69,6 +69,9 @@ func (h *Handlers) RegisterRoutes(r chi.Router) {
 		})
 	})
 
+	// Binary upload endpoint (for uploading fuzz targets)
+	r.Post("/binaries", h.HandleUploadBinary)
+
 	// Job endpoints
 	r.Route("/jobs", func(r chi.Router) {
 		r.Get("/", h.HandleListJobs)
@@ -81,11 +84,20 @@ func (h *Handlers) RegisterRoutes(r chi.Router) {
 			r.Post("/heartbeat", h.HandleJobHeartbeat)
 			r.Post("/cancel", h.HandleCancelJob)
 			r.Get("/logs", h.HandleGetJobLogs)
+			r.Post("/logs/push", h.HandlePushJobLogs)
 			r.Get("/progress", h.HandleGetJobProgress)
 			r.Get("/crashes", h.HandleGetJobCrashes)
 			r.Get("/coverage", h.HandleGetJobCoverage)
 			r.Get("/artifacts", h.HandleGetJobArtifacts)
 			r.Get("/coverage/reports/{reportId}", h.HandleDownloadCoverageReport)
+			r.Get("/binary/download", h.HandleDownloadJobBinary)
+
+			// Raw coverage file endpoints (AFL++ fuzzer_stats, plot_data, fuzz_bitmap)
+			r.Route("/coverage/raw", func(r chi.Router) {
+				r.Get("/", h.HandleListRawCoverage)
+				r.Get("/{fileType}", h.HandleDownloadRawCoverageFile)
+				r.Get("/all/zip", h.HandleDownloadRawCoverageZip)
+			})
 		})
 	})
 
@@ -115,6 +127,19 @@ func (h *Handlers) RegisterRoutes(r chi.Router) {
 			r.Get("/", h.HandleGetCorpusEntry)
 			r.Delete("/", h.HandleDeleteCorpusEntry)
 			r.Get("/download", h.HandleDownloadCorpusFile)
+		})
+
+		// Corpus collections endpoints
+		r.Route("/collections", func(r chi.Router) {
+			r.Get("/", h.HandleListCorpusCollections)
+			r.Post("/", h.HandleCreateCorpusCollection)
+			r.Route("/{collectionId}", func(r chi.Router) {
+				r.Get("/", h.HandleGetCorpusCollection)
+				r.Put("/", h.HandleUpdateCorpusCollection)
+				r.Delete("/", h.HandleDeleteCorpusCollection)
+				r.Post("/upload", h.HandleUploadCorpusCollectionFiles)
+				r.Get("/files", h.HandleListCorpusCollectionFiles)
+			})
 		})
 	})
 

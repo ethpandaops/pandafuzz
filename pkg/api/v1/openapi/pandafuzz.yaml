@@ -645,6 +645,96 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /jobs/{jobId}/coverage/raw:
+    parameters:
+      - $ref: '#/components/parameters/JobIdParam'
+
+    get:
+      tags: [jobs]
+      summary: List raw AFL++ coverage files
+      description: List available raw coverage files (fuzzer_stats, plot_data, fuzz_bitmap) for an AFL++ job
+      operationId: listRawCoverage
+      responses:
+        '200':
+          description: Successfully retrieved raw coverage file list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                          enum: [fuzzer_stats, plot_data, fuzz_bitmap]
+                        available:
+                          type: boolean
+                        size:
+                          type: integer
+                        last_modified:
+                          type: string
+                          format: date-time
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{jobId}/coverage/raw/{fileType}:
+    parameters:
+      - $ref: '#/components/parameters/JobIdParam'
+      - name: fileType
+        in: path
+        required: true
+        description: Type of raw coverage file to download
+        schema:
+          type: string
+          enum: [fuzzer_stats, plot_data, fuzz_bitmap]
+
+    get:
+      tags: [jobs]
+      summary: Download raw AFL++ coverage file
+      description: Download a specific raw coverage file from an AFL++ job
+      operationId: downloadRawCoverageFile
+      responses:
+        '200':
+          description: Raw coverage file content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{jobId}/coverage/raw/all/zip:
+    parameters:
+      - $ref: '#/components/parameters/JobIdParam'
+
+    get:
+      tags: [jobs]
+      summary: Download all raw coverage files as ZIP
+      description: Download all available raw coverage files for an AFL++ job in a single ZIP archive
+      operationId: downloadRawCoverageZip
+      responses:
+        '200':
+          description: ZIP archive containing raw coverage files
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /jobs/{jobId}/artifacts:
     parameters:
       - $ref: '#/components/parameters/JobIdParam'
@@ -1180,6 +1270,202 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /corpus/collections:
+    get:
+      tags: [corpus]
+      summary: List corpus collections
+      description: Retrieve a list of all corpus collections
+      operationId: listCorpusCollections
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: Successfully retrieved corpus collections
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  collections:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CorpusCollection'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags: [corpus]
+      summary: Create corpus collection
+      description: Create a new corpus collection for organizing seed files
+      operationId: createCorpusCollection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CorpusCollectionCreateRequest'
+      responses:
+        '201':
+          description: Corpus collection created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorpusCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /corpus/collections/{collectionId}:
+    parameters:
+      - name: collectionId
+        in: path
+        required: true
+        description: Corpus collection ID
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags: [corpus]
+      summary: Get corpus collection
+      description: Retrieve a specific corpus collection by ID
+      operationId: getCorpusCollection
+      responses:
+        '200':
+          description: Corpus collection details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorpusCollection'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    put:
+      tags: [corpus]
+      summary: Update corpus collection
+      description: Update a corpus collection's metadata
+      operationId: updateCorpusCollection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CorpusCollectionUpdateRequest'
+      responses:
+        '200':
+          description: Corpus collection updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorpusCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags: [corpus]
+      summary: Delete corpus collection
+      description: Delete a corpus collection and optionally its files
+      operationId: deleteCorpusCollection
+      responses:
+        '204':
+          description: Corpus collection deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /corpus/collections/{collectionId}/upload:
+    parameters:
+      - name: collectionId
+        in: path
+        required: true
+        description: Corpus collection ID
+        schema:
+          type: string
+          format: uuid
+
+    post:
+      tags: [corpus]
+      summary: Upload files to corpus collection
+      description: Upload one or more files to a corpus collection
+      operationId: uploadCorpusCollectionFiles
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        '201':
+          description: Files uploaded successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  uploaded_count:
+                    type: integer
+                  files:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CorpusCollectionFile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /corpus/collections/{collectionId}/files:
+    parameters:
+      - name: collectionId
+        in: path
+        required: true
+        description: Corpus collection ID
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags: [corpus]
+      summary: List files in corpus collection
+      description: Retrieve all files in a corpus collection
+      operationId: listCorpusCollectionFiles
+      responses:
+        '200':
+          description: List of files in the collection
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CorpusCollectionFile'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -3180,6 +3466,118 @@ components:
               type: number
               description: Redundancy score (lower is better)
           description: Quality metrics of the selection
+
+    # Corpus Collection Schemas
+    CorpusCollection:
+      type: object
+      required:
+        - id
+        - name
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the collection
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        name:
+          type: string
+          description: Collection name
+          example: "Initial Seeds"
+        description:
+          type: string
+          description: Collection description
+          example: "Initial seed corpus for the fuzzing campaign"
+        file_count:
+          type: integer
+          minimum: 0
+          description: Number of files in the collection
+          example: 150
+        total_size:
+          type: integer
+          minimum: 0
+          description: Total size of all files in bytes
+          example: 2048576
+        created_at:
+          type: string
+          format: date-time
+          description: When the collection was created
+          example: "2024-01-15T10:30:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          description: When the collection was last updated
+          example: "2024-01-15T12:30:00Z"
+
+    CorpusCollectionCreateRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Collection name
+          example: "Initial Seeds"
+        description:
+          type: string
+          maxLength: 1024
+          description: Collection description
+          example: "Initial seed corpus for the fuzzing campaign"
+
+    CorpusCollectionUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Collection name
+          example: "Updated Seeds"
+        description:
+          type: string
+          maxLength: 1024
+          description: Collection description
+          example: "Updated seed corpus description"
+
+    CorpusCollectionFile:
+      type: object
+      required:
+        - id
+        - filename
+        - size
+        - hash
+        - uploaded_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the file
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        collection_id:
+          type: string
+          format: uuid
+          description: ID of the parent collection
+          example: "01234567-89ab-cdef-0123-456789abcdef"
+        filename:
+          type: string
+          description: Original filename
+          example: "seed_001.bin"
+        size:
+          type: integer
+          minimum: 0
+          description: File size in bytes
+          example: 1024
+        hash:
+          type: string
+          description: SHA256 hash of the file content
+          example: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        uploaded_at:
+          type: string
+          format: date-time
+          description: When the file was uploaded
+          example: "2024-01-15T10:30:00Z"
 
     # Crash Schemas
     CrashType:
