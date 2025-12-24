@@ -65,7 +65,7 @@ Edit `src/services/api.ts` to configure:
 ### Environment Variables
 Create a `.env` file for environment-specific settings:
 ```
-REACT_APP_API_URL=http://localhost:8080/api/v3
+REACT_APP_API_URL=http://localhost:8080/api/v1
 REACT_APP_API_KEY=your-api-key
 ```
 

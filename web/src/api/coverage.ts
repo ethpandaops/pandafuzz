@@ -12,7 +12,7 @@ export class CoverageAPIClient {
   private baseURL: string;
 
   constructor(baseURL: string = '') {
-    this.baseURL = baseURL || '/api/v3';
+    this.baseURL = baseURL || '/api/v1';
     this.client = axios.create({
       baseURL: this.baseURL,
       headers: {

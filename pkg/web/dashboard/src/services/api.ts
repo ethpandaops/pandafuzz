@@ -13,7 +13,7 @@ import {
 class ApiService {
   private client: AxiosInstance;
 
-  constructor(baseURL: string = '/api/v3', apiKey?: string) {
+  constructor(baseURL: string = '/api/v1', apiKey?: string) {
     this.client = axios.create({
       baseURL,
       headers: {

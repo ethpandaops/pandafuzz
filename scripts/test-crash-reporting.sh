@@ -13,7 +13,7 @@ sleep 10
 
 echo "Creating a test job with AFL++..."
 # Create a test job using the API
-JOB_ID=$(curl -s -X POST http://localhost:8080/api/v3/jobs \
+JOB_ID=$(curl -s -X POST http://localhost:8080/api/v1/jobs \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Test AFL++ Crash Reporting",
@@ -34,16 +34,16 @@ sleep 5
 # Monitor the job status
 echo "Monitoring job for crashes..."
 for i in {1..20}; do
-    STATUS=$(curl -s http://localhost:8080/api/v3/jobs/$JOB_ID | jq -r '.status')
+    STATUS=$(curl -s http://localhost:8080/api/v1/jobs/$JOB_ID | jq -r '.status')
     echo "[$i/20] Job status: $STATUS"
 
     # Check for crashes
-    CRASHES=$(curl -s http://localhost:8080/api/v3/crashes | jq -r '.crashes | length')
+    CRASHES=$(curl -s http://localhost:8080/api/v1/crashes | jq -r '.crashes | length')
     echo "  Crashes found: $CRASHES"
 
     if [ "$CRASHES" -gt 0 ]; then
         echo "SUCCESS: Crashes are being reported!"
-        curl -s http://localhost:8080/api/v3/crashes | jq '.crashes[] | {id, job_id, bot_id, type, timestamp}'
+        curl -s http://localhost:8080/api/v1/crashes | jq '.crashes[] | {id, job_id, bot_id, type, timestamp}'
         break
     fi
 

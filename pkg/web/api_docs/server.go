@@ -172,7 +172,7 @@ func (s *Server) generateCodeExamples(language string) []CodeExample {
 			Description: "Example of creating a new fuzzing job",
 			Code: `import requests
 
-api_url = "http://localhost:8080/api/v3"
+api_url = "http://localhost:8080/api/v1"
 api_key = "your-api-key"
 
 # Create a new fuzzing job
@@ -213,7 +213,7 @@ import (
 )
 
 func main() {
-    apiURL := "http://localhost:8080/api/v3"
+    apiURL := "http://localhost:8080/api/v1"
     apiKey := "your-api-key"
 
     // List jobs with filtering
@@ -239,12 +239,12 @@ func main() {
 			Title:       "Get Campaign Stats",
 			Description: "Example of retrieving campaign statistics",
 			Code: `# Get campaign statistics
-curl -X GET "http://localhost:8080/api/v3/campaigns/{campaign_id}/stats" \
+curl -X GET "http://localhost:8080/api/v1/campaigns/{campaign_id}/stats" \
   -H "X-API-Key: your-api-key" \
   -H "Accept: application/json"
 
 # Get coverage trend for last 24 hours
-curl -X GET "http://localhost:8080/api/v3/analytics/coverage-trend?campaign_id={campaign_id}&period=24h" \
+curl -X GET "http://localhost:8080/api/v1/analytics/coverage-trend?campaign_id={campaign_id}&period=24h" \
   -H "X-API-Key: your-api-key" \
   -H "Accept: application/json"`,
 		})

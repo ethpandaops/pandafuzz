@@ -27,7 +27,7 @@ test.describe('Coverage Page', () => {
 
   test('should handle API errors gracefully', async ({ page, context }) => {
     // Intercept API calls and return error
-    await context.route('**/api/v3/jobs/*/coverage', route => {
+    await context.route('**/api/v1/jobs/*/coverage', route => {
       route.fulfill({
         status: 500,
         body: JSON.stringify({ error: 'Internal Server Error' })
@@ -58,7 +58,7 @@ test.describe('Coverage Page', () => {
 
   test('should display download buttons when coverage reports exist', async ({ page, context }) => {
     // Mock API response with coverage data
-    await context.route('**/api/v3/jobs/*/coverage', route => {
+    await context.route('**/api/v1/jobs/*/coverage', route => {
       route.fulfill({
         status: 200,
         body: JSON.stringify({

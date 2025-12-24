@@ -13,7 +13,7 @@ NC='\033[0m'
 FUZZER_TYPE="${1:-afl++}"
 MASTER_URL="${MASTER_URL:-http://localhost:8080}"
 API_BASE="${MASTER_URL}/api/v1"
-API_V3="${MASTER_URL}/api/v3"
+API_V3="${MASTER_URL}/api/v1"
 
 echo -e "${BLUE}=== Coverage Test for $FUZZER_TYPE (Fixed Version) ===${NC}"
 

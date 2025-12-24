@@ -143,7 +143,7 @@
                     <div class="quick-start-item">
                         <h3>1. Create a Campaign</h3>
                         <p>Start by creating a fuzzing campaign to organize your testing efforts.</p>
-                        <pre class="code-example">POST /api/v3/campaigns
+                        <pre class="code-example">POST /api/v1/campaigns
 {
   "name": "My Campaign",
   "target": "my-binary",
@@ -153,7 +153,7 @@
                     <div class="quick-start-item">
                         <h3>2. Submit a Job</h3>
                         <p>Create fuzzing jobs within your campaign to start testing.</p>
-                        <pre class="code-example">POST /api/v3/jobs
+                        <pre class="code-example">POST /api/v1/jobs
 {
   "campaign_id": "{{campaign_id}}",
   "name": "Test Job",
@@ -163,8 +163,8 @@
                     <div class="quick-start-item">
                         <h3>3. Monitor Progress</h3>
                         <p>Track coverage, crashes, and performance metrics in real-time.</p>
-                        <pre class="code-example">GET /api/v3/campaigns/{{id}}/stats
-GET /api/v3/analytics/coverage-trend</pre>
+                        <pre class="code-example">GET /api/v1/campaigns/{{id}}/stats
+GET /api/v1/analytics/coverage-trend</pre>
                     </div>
                 </div>
             </div>
@@ -185,7 +185,7 @@ GET /api/v3/analytics/coverage-trend</pre>
                 <pre class="code-example">import requests
 
 class PandaFuzzClient:
-    def __init__(self, api_key, base_url="http://localhost:8080/api/v3"):
+    def __init__(self, api_key, base_url="http://localhost:8080/api/v1"):
         self.api_key = api_key
         self.base_url = base_url
         self.headers = {

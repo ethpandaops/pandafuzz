@@ -56,7 +56,7 @@ test.describe('Coverage System Validation', () => {
 
   test('should handle coverage API endpoints', async ({ page, request }) => {
     // Test the coverage API endpoint
-    const jobsResponse = await request.get('http://localhost:8080/api/v3/jobs');
+    const jobsResponse = await request.get('http://localhost:8080/api/v1/jobs');
     expect(jobsResponse.ok()).toBeTruthy();
     
     const jobsData = await jobsResponse.json();
@@ -68,7 +68,7 @@ test.describe('Coverage System Validation', () => {
       if (coverageJob) {
         // Check coverage endpoint for this job
         const coverageResponse = await request.get(
-          `http://localhost:8080/api/v3/jobs/${coverageJob.id}/coverage`
+          `http://localhost:8080/api/v1/jobs/${coverageJob.id}/coverage`
         );
         expect(coverageResponse.ok()).toBeTruthy();
         
@@ -113,7 +113,7 @@ test.describe('Coverage System Validation', () => {
 
   test('should have download functionality for coverage reports', async ({ page, request }) => {
     // First check if any coverage reports exist via API
-    const jobsResponse = await request.get('http://localhost:8080/api/v3/jobs');
+    const jobsResponse = await request.get('http://localhost:8080/api/v1/jobs');
     const jobsData = await jobsResponse.json();
     
     if (jobsData.jobs && jobsData.jobs.length > 0) {
@@ -121,7 +121,7 @@ test.describe('Coverage System Validation', () => {
       
       if (coverageJob) {
         const coverageResponse = await request.get(
-          `http://localhost:8080/api/v3/jobs/${coverageJob.id}/coverage`
+          `http://localhost:8080/api/v1/jobs/${coverageJob.id}/coverage`
         );
         const coverageData = await coverageResponse.json();
         
@@ -130,7 +130,7 @@ test.describe('Coverage System Validation', () => {
           
           // Try to download the report
           const downloadResponse = await request.get(
-            `http://localhost:8080/api/v3/jobs/${coverageJob.id}/coverage/${report.id}`,
+            `http://localhost:8080/api/v1/jobs/${coverageJob.id}/coverage/${report.id}`,
             { failOnStatusCode: false }
           );
           
@@ -174,7 +174,7 @@ test.describe('Coverage Database Schema', () => {
     // We can't directly query SQLite from Playwright, but we can check
     // that coverage-enabled jobs are properly stored
     
-    const jobsResponse = await request.get('http://localhost:8080/api/v3/jobs');
+    const jobsResponse = await request.get('http://localhost:8080/api/v1/jobs');
     expect(jobsResponse.ok()).toBeTruthy();
     
     const jobsData = await jobsResponse.json();

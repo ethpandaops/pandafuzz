@@ -53,11 +53,10 @@ func (s *Server) setupChiRouter() error {
 	// WebSocket endpoint for real-time updates
 	s.chiRouter.Get("/ws", s.handleWebSocket)
 
-	// Mount unified API routes (includes all v3 features)
+	// Mount unified API routes
 	if s.apiV1 != nil {
 		s.chiRouter.Mount("/api/v1", s.apiV1.GetRouter())
-		s.chiRouter.Mount("/api/v3", s.apiV1.GetRouter())
-		s.logger.Info("API routes mounted at /api/v1 and /api/v3")
+		s.logger.Info("API routes mounted at /api/v1")
 	}
 
 	// Serve static files for web UI
@@ -77,7 +76,7 @@ type spaFileHandler struct {
 
 func (h *spaFileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Only skip paths that are handled by explicit routes on the Chi router
-	// API routes are mounted at /api/v1 and /api/v3
+	// API routes are mounted at /api/v1
 	// Other explicit routes: /metrics, /health, /status, /ws
 	// Static assets: /static/, /css/, /js/
 	if strings.HasPrefix(r.URL.Path, "/api/") ||

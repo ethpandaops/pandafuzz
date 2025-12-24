@@ -33,7 +33,7 @@ create_job() {
     echo ""
     echo "Creating $fuzzer job: $name"
 
-    response=$(curl -s -X POST "${MASTER_URL}/api/v3/jobs" \
+    response=$(curl -s -X POST "${MASTER_URL}/api/v1/jobs" \
         -H "Content-Type: application/json" \
         -d "{
             \"name\": \"$name\",
@@ -65,7 +65,7 @@ register_bot() {
     echo ""
     echo "Registering bot with capabilities: $capabilities"
 
-    response=$(curl -s -X POST "${MASTER_URL}/api/v3/bots" \
+    response=$(curl -s -X POST "${MASTER_URL}/api/v1/bots" \
         -H "Content-Type: application/json" \
         -d "{
             \"hostname\": \"test-host-$(uuidgen | cut -c1-8)\",
@@ -92,7 +92,7 @@ request_job() {
     echo ""
     echo "Requesting job for bot: $bot_id"
 
-    response=$(curl -s -X POST "${MASTER_URL}/api/v3/bots/${bot_id}/jobs/next")
+    response=$(curl -s -X POST "${MASTER_URL}/api/v1/bots/${bot_id}/jobs/next")
 
     if [[ "$response" == "" ]] || [[ "$response" == "null" ]]; then
         echo "No job assigned (204 No Content)"

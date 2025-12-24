@@ -95,7 +95,7 @@ echo
 echo -e "${YELLOW}Creating job through API...${NC}"
 
 # Create job using curl
-JOB_RESPONSE=$(curl -s -X POST "http://localhost:8080/api/v3/jobs" \
+JOB_RESPONSE=$(curl -s -X POST "http://localhost:8080/api/v1/jobs" \
   -H "Content-Type: application/json" \
   -d "{
     \"name\": \"Simple AFL Test\",
@@ -121,14 +121,14 @@ if [ ! -z "$JOB_ID" ]; then
     sleep 15
     
     # Check job status
-    JOB_STATUS=$(curl -s "http://localhost:8080/api/v3/jobs/$JOB_ID")
+    JOB_STATUS=$(curl -s "http://localhost:8080/api/v1/jobs/$JOB_ID")
     echo "Job status response:"
     echo "$JOB_STATUS" | python3 -m json.tool 2>/dev/null || echo "$JOB_STATUS"
     
     # Check coverage
     echo
     echo "Checking coverage report..."
-    COVERAGE=$(curl -s "http://localhost:8080/api/v3/jobs/$JOB_ID/coverage")
+    COVERAGE=$(curl -s "http://localhost:8080/api/v1/jobs/$JOB_ID/coverage")
     echo "$COVERAGE" | python3 -m json.tool 2>/dev/null || echo "$COVERAGE"
 else
     echo -e "${RED}✗ Failed to create job${NC}"

@@ -333,7 +333,7 @@ func TestCoverageAPIIntegration(t *testing.T) {
 	t.Run("CoverageEndpointPath", func(t *testing.T) {
 		// Verify the coverage endpoint path is correct
 		jobID := uuid.New().String()
-		expectedPath := fmt.Sprintf("/api/v3/jobs/%s/coverage", jobID)
+		expectedPath := fmt.Sprintf("/api/v1/jobs/%s/coverage", jobID)
 		require.Contains(t, expectedPath, jobID)
 		require.Contains(t, expectedPath, "coverage")
 	})

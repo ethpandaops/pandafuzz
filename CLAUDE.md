@@ -85,12 +85,12 @@ PandaFuzz is a distributed fuzzing orchestration system designed for reliability
 ### API Endpoints
 
 The system provides RESTful APIs (v1 for core, v3 for extended features):
-- `/api/v3/bots`: Bot management and monitoring
-- `/api/v3/campaigns`: Campaign orchestration
-- `/api/v3/jobs`: Job submission and monitoring
-- `/api/v3/jobs/{id}/coverage`: Coverage report access
-- `/api/v3/corpus`: Corpus management and sync
-- `/api/v3/crashes`: Crash analysis and deduplication
+- `/api/v1/bots`: Bot management and monitoring
+- `/api/v1/campaigns`: Campaign orchestration
+- `/api/v1/jobs`: Job submission and monitoring
+- `/api/v1/jobs/{id}/coverage`: Coverage report access
+- `/api/v1/corpus`: Corpus management and sync
+- `/api/v1/crashes`: Crash analysis and deduplication
 
 ### Fuzzer Engines
 

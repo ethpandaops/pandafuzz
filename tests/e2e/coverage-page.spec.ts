@@ -1,7 +1,7 @@
 import { test, expect, Page } from '@playwright/test';
 
 const MASTER_URL = process.env.MASTER_URL || 'http://localhost:8080';
-const API_BASE = `${MASTER_URL}/api/v3`;
+const API_BASE = `${MASTER_URL}/api/v1`;
 
 // Helper to wait for API to be ready
 async function waitForAPI(page: Page, maxRetries = 30) {

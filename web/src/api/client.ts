@@ -18,7 +18,7 @@ export class PandaFuzzAPI {
   private baseURL: string;
 
   constructor(baseURL: string = '') {
-    this.baseURL = baseURL || '/api/v3';
+    this.baseURL = baseURL || '/api/v1';
     this.client = axios.create({
       baseURL: this.baseURL,
       headers: {
@@ -26,13 +26,8 @@ export class PandaFuzzAPI {
       },
     });
 
-    // Create v1 client for endpoints not yet implemented in v3
-    this.v1Client = axios.create({
-      baseURL: '/api/v1',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
+    // v1Client is now the same as client (unified API)
+    this.v1Client = this.client;
 
     // Request interceptor for auth (if needed) - apply to both clients
     const authInterceptor = (config: any) => {
@@ -302,9 +297,9 @@ export class PandaFuzzAPI {
         ...(filter?.sort_order && { sort_order: filter.sort_order }),
       };
 
-      // Use v3 API endpoint for coverage
+      // Use unified API endpoint for coverage
       const response = await axios.get<{reports: CoverageReport[], total: number}>(
-        `/api/v3/jobs/${jobId}/coverage`,
+        `/api/v1/jobs/${jobId}/coverage`,
         { 
           params,
           headers: {
@@ -332,7 +327,7 @@ export class PandaFuzzAPI {
     reportId: string
   ): Promise<CoverageMetadata> {
     const response = await axios.get<CoverageMetadata>(
-      `/api/v3/jobs/${jobId}/coverage/${reportId}/metadata`,
+      `/api/v1/jobs/${jobId}/coverage/${reportId}/metadata`,
       {
         headers: {
           'Content-Type': 'application/json',
@@ -350,7 +345,7 @@ export class PandaFuzzAPI {
     reportId: string
   ): Promise<Blob> {
     const response = await axios.get(
-      `/api/v3/jobs/${jobId}/coverage/${reportId}`,
+      `/api/v1/jobs/${jobId}/coverage/${reportId}`,
       {
         responseType: 'blob',
         headers: {

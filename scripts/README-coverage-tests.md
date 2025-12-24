@@ -104,13 +104,13 @@ Example test patterns:
 
 ```bash
 # List coverage reports
-curl http://localhost:8080/api/v3/jobs/{job_id}/coverage
+curl http://localhost:8080/api/v1/jobs/{job_id}/coverage
 
 # Get coverage metadata
-curl http://localhost:8080/api/v3/jobs/{job_id}/coverage/{report_id}/metadata
+curl http://localhost:8080/api/v1/jobs/{job_id}/coverage/{report_id}/metadata
 
 # Download coverage report
-curl http://localhost:8080/api/v3/jobs/{job_id}/coverage/{report_id} -o report.json
+curl http://localhost:8080/api/v1/jobs/{job_id}/coverage/{report_id} -o report.json
 ```
 
 ### Via Web UI
