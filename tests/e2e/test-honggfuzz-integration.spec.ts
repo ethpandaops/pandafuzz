@@ -123,12 +123,14 @@ int main(int argc, char *argv[]) {
   
   await fs.writeFile(sourcePath, sourceCode);
   
-  // Compile the test program
-  const compiler = persistentMode ? 'g++' : 'gcc';
-  const compileCmd = persistentMode 
-    ? `${compiler} -o ${binaryPath} ${sourcePath} -fsanitize=address`
-    : `${compiler} -o ${binaryPath} ${sourcePath}`;
-    
+  // Compile the test program with HongFuzz instrumentation
+  // For persistent mode, use hfuzz-clang++ with fuzzer-no-link (HongFuzz provides main)
+  // For standard mode, use hfuzz-gcc for basic instrumentation
+  const compiler = persistentMode ? 'hfuzz-clang++' : 'hfuzz-gcc';
+  const compileCmd = persistentMode
+    ? `${compiler} -o ${binaryPath} ${sourcePath} -fsanitize=address,fuzzer-no-link`
+    : `${compiler} -o ${binaryPath} ${sourcePath} -fsanitize=address`;
+
   await execAsync(compileCmd);
   
   return binaryPath;
@@ -157,6 +159,8 @@ async function createSeedCorpus(): Promise<string> {
   return corpusDir;
 }
 
+// HongFuzz tests require hfuzz-cc wrapper and proper compilation environment
+// The bot container now includes properly built hfuzz-cc/hfuzz-clang/hfuzz-clang++ wrappers
 test.describe('HongFuzz Integration Tests', () => {
   let standardBinary: string;
   let persistentBinary: string;

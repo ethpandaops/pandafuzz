@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	// "github.com/go-chi/chi/v5/middleware" // Temporarily disabled for build
 	"github.com/sirupsen/logrus"
 
 	apiv1 "github.com/ethpandaops/pandafuzz/pkg/api/v1"
@@ -16,7 +15,6 @@ import (
 	"github.com/ethpandaops/pandafuzz/pkg/httputil"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
 	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
-	"github.com/gorilla/mux"
 )
 
 // Server represents the master HTTP server
@@ -28,7 +26,6 @@ type Server struct {
 	botPoller       *BotPoller
 	services        *service.Manager
 	httpServer      *http.Server
-	router          *mux.Router
 	chiRouter       chi.Router
 	apiV1           *apiv1.API
 	logger          *logrus.Logger
@@ -116,29 +113,15 @@ func (s *Server) Start() error {
 
 	s.logger.Info("Starting master HTTP server")
 
-	// Initialize API v1 if services are available
-	if s.services != nil {
-		if err := s.initializeAPIv1(); err != nil {
-			return common.NewSystemError("initialize_api_v1", err)
-		}
-	}
-
 	// Setup router and middleware
 	if err := s.setupRouter(); err != nil {
 		return common.NewSystemError("setup_router", err)
 	}
 
-	// Configure HTTP server - use Chi router if available, otherwise fall back to Gorilla mux
-	var handler http.Handler
-	if s.chiRouter != nil {
-		handler = s.chiRouter
-	} else {
-		handler = s.router
-	}
-
+	// Configure HTTP server with Chi router
 	s.httpServer = &http.Server{
 		Addr:           fmt.Sprintf("%s:%d", s.config.Server.Host, s.config.Server.Port),
-		Handler:        handler,
+		Handler:        s.chiRouter,
 		ReadTimeout:    s.config.Server.ReadTimeout,
 		WriteTimeout:   s.config.Server.WriteTimeout,
 		IdleTimeout:    s.config.Server.IdleTimeout,
@@ -179,6 +162,12 @@ func (s *Server) Start() error {
 		if err := s.botPoller.Start(); err != nil {
 			return common.NewSystemError("start_bot_poller", err)
 		}
+	}
+
+	// Start WebSocket hub
+	if s.wsHub != nil {
+		s.logger.Info("Starting WebSocket hub")
+		go s.wsHub.Run()
 	}
 
 	// Start lease expiry sweep
@@ -297,13 +286,8 @@ func (s *Server) SetServiceManager(sm *service.Manager) {
 	s.services = sm
 }
 
-// GetRouter returns the configured Gorilla mux router (for backwards compatibility)
-func (s *Server) GetRouter() *mux.Router {
-	return s.router
-}
-
-// GetChiRouter returns the configured Chi router
-func (s *Server) GetChiRouter() chi.Router {
+// GetRouter returns the configured Chi router
+func (s *Server) GetRouter() chi.Router {
 	return s.chiRouter
 }
 
@@ -341,6 +325,13 @@ func (s *Server) InitializeStorage() error {
 	// Now initialize services with the storage backend
 	s.initializeServices()
 
+	// Initialize API v1 now that services are ready
+	if s.services != nil {
+		if err := s.initializeAPIv1(); err != nil {
+			return fmt.Errorf("failed to initialize API v1: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -358,14 +349,19 @@ func (s *Server) initializeServices() {
 	stateAdapter := NewStateStoreAdapter(s.state)
 
 	// Create custom service manager initialization to use storage backend
-	s.services = s.createServiceManager(stateAdapter)
+	services, err := s.createServiceManager(stateAdapter)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to create service manager")
+		return
+	}
+	s.services = services
 
 	// Initialize bot poller with 5 second interval for more responsive updates
 	s.botPoller = NewBotPoller(s.state, s.services, s.logger, 5*time.Second)
 }
 
 // createServiceManager creates a service manager with the storage backend
-func (s *Server) createServiceManager(stateAdapter service.StateStore) *service.Manager {
+func (s *Server) createServiceManager(stateAdapter service.StateStore) (*service.Manager, error) {
 	// Create a custom state adapter that provides the storage backend
 	customStateAdapter := &storageBackendAdapter{
 		StateStore:     stateAdapter,
@@ -387,6 +383,19 @@ func (s *Server) createServiceManager(stateAdapter service.StateStore) *service.
 // GetStorageBackend returns the storage backend instance
 func (s *Server) GetStorageBackend() backend.StorageBackend {
 	return s.storageBackend
+}
+
+// getFileStorage returns the file storage instance for binary downloads
+func (s *Server) getFileStorage() common.FileStorage {
+	if s.storageBackend != nil {
+		return service.NewBackendFileStorage(s.storageBackend, s.logger)
+	}
+	// Fallback to local file storage
+	basePath := "./storage"
+	if s.config.Storage.Type == "filesystem" {
+		basePath = s.config.Storage.Filesystem.BasePath
+	}
+	return service.NewLocalFileStorage(basePath, s.logger)
 }
 
 // initializeAPIv1 creates and initializes the API v1 instance
@@ -418,6 +427,15 @@ func (s *Server) initializeAPIv1() error {
 		apiConfig.RequestTimeout = s.config.Timeouts.HTTPRequest
 	}
 
+	// Create file storage for binary download endpoint
+	fileStorage := s.getFileStorage()
+
+	// Get storage from persistent state (set in main.go)
+	var storage common.Storage
+	if s.state != nil {
+		storage = s.state.Storage
+	}
+
 	// Create services struct for API v1
 	services := apiv1.Services{
 		Bot:             s.services.Bot,
@@ -429,6 +447,8 @@ func (s *Server) initializeAPIv1() error {
 		Monitoring:      s.services.Monitoring,
 		Reproducibility: s.services.Reproducibility,
 		CrashMinimizer:  s.services.CrashMinimizer,
+		FileStorage:     fileStorage,
+		Storage:         storage,
 	}
 
 	// Create API v1 instance

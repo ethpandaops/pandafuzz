@@ -19,6 +19,7 @@ import (
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/config"
 	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -1110,7 +1111,7 @@ func (a *Agent) completeCurrentJob(success bool, message string) {
 	}
 
 	// Try to notify master of job completion with acknowledgment
-	err := a.client.CompleteJob(a.config.ID, success, message)
+	err := a.client.CompleteJob(a.config.ID, job.ID, success, message)
 	if err != nil {
 		a.logger.WithError(err).Error("Failed to complete job - master did not acknowledge")
 		a.stats.ConnectionErrors++
@@ -1232,27 +1233,29 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 		dirsToCheck = append(dirsToCheck, corpusDir)
 	}
 
-	// Check AFL++ output directories
+	// Check AFL++ output directories using dynamic discovery
+	// AFL++ creates instance directories: default (no flags), main (-M), secondary (-S), or custom names
 	aflOutput := filepath.Join(job.WorkDir, "output")
 	if stat, err := os.Stat(aflOutput); err == nil && stat.IsDir() {
-		// AFL++ stores crashes in output/afl_output/crashes/
-		aflCrashesDir := filepath.Join(aflOutput, "afl_output", "crashes")
-		if stat, err := os.Stat(aflCrashesDir); err == nil && stat.IsDir() {
-			dirsToCheck = append(dirsToCheck, aflCrashesDir)
-			a.logger.WithFields(logrus.Fields{
-				"job_id":          job.ID,
-				"afl_crashes_dir": aflCrashesDir,
-			}).Debug("Found AFL++ crashes directory")
-		}
-
-		// Also check the old location for backwards compatibility
-		oldAflCrashesDir := filepath.Join(aflOutput, "crashes")
-		if stat, err := os.Stat(oldAflCrashesDir); err == nil && stat.IsDir() {
-			dirsToCheck = append(dirsToCheck, oldAflCrashesDir)
-			a.logger.WithFields(logrus.Fields{
-				"job_id":          job.ID,
-				"afl_crashes_dir": oldAflCrashesDir,
-			}).Debug("Found AFL++ crashes directory (old location)")
+		// Use glob pattern to find ALL instance crash directories dynamically
+		// This handles custom instance names like "-M worker_1" or "-S fuzzer_2"
+		crashPattern := filepath.Join(aflOutput, "*", "crashes")
+		crashDirs, err := filepath.Glob(crashPattern)
+		if err != nil {
+			a.logger.WithError(err).WithField("pattern", crashPattern).Debug("Failed to glob for AFL++ crash directories")
+		} else {
+			for _, crashDir := range crashDirs {
+				if stat, err := os.Stat(crashDir); err == nil && stat.IsDir() {
+					dirsToCheck = append(dirsToCheck, crashDir)
+					// Extract instance name from path for logging
+					instanceName := filepath.Base(filepath.Dir(crashDir))
+					a.logger.WithFields(logrus.Fields{
+						"job_id":          job.ID,
+						"afl_crashes_dir": crashDir,
+						"instance_name":   instanceName,
+					}).Debug("Found AFL++ crashes directory")
+				}
+			}
 		}
 	}
 
@@ -1323,8 +1326,13 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 			if strings.HasPrefix(entry.Name(), "crash-") {
 				isCrashFile = true
 				crashType = "libfuzzer"
-			} else if strings.Contains(dir, filepath.Join("output", "crashes")) && !strings.HasPrefix(entry.Name(), "README") {
-				// AFL++ crash files are in output/crashes/ directory
+			} else if strings.Contains(dir, "crashes") &&
+				strings.Contains(dir, filepath.Join("output", "")) &&
+				!strings.Contains(dir, "libfuzzer") &&
+				!strings.Contains(dir, "honggfuzz") &&
+				!strings.HasPrefix(entry.Name(), "README") {
+				// AFL++ crash files are in output/<instance>/crashes/ directory
+				// The instance can be any name: default, main, secondary, or custom names from -M/-S flags
 				// Skip README files that AFL++ creates
 				isCrashFile = true
 				crashType = "afl++"
@@ -1364,9 +1372,9 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 					continue
 				}
 
-				// Create crash result
+				// Create crash result with UUID
 				crash := &common.CrashResult{
-					ID:          fmt.Sprintf("%s_%s", job.ID, entry.Name()),
+					ID:          uuid.New().String(),
 					JobID:       job.ID,
 					BotID:       a.config.ID,
 					Timestamp:   info.ModTime(),
@@ -1620,7 +1628,7 @@ func (a *Agent) retryPendingAcknowledgments() {
 		}).Info("Retrying job completion for pending acknowledgment")
 
 		// Try to complete the job again
-		err := a.client.CompleteJob(a.config.ID, jobStatus.Success, jobStatus.Message)
+		err := a.client.CompleteJob(a.config.ID, jobStatus.JobID, jobStatus.Success, jobStatus.Message)
 		if err != nil {
 			a.logger.WithError(err).WithField("job_id", jobStatus.JobID).Warn("Retry failed for pending job completion")
 			// Keep it as pending - the poller will eventually handle it

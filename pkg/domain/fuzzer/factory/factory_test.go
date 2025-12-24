@@ -232,9 +232,9 @@ func TestFactory_GetSupportedTypes(t *testing.T) {
 	factory := NewFactory(Options{})
 
 	// Initially empty
-	types := factory.GetSupportedTypes()
-	if len(types) != 0 {
-		t.Errorf("Expected 0 types, got %d", len(types))
+	supportedTypes := factory.GetSupportedTypes()
+	if len(supportedTypes) != 0 {
+		t.Errorf("Expected 0 types, got %d", len(supportedTypes))
 	}
 
 	// Register some engines
@@ -251,9 +251,9 @@ func TestFactory_GetSupportedTypes(t *testing.T) {
 		}
 	}
 
-	types = factory.GetSupportedTypes()
-	if len(types) != 3 {
-		t.Errorf("Expected 3 types, got %d", len(types))
+	supportedTypes = factory.GetSupportedTypes()
+	if len(supportedTypes) != 3 {
+		t.Errorf("Expected 3 types, got %d", len(supportedTypes))
 	}
 }
 

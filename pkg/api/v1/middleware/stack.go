@@ -58,10 +58,14 @@ func NewStack(logger logrus.FieldLogger) *Stack {
 			Logger:         logger.WithField("middleware", "tracing"),
 		},
 		validationConfig: &ValidationConfig{
-			MaxRequestSize:       10 * 1024 * 1024, // 10MB
-			RequiredContentTypes: []string{"application/json"},
-			SkipPaths:            []string{"/health", "/ready"},
-			Logger:               logger.WithField("middleware", "validation"),
+			MaxRequestSize: 100 * 1024 * 1024, // 100MB to allow binary uploads
+			RequiredContentTypes: []string{
+				"application/json",
+				"application/octet-stream",
+				"multipart/form-data",
+			},
+			SkipPaths: []string{"/health", "/ready"},
+			Logger:    logger.WithField("middleware", "validation"),
 		},
 	}
 }
@@ -157,10 +161,14 @@ func (s *Stack) ValidateRequest() func(http.Handler) http.Handler {
 
 // JWTAuth returns the JWT authentication middleware with configuration
 func (s *Stack) JWTAuth() func(http.Handler) http.Handler {
-	if s.authConfig != nil && s.authConfig.JWTSecret != "" {
-		return JWTAuth(s.authConfig.JWTSecret)
+	// Only apply JWT auth if a real secret is configured (not the default placeholder)
+	if s.authConfig != nil && s.authConfig.JWTSecret != "" && s.authConfig.JWTSecret != "default-secret-key" {
+		return JWTAuthWithConfig(*s.authConfig)
 	}
-	return JWTAuth("default-secret-key")
+	// Return a no-op middleware when auth is not configured
+	return func(next http.Handler) http.Handler {
+		return next
+	}
 }
 
 // APIKeyAuth returns the API key authentication middleware

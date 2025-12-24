@@ -299,7 +299,7 @@ func DevelopmentAPI(logger logrus.FieldLogger) http.Handler {
 
 ## Error Handling
 
-All middleware use RFC 7807 error responses via the existing error handling in `pkg/interfaces/api/rest/v1/errors.go`. Errors include:
+All middleware use RFC 7807 error responses via the existing error handling in `pkg/api/v1/errors/handlers.go`. Errors include:
 
 - Proper HTTP status codes
 - Structured error messages

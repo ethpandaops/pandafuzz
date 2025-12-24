@@ -3,6 +3,7 @@ package messaging
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -164,7 +165,7 @@ func subscribeHandlers(bus events.Bus, registry *handlers.Registry) {
 		// Create a composite handler for each event type
 		handler := registry.CreateBusHandler(eventType)
 		if err := bus.Subscribe(eventType, handler); err != nil {
-			panic(fmt.Sprintf("Failed to subscribe handler: %v", err))
+			log.Fatalf("Failed to subscribe handler: %v", err)
 		}
 	}
 }

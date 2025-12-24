@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/ethpandaops/pandafuzz/pkg/api/v1/generated"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
@@ -270,4 +271,50 @@ func (h *Handlers) HandleDownloadCoverageReport(w http.ResponseWriter, r *http.R
 
 	// Delegate to adapter
 	h.adapter.DownloadCoverageReport(w, r, jobId, reportId)
+}
+
+// HandleCancelJob handles POST /api/v1/jobs/{id}/cancel
+func (h *Handlers) HandleCancelJob(w http.ResponseWriter, r *http.Request) {
+	jobId := h.extractJobID(r)
+	h.adapter.CancelJob(w, r, jobId)
+}
+
+// HandlePushJobLogs handles POST /api/v1/jobs/{id}/logs/push
+func (h *Handlers) HandlePushJobLogs(w http.ResponseWriter, r *http.Request) {
+	jobId := h.extractJobID(r)
+	h.adapter.PushJobLogs(w, r, jobId.String())
+}
+
+// HandleDownloadJobBinary handles GET /api/v1/jobs/{id}/binary/download
+func (h *Handlers) HandleDownloadJobBinary(w http.ResponseWriter, r *http.Request) {
+	jobId := h.extractJobID(r)
+	h.adapter.DownloadJobBinary(w, r, jobId.String())
+}
+
+// HandleUploadBinary handles POST /api/v1/binaries
+func (h *Handlers) HandleUploadBinary(w http.ResponseWriter, r *http.Request) {
+	h.adapter.UploadBinary(w, r)
+}
+
+// HandleListRawCoverage handles GET /api/v1/jobs/{id}/coverage/raw
+func (h *Handlers) HandleListRawCoverage(w http.ResponseWriter, r *http.Request) {
+	jobId := h.extractJobID(r)
+	h.adapter.ListRawCoverage(w, r, generated.JobIdParam(jobId))
+}
+
+// HandleDownloadRawCoverageFile handles GET /api/v1/jobs/{id}/coverage/raw/{fileType}
+func (h *Handlers) HandleDownloadRawCoverageFile(w http.ResponseWriter, r *http.Request) {
+	jobId := h.extractJobID(r)
+	fileType := r.URL.Query().Get("fileType")
+	if fileType == "" {
+		// Extract from URL path if not in query
+		fileType = chi.URLParam(r, "fileType")
+	}
+	h.adapter.DownloadRawCoverageFile(w, r, generated.JobIdParam(jobId), fileType)
+}
+
+// HandleDownloadRawCoverageZip handles GET /api/v1/jobs/{id}/coverage/raw/all/zip
+func (h *Handlers) HandleDownloadRawCoverageZip(w http.ResponseWriter, r *http.Request) {
+	jobId := h.extractJobID(r)
+	h.adapter.DownloadRawCoverageZip(w, r, generated.JobIdParam(jobId))
 }

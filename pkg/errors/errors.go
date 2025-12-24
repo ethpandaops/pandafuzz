@@ -1,11 +1,146 @@
+// Package errors provides standardized error types and error handling utilities
+// for the PandaFuzz system. This package consolidates error handling from across
+// the codebase into a single location.
 package errors
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime"
 	"time"
 )
+
+// ErrorCode represents standardized error codes for the system (API-level codes)
+type ErrorCode string
+
+const (
+	// General error codes
+	ErrCodeInternal      ErrorCode = "INTERNAL_ERROR"
+	ErrCodeInvalidInput  ErrorCode = "INVALID_INPUT"
+	ErrCodeNotFound      ErrorCode = "NOT_FOUND"
+	ErrCodeAlreadyExists ErrorCode = "ALREADY_EXISTS"
+	ErrCodeUnauthorized  ErrorCode = "UNAUTHORIZED"
+	ErrCodeForbidden     ErrorCode = "FORBIDDEN"
+
+	// Fuzzing-specific error codes
+	ErrCodeFuzzerInit     ErrorCode = "FUZZER_INIT_ERROR"
+	ErrCodeFuzzerExec     ErrorCode = "FUZZER_EXEC_ERROR"
+	ErrCodeFuzzerTimeout  ErrorCode = "FUZZER_TIMEOUT"
+	ErrCodeCorpusSync     ErrorCode = "CORPUS_SYNC_ERROR"
+	ErrCodeCorpusInvalid  ErrorCode = "CORPUS_INVALID"
+	ErrCodeJobInvalid     ErrorCode = "JOB_INVALID"
+	ErrCodeJobNotFound    ErrorCode = "JOB_NOT_FOUND"
+	ErrCodeBinaryNotFound ErrorCode = "BINARY_NOT_FOUND"
+
+	// Storage error codes
+	ErrCodeStorageRead  ErrorCode = "STORAGE_READ_ERROR"
+	ErrCodeStorageWrite ErrorCode = "STORAGE_WRITE_ERROR"
+	ErrCodeStorageFull  ErrorCode = "STORAGE_FULL"
+
+	// Network error codes
+	ErrCodeNetworkTimeout    ErrorCode = "NETWORK_TIMEOUT"
+	ErrCodeNetworkConnection ErrorCode = "NETWORK_CONNECTION_ERROR"
+)
+
+// Sentinel errors for common error conditions
+var (
+	ErrNotImplemented          = errors.New("not implemented")
+	ErrCampaignNotFound        = errors.New("campaign not found")
+	ErrCampaignRunning         = errors.New("campaign is already running")
+	ErrInvalidStackTrace       = errors.New("invalid stack trace format")
+	ErrCorpusFileTooLarge      = errors.New("corpus file exceeds size limit")
+	ErrDuplicateCorpusFile     = errors.New("corpus file already exists")
+	ErrCampaignCompleted       = errors.New("campaign is already completed")
+	ErrCampaignPaused          = errors.New("campaign is paused")
+	ErrNoCampaignJobs          = errors.New("no jobs found for campaign")
+	ErrInvalidCampaignState    = errors.New("invalid campaign state transition")
+	ErrCrashGroupNotFound      = errors.New("crash group not found")
+	ErrCorpusFileNotFound      = errors.New("corpus file not found")
+	ErrBinaryHashMismatch      = errors.New("binary hash mismatch between campaigns")
+	ErrKeyNotFound             = errors.New("key not found")
+	ErrTransactionFail         = errors.New("transaction failed")
+	ErrDatabaseClosed          = errors.New("database is closed")
+	ErrInvalidConfig           = errors.New("invalid database configuration")
+	ErrMigrationFailed         = errors.New("database migration failed")
+	ErrBackupFailed            = errors.New("database backup failed")
+	ErrRestoreFailed           = errors.New("database restore failed")
+	ErrQuarantinedFileNotFound = errors.New("quarantined file not found")
+	ErrDuplicateCrash          = errors.New("crash already exists (duplicate hash for job)")
+)
+
+// TimeoutErr represents an error when an operation times out
+type TimeoutErr struct {
+	Operation string
+	Duration  time.Duration
+}
+
+// Error returns the error message for TimeoutErr
+func (e *TimeoutErr) Error() string {
+	return fmt.Sprintf("operation '%s' timed out after %v", e.Operation, e.Duration)
+}
+
+// RetryExhaustedError represents an error when all retry attempts have been exhausted
+type RetryExhaustedError struct {
+	Operation string
+	Attempts  int
+	LastError error
+}
+
+// Error returns the error message for RetryExhaustedError
+func (e *RetryExhaustedError) Error() string {
+	if e.LastError != nil {
+		return fmt.Sprintf("operation '%s' failed after %d attempts: %v", e.Operation, e.Attempts, e.LastError)
+	}
+	return fmt.Sprintf("operation '%s' failed after %d attempts", e.Operation, e.Attempts)
+}
+
+// Unwrap returns the underlying error
+func (e *RetryExhaustedError) Unwrap() error {
+	return e.LastError
+}
+
+// NewRetryExhaustedError creates a new RetryExhaustedError
+func NewRetryExhaustedError(operation string, attempts int, lastError error) *RetryExhaustedError {
+	return &RetryExhaustedError{
+		Operation: operation,
+		Attempts:  attempts,
+		LastError: lastError,
+	}
+}
+
+// CodedError represents an error with an API-level error code
+type CodedError struct {
+	Code    ErrorCode      `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
+}
+
+// NewCodedError creates a new error with an error code
+func NewCodedError(code ErrorCode, message string) *CodedError {
+	return &CodedError{
+		Code:    code,
+		Message: message,
+		Details: make(map[string]any, 4),
+	}
+}
+
+// Error implements the error interface
+func (e *CodedError) Error() string {
+	if len(e.Details) > 0 {
+		return fmt.Sprintf("[%s] %s (details: %v)", e.Code, e.Message, e.Details)
+	}
+	return fmt.Sprintf("[%s] %s", e.Code, e.Message)
+}
+
+// WithDetails adds additional details to the error
+func (e *CodedError) WithDetails(key string, value any) *CodedError {
+	if e.Details == nil {
+		e.Details = make(map[string]any, 4)
+	}
+	e.Details[key] = value
+	return e
+}
 
 // ErrorType represents the type of error
 type ErrorType string

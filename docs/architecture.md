@@ -295,6 +295,100 @@ Key features:
 - SHA256-based deduplication
 - Atomic file operations
 
+## Package Structure
+
+The codebase follows domain-driven design with focused packages:
+
+```
+pkg/
+├── api/v1/              # REST API handlers and middleware
+│   ├── handlers/        # HTTP handlers with adapter pattern
+│   ├── adapters/        # Service to HTTP adapters
+│   └── middleware/      # Request/response middleware
+├── bot/                 # Bot agent implementation
+│   ├── agent.go         # Main bot agent
+│   └── executor_*.go    # Fuzzer executors
+├── common/              # Shared types and re-exports
+│   ├── types.go         # Core domain types (Job, Bot, CrashResult)
+│   ├── config.go        # Configuration types
+│   └── interfaces.go    # Shared interfaces
+├── config/              # Configuration management
+│   ├── defaults.go      # Default configuration values
+│   └── database.go      # Database config with validation
+├── database/            # Database abstraction
+│   └── interface.go     # Database and Transaction interfaces
+├── domain/              # Business logic domain
+│   ├── bot/             # Bot management
+│   ├── campaign/        # Campaign orchestration
+│   ├── corpus/          # Corpus management
+│   │   ├── selection/   # Corpus selection strategies
+│   │   ├── sync/        # Corpus synchronization
+│   │   └── quarantine/  # Problem input quarantine
+│   ├── crash/           # Crash analysis
+│   │   ├── minimizer/   # Crash minimization
+│   │   └── converter.go # Type conversion
+│   ├── fuzzer/          # Fuzzer engines
+│   │   ├── factory/     # Fuzzer factory
+│   │   ├── types/       # Fuzzer interfaces
+│   │   └── engines/     # Engine implementations
+│   │       ├── libfuzzer/
+│   │       ├── aflplusplus/
+│   │       └── honggfuzz/
+│   └── job/             # Job scheduling
+├── errors/              # Error types and handling
+│   └── errors.go        # Error codes and classification
+├── master/              # Master server
+│   ├── server.go        # HTTP server
+│   ├── routes.go        # API routes
+│   ├── state_core.go    # PersistentState struct
+│   ├── state_bot.go     # Bot CRUD operations
+│   ├── state_job.go     # Job CRUD and assignment
+│   ├── state_crash.go   # Crash processing
+│   ├── state.go         # Recovery and stats
+│   ├── state_adapter.go # StateStore adapter
+│   └── api_v3/          # Extended API v3
+├── retry/               # Retry logic
+│   ├── manager.go       # Retry manager
+│   └── policy.go        # Retry policies
+├── service/             # Application services
+│   ├── manager.go       # Service manager
+│   ├── analytics_service.go  # Analytics
+│   ├── corpus_service.go     # Corpus operations
+│   └── dependencies.go       # Service interfaces
+└── infrastructure/      # Infrastructure concerns
+    ├── storage/         # Storage backends
+    │   └── drivers/     # fs, s3 drivers
+    ├── persistence/     # Persistence layer
+    │   └── sqlite/      # SQLite implementation
+    └── monitoring/      # Metrics and health
+```
+
+### Key Package Responsibilities
+
+| Package | Responsibility |
+|---------|---------------|
+| `pkg/common` | Canonical types (Job, Bot, CrashResult), re-exports from focused packages |
+| `pkg/config` | Configuration with defaults and validation |
+| `pkg/database` | Database interface abstraction |
+| `pkg/errors` | Error types, codes, and classification functions |
+| `pkg/retry` | Retry manager and circuit breaker |
+| `pkg/master` | Master server with state management (split into focused files) |
+| `pkg/service` | Application services including analytics |
+| `pkg/domain/*` | Domain-specific business logic |
+
+### State Management Split
+
+The master state management is split across focused files:
+
+| File | Lines | Responsibility |
+|------|-------|---------------|
+| `state_core.go` | ~80 | PersistentState struct, constructor |
+| `state_bot.go` | ~240 | Bot CRUD, timeout detection, cache |
+| `state_job.go` | ~700 | Job CRUD, assignment, completion |
+| `state_crash.go` | ~400 | Crash/coverage/corpus processing |
+| `state.go` | ~730 | Recovery, stats, lifecycle |
+| `state_adapter.go` | ~360 | StateStore interface adapter |
+
 ## Explicitly Excluded Features
 
 - ❌ Multi-master support

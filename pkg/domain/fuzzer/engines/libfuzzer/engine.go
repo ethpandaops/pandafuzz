@@ -3,8 +3,6 @@ package libfuzzer
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 
 	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/types"
@@ -313,6 +312,12 @@ func (e *Engine) Configure(config *types.FuzzerConfig) error {
 		return errors.New("cannot configure while fuzzer is running")
 	}
 	e.config = config
+
+	// Set target from config if not already set
+	if e.target == "" && config.Target != "" {
+		e.target = config.Target
+	}
+
 	return nil
 }
 
@@ -419,6 +424,12 @@ func (e *Engine) processStdout() {
 	for e.stdoutScanner.Scan() {
 		line := e.stdoutScanner.Text()
 		e.parseLine(line)
+
+		// Write to output file if configured
+		if e.config != nil && e.config.OutputWriter != nil {
+			timestamp := time.Now().Format(time.RFC3339)
+			fmt.Fprintf(e.config.OutputWriter, "%s [stdout] %s\n", timestamp, line)
+		}
 	}
 }
 
@@ -430,6 +441,12 @@ func (e *Engine) processStderr() {
 	for e.stderrScanner.Scan() {
 		line := e.stderrScanner.Text()
 		e.parseLine(line)
+
+		// Write to output file if configured
+		if e.config != nil && e.config.OutputWriter != nil {
+			timestamp := time.Now().Format(time.RFC3339)
+			fmt.Fprintf(e.config.OutputWriter, "%s [stderr] %s\n", timestamp, line)
+		}
 
 		// Check for crashes in stderr
 		if e.crashRegex.MatchString(line) {
@@ -571,11 +588,9 @@ func (e *Engine) handleCrash(line string) {
 	}
 }
 
-// generateCrashID generates a unique crash ID
+// generateCrashID generates a unique crash ID using UUID
 func (e *Engine) generateCrashID() string {
-	hash := sha256.New()
-	hash.Write([]byte(fmt.Sprintf("%s-%d", time.Now().String(), e.crashCount)))
-	return hex.EncodeToString(hash.Sum(nil))[:16]
+	return uuid.New().String()
 }
 
 // monitorProcess monitors the fuzzer process

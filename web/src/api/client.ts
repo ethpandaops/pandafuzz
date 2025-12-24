@@ -74,12 +74,12 @@ export class PandaFuzzAPI {
 
   // Bot endpoints
   async getBots(): Promise<Bot[]> {
-    const response = await this.client.get<{bots: Bot[], count: number}>('/bots');
-    // Handle both array response and object with bots array
+    const response = await this.client.get<{data: Bot[], pagination: any}>('/bots');
+    // Handle both array response and object with data array
     if (Array.isArray(response.data)) {
       return response.data;
     }
-    return response.data.bots || [];
+    return response.data.data || [];
   }
 
   async getBot(id: string): Promise<Bot> {
@@ -99,12 +99,12 @@ export class PandaFuzzAPI {
     sort_by?: string;
     sort_order?: 'asc' | 'desc';
   }): Promise<Job[]> {
-    const response = await this.client.get<{jobs: Job[], count: number, total: number}>('/jobs', { params });
-    // Handle both array response and object with jobs array
+    const response = await this.client.get<{data: Job[], pagination: any}>('/jobs', { params });
+    // Handle both array response and object with data array
     if (Array.isArray(response.data)) {
       return response.data;
     }
-    return response.data.jobs || [];
+    return response.data.data || [];
   }
 
   async getJob(id: string): Promise<Job> {
@@ -164,16 +164,18 @@ export class PandaFuzzAPI {
     sort_order?: 'asc' | 'desc';
   }): Promise<CrashResult[]> {
     try {
-      // Use v1 API for crashes since v3 doesn't have this endpoint yet
-      const response = await this.v1Client.get<{
-        crashes: CrashResult[];
-        count: number;
-        limit: number;
-        offset: number;
-      }>('/results/crashes', {
+      // Use unified API for crashes
+      const response = await this.client.get<{
+        data: CrashResult[];
+        pagination: {
+          total: number;
+          limit: number;
+          offset: number;
+        };
+      }>('/crashes', {
         params,
       });
-      return response.data.crashes || [];
+      return response.data.data || [];
     } catch (error) {
       // Return empty array if endpoint doesn't exist
       console.warn('Crashes endpoint error:', error);
@@ -220,7 +222,7 @@ export class PandaFuzzAPI {
       }
 
       // Calculate stats
-      const activeBots = bots.filter((b) => b.status !== 'offline').length;
+      const activeBots = bots.filter((b) => b.is_online).length;
       const runningJobs = jobs.filter((j) => j.status === 'running').length;
       const uniqueCrashes = new Set(crashes.map((c) => c.hash)).size;
 

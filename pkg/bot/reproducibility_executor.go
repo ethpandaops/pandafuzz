@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
-	"github.com/ethpandaops/pandafuzz/pkg/fuzzer"
+	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/adapter"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
@@ -27,7 +27,7 @@ type ReproducibilityExecutor struct {
 // ReproductionExecution represents an active reproduction execution
 type ReproductionExecution struct {
 	Request    *common.ReproductionRequest
-	Fuzzer     fuzzer.Fuzzer
+	Fuzzer     adapter.Fuzzer
 	Context    context.Context
 	Cancel     context.CancelFunc
 	StartTime  time.Time
@@ -130,7 +130,7 @@ func (re *ReproducibilityExecutor) ExecuteReproduction(
 	execution.LastUpdate = time.Now()
 
 	// Step 4: Configure reproduction
-	reproConfig := fuzzer.ReproductionConfig{
+	reproConfig := adapter.ReproductionConfig{
 		Attempts:         1, // Single attempt per request
 		Timeout:          5 * time.Minute,
 		CollectDebugInfo: true,
@@ -180,7 +180,7 @@ func (re *ReproducibilityExecutor) downloadCrashInput(ctx context.Context, crash
 }
 
 // getFuzzerForReproduction gets or creates a fuzzer instance for reproduction
-func (re *ReproducibilityExecutor) getFuzzerForReproduction(request *common.ReproductionRequest) (fuzzer.Fuzzer, error) {
+func (re *ReproducibilityExecutor) getFuzzerForReproduction(request *common.ReproductionRequest) (adapter.Fuzzer, error) {
 	// Determine fuzzer type from request or default to libfuzzer
 	fuzzerType := "libfuzzer"
 	if request.Config.Dictionary != "" {
@@ -189,23 +189,20 @@ func (re *ReproducibilityExecutor) getFuzzerForReproduction(request *common.Repr
 	}
 
 	// Create appropriate fuzzer instance like FuzzerJobExecutor does
-	var fuzz fuzzer.Fuzzer
+	var fuzz *adapter.FuzzerAdapter
 
 	switch fuzzerType {
 	case "aflplusplus", "afl++", "afl":
-		aflFuzz := fuzzer.NewAFLPlusPlus(re.logger)
-		aflFuzz.SetBotID(re.botID)
-		fuzz = aflFuzz
+		fuzz = adapter.NewAFLPlusPlus(re.logger)
+		fuzz.SetBotID(re.botID)
 
 	case "libfuzzer":
-		libFuzz := fuzzer.NewLibFuzzer(re.logger)
-		libFuzz.SetBotID(re.botID)
-		fuzz = libFuzz
+		fuzz = adapter.NewLibFuzzer(re.logger)
+		fuzz.SetBotID(re.botID)
 
 	case "honggfuzz":
-		honggFuzz := fuzzer.NewHonggfuzz(re.logger)
-		honggFuzz.SetBotID(re.botID)
-		fuzz = honggFuzz
+		fuzz = adapter.NewHonggfuzz(re.logger)
+		fuzz.SetBotID(re.botID)
 
 	default:
 		return nil, fmt.Errorf("unsupported fuzzer type: %s", fuzzerType)
@@ -239,7 +236,7 @@ func (re *ReproducibilityExecutor) getFuzzerForReproduction(request *common.Repr
 	}
 
 	// Configure the fuzzer for reproduction
-	fuzzConfig := fuzzer.FuzzConfig{
+	fuzzConfig := adapter.FuzzConfig{
 		JobID:         request.JobID,
 		Target:        request.Config.OutputDir, // Use from job config
 		WorkDirectory: workDir,

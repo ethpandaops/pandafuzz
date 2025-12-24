@@ -25,13 +25,13 @@ type corpusService struct {
 }
 
 // NewCorpusService creates a new corpus service instance
-func NewCorpusService(storage common.Storage, fileStorage common.FileStorage, corpusDir string, logger logrus.FieldLogger) common.CorpusService {
+func NewCorpusService(storage common.Storage, fileStorage common.FileStorage, corpusDir string, logger logrus.FieldLogger) (common.CorpusService, error) {
 	// Validate dependencies
 	if storage == nil {
-		panic("corpus service requires storage to be initialized")
+		return nil, fmt.Errorf("corpus service: storage is required")
 	}
 	if logger == nil {
-		panic("corpus service requires logger to be initialized")
+		return nil, fmt.Errorf("corpus service: logger is required")
 	}
 
 	// corpusDir is now used as a prefix for S3 keys when using backend storage
@@ -46,7 +46,7 @@ func NewCorpusService(storage common.Storage, fileStorage common.FileStorage, co
 	// Initialize quarantine manager
 	cs.quarantine = NewCorpusQuarantine(storage, fileStorage, logger)
 
-	return cs
+	return cs, nil
 }
 
 // AddFile adds a new corpus file to the campaign

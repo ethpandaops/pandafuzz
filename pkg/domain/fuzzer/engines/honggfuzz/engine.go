@@ -3,8 +3,6 @@ package honggfuzz
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 
 	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/types"
@@ -343,6 +342,11 @@ func (e *Engine) Configure(config *types.FuzzerConfig) error {
 	}
 	e.config = config
 
+	// Set target from config if not already set
+	if e.target == "" && config.Target != "" {
+		e.target = config.Target
+	}
+
 	// Set output directory from config if not already set
 	if e.outputDir == "" && config.OutputDir != "" {
 		e.outputDir = config.OutputDir
@@ -459,6 +463,16 @@ func (e *Engine) buildCommandArgs() []string {
 		args = append(args, "--socket_fuzzer")
 	}
 
+	// Stdin mode - use stdin for input instead of file
+	if opts.StdinMode {
+		args = append(args, "-s")
+	}
+
+	// Persistent mode - for targets using HF_ITER
+	if opts.Persistent {
+		args = append(args, "--persistent")
+	}
+
 	// Network options
 	if opts.NetDriver {
 		args = append(args, "--netdriver")
@@ -489,11 +503,40 @@ func (e *Engine) buildCommandArgs() []string {
 		args = append(args, e.config.ExtraArgs...)
 	}
 
+	// Determine target binary path - prefer config.Target if e.target is empty
+	target := e.target
+	if target == "" && e.config != nil && e.config.Target != "" {
+		target = e.config.Target
+	}
+
+	// Check if target args contain ___FILE___ placeholder
+	hasFilePlaceholder := false
+	for _, arg := range e.args {
+		if strings.Contains(arg, "___FILE___") {
+			hasFilePlaceholder = true
+			break
+		}
+	}
+	for _, arg := range e.config.ExtraArgs {
+		if strings.Contains(arg, "___FILE___") {
+			hasFilePlaceholder = true
+			break
+		}
+	}
+
+	// Default to stdin mode if no input mode is specified
+	// Honggfuzz requires one of: ___FILE___ placeholder, -s (stdin), --persistent, or --socket_fuzzer
+	if !hasFilePlaceholder && !opts.StdinMode && !opts.Persistent && !opts.SocketFuzzing {
+		// Default to stdin mode for maximum compatibility
+		args = append(args, "-s")
+		e.log.Debug("No input mode specified, defaulting to stdin mode (-s)")
+	}
+
 	// Add separator
 	args = append(args, "--")
 
 	// Add target and target args
-	args = append(args, e.target)
+	args = append(args, target)
 	args = append(args, e.args...)
 
 	return args
@@ -534,6 +577,12 @@ func (e *Engine) processOutput(reader io.Reader, source string) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		e.log.WithField("source", source).Debug(line)
+
+		// Write to output file if configured
+		if e.config != nil && e.config.OutputWriter != nil {
+			timestamp := time.Now().Format(time.RFC3339)
+			fmt.Fprintf(e.config.OutputWriter, "%s [%s] %s\n", timestamp, source, line)
+		}
 
 		// Parse statistics from output
 		e.parseStats(line)
@@ -732,11 +781,9 @@ func (e *Engine) checkForCrashes() {
 	}
 }
 
-// generateCrashID generates a unique crash ID
+// generateCrashID generates a unique crash ID using UUID
 func (e *Engine) generateCrashID() string {
-	hash := sha256.New()
-	hash.Write([]byte(fmt.Sprintf("%s-%d-%d", time.Now().String(), e.lastCrashes, len(e.crashes))))
-	return hex.EncodeToString(hash.Sum(nil))[:16]
+	return uuid.New().String()
 }
 
 // monitorProcess monitors the fuzzer process

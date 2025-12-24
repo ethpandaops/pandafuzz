@@ -503,3 +503,58 @@ func WriteError(w http.ResponseWriter, r *http.Request, problem *Problem) {
 func WriteErrorFromCode(w http.ResponseWriter, r *http.Request, statusCode int, detail string) {
 	defaultHandler.WriteErrorFromCode(w, r, statusCode, detail)
 }
+
+// WriteErrorSimple writes an error response without requiring a request object
+// This is a convenience function for middleware that may not have access to the request
+func WriteErrorSimple(w http.ResponseWriter, statusCode int, detail string) {
+	problem := &Problem{
+		Type:   getTypeForStatus(statusCode),
+		Title:  http.StatusText(statusCode),
+		Status: statusCode,
+		Detail: detail,
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(problem)
+}
+
+// WriteErrorWithDetails writes an error response with additional details
+func WriteErrorWithDetails(w http.ResponseWriter, statusCode int, detail string, details map[string]interface{}) {
+	problem := &Problem{
+		Type:       getTypeForStatus(statusCode),
+		Title:      http.StatusText(statusCode),
+		Status:     statusCode,
+		Detail:     detail,
+		Extensions: make(map[string]any),
+	}
+	for k, v := range details {
+		problem.Extensions[k] = v
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(problem)
+}
+
+// getTypeForStatus returns the problem type URI for a given HTTP status code
+func getTypeForStatus(statusCode int) string {
+	switch statusCode {
+	case http.StatusBadRequest:
+		return TypeBadRequest
+	case http.StatusUnauthorized:
+		return TypeUnauthorized
+	case http.StatusForbidden:
+		return TypeForbidden
+	case http.StatusNotFound:
+		return TypeNotFound
+	case http.StatusConflict:
+		return TypeConflict
+	case http.StatusTooManyRequests:
+		return TypeRateLimit
+	case http.StatusInternalServerError:
+		return TypeInternalError
+	case http.StatusServiceUnavailable:
+		return TypeServiceUnavailable
+	default:
+		return "about:blank"
+	}
+}

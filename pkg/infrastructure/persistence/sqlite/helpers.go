@@ -126,9 +126,9 @@ func ScanRows(rows *sql.Rows, scanner func() error) error {
 }
 
 // BuildInsertQuery builds a parameterized INSERT query
-func BuildInsertQuery(table string, columns []string) string {
+func BuildInsertQuery(table string, columns []string) (string, error) {
 	if len(columns) == 0 {
-		panic("BuildInsertQuery: no columns provided")
+		return "", fmt.Errorf("BuildInsertQuery: no columns provided for table %s", table)
 	}
 
 	placeholders := make([]string, len(columns))
@@ -141,13 +141,13 @@ func BuildInsertQuery(table string, columns []string) string {
 		table,
 		strings.Join(columns, ", "),
 		strings.Join(placeholders, ", "),
-	)
+	), nil
 }
 
 // BuildUpdateQuery builds a parameterized UPDATE query
-func BuildUpdateQuery(table string, columns []string, whereClause string) string {
+func BuildUpdateQuery(table string, columns []string, whereClause string) (string, error) {
 	if len(columns) == 0 {
-		panic("BuildUpdateQuery: no columns provided")
+		return "", fmt.Errorf("BuildUpdateQuery: no columns provided for table %s", table)
 	}
 
 	setClauses := make([]string, len(columns))
@@ -165,13 +165,16 @@ func BuildUpdateQuery(table string, columns []string, whereClause string) string
 		query += " WHERE " + whereClause
 	}
 
-	return query
+	return query, nil
 }
 
 // BuildBulkInsertQuery builds a bulk INSERT query for multiple rows
-func BuildBulkInsertQuery(table string, columns []string, rowCount int) string {
-	if len(columns) == 0 || rowCount <= 0 {
-		panic("BuildBulkInsertQuery: invalid parameters")
+func BuildBulkInsertQuery(table string, columns []string, rowCount int) (string, error) {
+	if len(columns) == 0 {
+		return "", fmt.Errorf("BuildBulkInsertQuery: no columns provided for table %s", table)
+	}
+	if rowCount <= 0 {
+		return "", fmt.Errorf("BuildBulkInsertQuery: invalid row count %d for table %s", rowCount, table)
 	}
 
 	valuePlaceholders := make([]string, rowCount)
@@ -190,7 +193,7 @@ func BuildBulkInsertQuery(table string, columns []string, rowCount int) string {
 		table,
 		strings.Join(columns, ", "),
 		strings.Join(valuePlaceholders, ", "),
-	)
+	), nil
 }
 
 // NullString converts a string to sql.NullString

@@ -79,6 +79,8 @@ type TimeoutConfig struct {
 	HTTPRequest     time.Duration `yaml:"http_request" json:"http_request"`
 	BotRegistration time.Duration `yaml:"bot_registration" json:"bot_registration"`
 	JobAssignment   time.Duration `yaml:"job_assignment" json:"job_assignment"`
+	// Queue buffer for job timeout calculation
+	QueueBuffer time.Duration `yaml:"queue_buffer" json:"queue_buffer"`
 }
 
 // BotTimeoutConfig holds bot-specific timeout configurations
@@ -175,6 +177,55 @@ type BotResourceConfig struct {
 // QueueConfig holds queue system configuration
 type QueueConfig struct {
 	Backend string `yaml:"backend" json:"backend"` // "memory" or "asynq"
+}
+
+// Validate validates the master configuration and returns all validation errors
+func (c *MasterConfig) Validate() []error {
+	var errs []error
+
+	// Server validation
+	if c.Server.Port < 1 || c.Server.Port > 65535 {
+		errs = append(errs, fmt.Errorf("server.port: must be between 1 and 65535, got %d", c.Server.Port))
+	}
+	if c.Server.ReadTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("server.read_timeout: must be positive"))
+	}
+	if c.Server.WriteTimeout <= 0 {
+		errs = append(errs, fmt.Errorf("server.write_timeout: must be positive"))
+	}
+
+	// Database validation
+	if err := c.Database.Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("database: %w", err))
+	}
+
+	// Storage validation
+	if err := c.Storage.Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("storage: %w", err))
+	}
+
+	// Timeout validation
+	if c.Timeouts.BotHeartbeat < 10*time.Second {
+		errs = append(errs, fmt.Errorf("timeouts.bot_heartbeat: should be at least 10s, got %v", c.Timeouts.BotHeartbeat))
+	}
+	if c.Timeouts.JobExecution < time.Minute {
+		errs = append(errs, fmt.Errorf("timeouts.job_execution: should be at least 1m, got %v", c.Timeouts.JobExecution))
+	}
+
+	// Limits validation
+	if c.Limits.MaxConcurrentJobs < 1 {
+		errs = append(errs, fmt.Errorf("limits.max_concurrent_jobs: must be at least 1"))
+	}
+	if c.Limits.MaxCorpusSize < 1024*1024 {
+		errs = append(errs, fmt.Errorf("limits.max_corpus_size: should be at least 1MB"))
+	}
+
+	// Circuit breaker validation
+	if c.Circuit.Enabled && c.Circuit.MaxFailures < 1 {
+		errs = append(errs, fmt.Errorf("circuit.max_failures: must be at least 1 when enabled"))
+	}
+
+	return errs
 }
 
 // ConfigManager handles configuration loading and validation
@@ -399,6 +450,9 @@ func (cm *ConfigManager) SetMasterDefaults(master *MasterConfig) {
 	}
 	if master.Timeouts.DatabaseRetries == 0 {
 		master.Timeouts.DatabaseRetries = 5
+	}
+	if master.Timeouts.QueueBuffer == 0 {
+		master.Timeouts.QueueBuffer = 300 * time.Second // 5 minutes default queue buffer
 	}
 
 	// Resource limits defaults

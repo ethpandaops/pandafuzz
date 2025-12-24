@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
-	"github.com/ethpandaops/pandafuzz/pkg/fuzzer"
+	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/adapter"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -177,7 +177,7 @@ func TestResultCollector_ProcessEvents(t *testing.T) {
 			Timestamp: time.Now(),
 			JobID:     "test-job",
 			Data: map[string]interface{}{
-				"stats": &fuzzer.FuzzerStats{
+				"stats": &adapter.FuzzerStats{
 					Executions:    10000,
 					ExecPerSecond: 500,
 					TotalEdges:    2000,

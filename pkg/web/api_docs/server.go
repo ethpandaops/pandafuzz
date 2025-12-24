@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/gorilla/mux"
+	"github.com/go-chi/chi/v5"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -78,23 +78,23 @@ func NewServer(config *Config, logger *logrus.Logger) (*Server, error) {
 
 // Start starts the API documentation server
 func (s *Server) Start() error {
-	router := mux.NewRouter()
+	router := chi.NewRouter()
 
 	// Serve OpenAPI spec
-	router.HandleFunc(s.config.BasePath+"/openapi.json", s.handleOpenAPISpec)
+	router.Get(s.config.BasePath+"/openapi.json", s.handleOpenAPISpec)
 
 	// Serve Swagger UI
-	router.HandleFunc(s.config.BasePath, s.handleSwaggerUI)
-	router.HandleFunc(s.config.BasePath+"/", s.handleSwaggerUI)
+	router.Get(s.config.BasePath, s.handleSwaggerUI)
+	router.Get(s.config.BasePath+"/", s.handleSwaggerUI)
 
 	// Serve static Swagger UI files
-	router.PathPrefix(s.config.BasePath + "/static/").Handler(
+	router.Handle(s.config.BasePath+"/static/*",
 		http.StripPrefix(s.config.BasePath+"/static/",
 			http.FileServer(http.FS(swaggerUIFiles))))
 
 	// API examples and code generation endpoints
-	router.HandleFunc(s.config.BasePath+"/examples/{language}", s.handleCodeExamples)
-	router.HandleFunc(s.config.BasePath+"/test", s.handleAPITest)
+	router.Get(s.config.BasePath+"/examples/{language}", s.handleCodeExamples)
+	router.Post(s.config.BasePath+"/test", s.handleAPITest)
 
 	addr := fmt.Sprintf(":%d", s.config.Port)
 	s.logger.Infof("Starting API documentation server on http://localhost%s%s", addr, s.config.BasePath)
@@ -150,8 +150,7 @@ func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
 
 // handleCodeExamples generates code examples for different languages
 func (s *Server) handleCodeExamples(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	language := vars["language"]
+	language := chi.URLParam(r, "language")
 
 	examples := s.generateCodeExamples(language)
 

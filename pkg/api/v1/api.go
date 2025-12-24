@@ -89,7 +89,8 @@ type Services struct {
 	Analytics       service.AnalyticsService
 
 	// Storage
-	Storage common.Storage
+	Storage     common.Storage
+	FileStorage common.FileStorage
 
 	// Repositories
 	BotRepo      botRepo.AgentRepository
@@ -148,6 +149,8 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 		services.BotRegistry,
 		services.BotRepo,
 		services.JobRepo,
+		services.Bot,
+		services.Job,
 		sseManager,
 		apiLogger,
 	)
@@ -155,6 +158,9 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 	jobAdapter := adapters.NewJobAdapter(
 		services.JobRepo,
 		services.Executor,
+		services.Job,
+		services.Storage,
+		services.FileStorage,
 		sseManager,
 		apiLogger,
 	)
@@ -169,6 +175,7 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 	// Create corpus adapter
 	corpusAdapter := adapters.NewCorpusAdapter(
 		services.Corpus,
+		services.Storage,
 		sseManager,
 		apiLogger,
 	)
@@ -194,6 +201,16 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 		apiLogger,
 	)
 
+	// Create system adapter for system management endpoints
+	systemAdapter := adapters.NewSystemAdapter(
+		services.Bot,
+		services.Job,
+		services.Storage,
+		sseManager,
+		nil, // VersionInfo - can be passed if available
+		apiLogger,
+	)
+
 	// Create composite adapter
 	compositeAdapter := adapters.NewCompositeAdapter(
 		botAdapter,
@@ -202,6 +219,7 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 		corpusAdapter,
 		crashAdapter,
 		analyticsAdapter,
+		systemAdapter,
 		sseManager,
 		apiLogger,
 	)
@@ -266,10 +284,15 @@ func buildMiddlewareStack(config *Config, logger logrus.FieldLogger) *middleware
 	// Configure validation if enabled
 	if config.EnableSchemaValidation {
 		validationConfig := &middleware.ValidationConfig{
-			MaxRequestSize:       config.MaxRequestSize,
-			RequiredContentTypes: []string{"application/json"},
-			SkipPaths:            []string{"/health", "/ready"},
-			Logger:               logger.WithField("middleware", "validation"),
+			MaxRequestSize: config.MaxRequestSize,
+			RequiredContentTypes: []string{
+				"application/json",
+				"application/octet-stream",
+				"multipart/form-data",
+				"text/plain", // For log uploads
+			},
+			SkipPaths: []string{"/health", "/ready"},
+			Logger:    logger.WithField("middleware", "validation"),
 		}
 		stack = stack.WithValidationConfig(validationConfig)
 	}

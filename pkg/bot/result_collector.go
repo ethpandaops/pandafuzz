@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
-	"github.com/ethpandaops/pandafuzz/pkg/fuzzer"
+	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/adapter"
 	"github.com/sirupsen/logrus"
 )
 
@@ -33,7 +33,7 @@ type ResultCollector struct {
 	crashBatch    []*common.CrashResult
 	coverageBatch []*common.CoverageResult
 	corpusBatch   []*common.CorpusUpdate
-	statsBatch    []*fuzzer.FuzzerStats
+	statsBatch    []*adapter.FuzzerStats
 
 	// Synchronization
 	mu          sync.Mutex
@@ -73,7 +73,7 @@ func NewResultCollector(config *common.BotConfig, masterURL string, logger *logr
 		crashBatch:    make([]*common.CrashResult, 0, defaultBatchSize),
 		coverageBatch: make([]*common.CoverageResult, 0, defaultBatchSize),
 		corpusBatch:   make([]*common.CorpusUpdate, 0, defaultBatchSize),
-		statsBatch:    make([]*fuzzer.FuzzerStats, 0, defaultBatchSize),
+		statsBatch:    make([]*adapter.FuzzerStats, 0, defaultBatchSize),
 		retryClient:   retryClient,
 	}, nil
 }
@@ -251,7 +251,7 @@ func (rc *ResultCollector) processCorpusEvent(event common.FuzzerEvent) {
 
 // processStatsEvent handles statistics events
 func (rc *ResultCollector) processStatsEvent(event common.FuzzerEvent) {
-	statsData, ok := event.Data["stats"].(*fuzzer.FuzzerStats)
+	statsData, ok := event.Data["stats"].(*adapter.FuzzerStats)
 	if !ok {
 		rc.logger.Error("Invalid stats data in event")
 		return
@@ -406,7 +406,7 @@ func (rc *ResultCollector) flushStats(ctx context.Context) error {
 	}
 
 	// Copy and clear the batch
-	stats := make([]*fuzzer.FuzzerStats, len(rc.statsBatch))
+	stats := make([]*adapter.FuzzerStats, len(rc.statsBatch))
 	copy(stats, rc.statsBatch)
 	rc.statsBatch = rc.statsBatch[:0]
 	rc.mu.Unlock()

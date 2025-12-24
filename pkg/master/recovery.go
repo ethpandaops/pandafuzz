@@ -362,9 +362,42 @@ func (rm *RecoveryManager) validateSystemState(ctx context.Context) error {
 		return fmt.Errorf("failed to list jobs for validation: %w", err)
 	}
 
-	// Check for consistency issues
+	// Check for consistency issues and fix them
 	assignedJobs := 0
 	busyBots := 0
+
+	// Build job ID set for quick lookup
+	jobIDSet := make(map[string]bool)
+	for _, job := range jobs {
+		jobIDSet[job.ID] = true
+	}
+
+	// Build bot ID set for quick lookup
+	botIDSet := make(map[string]bool)
+	for _, bot := range bots {
+		botIDSet[bot.ID] = true
+	}
+
+	// Check bots for inconsistencies
+	for _, bot := range bots {
+		if bot.Status == common.BotStatusBusy {
+			busyBots++
+		}
+
+		// Fix bot with non-existent CurrentJob
+		if bot.CurrentJob != nil && !jobIDSet[*bot.CurrentJob] {
+			rm.logger.WithFields(logrus.Fields{
+				"bot_id": bot.ID,
+				"job_id": *bot.CurrentJob,
+			}).Warn("Bot has non-existent job, resetting to idle")
+
+			bot.Status = common.BotStatusIdle
+			bot.CurrentJob = nil
+			if err := rm.state.SaveBotWithRetry(ctx, bot); err != nil {
+				rm.logger.WithError(err).WithField("bot_id", bot.ID).Error("Failed to fix bot state")
+			}
+		}
+	}
 
 	for _, job := range jobs {
 		if job.Status == common.JobStatusAssigned || job.Status == common.JobStatusRunning {
@@ -386,19 +419,21 @@ func (rm *RecoveryManager) validateSystemState(ctx context.Context) error {
 					}
 				}
 
+				// Fix job assigned to non-existent bot
 				if !botFound {
 					rm.logger.WithFields(logrus.Fields{
 						"job_id": job.ID,
 						"bot_id": *job.AssignedBot,
-					}).Warn("Job assigned to non-existent bot")
+					}).Warn("Job assigned to non-existent bot, resetting to pending")
+
+					job.Status = common.JobStatusPending
+					job.AssignedBot = nil
+					job.StartedAt = nil
+					if err := rm.state.SaveJobWithRetry(ctx, job); err != nil {
+						rm.logger.WithError(err).WithField("job_id", job.ID).Error("Failed to fix job state")
+					}
 				}
 			}
-		}
-	}
-
-	for _, bot := range bots {
-		if bot.Status == common.BotStatusBusy {
-			busyBots++
 		}
 	}
 
@@ -497,6 +532,12 @@ func (rm *RecoveryManager) PerformMaintenanceRecovery(ctx context.Context) error
 	}
 
 	duration := time.Since(start)
+
+	// Update statistics
+	rm.stats.TotalRecoveries++
+	rm.stats.LastRecovery = time.Now()
+	rm.stats.RecoveryDuration = duration
+
 	rm.logger.WithField("duration", duration).Info("Maintenance recovery completed")
 
 	return nil

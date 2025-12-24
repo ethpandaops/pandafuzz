@@ -175,6 +175,12 @@ func (tm *TimeoutManager) initializeTimeouts() error {
 	return nil
 }
 
+// ForceTimeoutCheck triggers an immediate timeout check.
+// This is primarily intended for testing purposes.
+func (tm *TimeoutManager) ForceTimeoutCheck() {
+	tm.performTimeoutCheck()
+}
+
 // performTimeoutCheck checks for and handles timeouts
 func (tm *TimeoutManager) performTimeoutCheck() {
 	start := time.Now()

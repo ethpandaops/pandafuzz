@@ -41,6 +41,12 @@ type StateStore interface {
 	GetStats() any
 	GetDatabaseStats() any
 	HealthCheck() error
+
+	// Analytics operations
+	GetCampaignJobs(ctx context.Context, campaignID string) ([]*common.Job, error)
+	GetJobCrashes(ctx context.Context, jobID string) ([]*common.CrashResult, error)
+	GetCrashesInTimeRange(ctx context.Context, startTime, endTime time.Time) ([]*common.CrashResult, error)
+	GetJobCoverageHistory(ctx context.Context, jobID string, startTime, endTime time.Time) ([]*common.CoverageResult, error)
 }
 
 // TimeoutManager defines the interface for timeout management

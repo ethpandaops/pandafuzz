@@ -52,91 +52,142 @@ func (h *Handlers) RegisterRoutes(r chi.Router) {
 	r.Get("/health", h.HandleHealth)
 	r.Get("/ready", h.HandleReady)
 
-	// API v1 routes
-	r.Route("/api/v1", func(r chi.Router) {
-		// Bot endpoints
-		r.Route("/bots", func(r chi.Router) {
-			r.Get("/", h.HandleListBots)
-			r.Post("/", h.HandleCreateBot)
-			r.Route("/{id}", func(r chi.Router) {
-				r.Get("/", h.HandleGetBot)
-				r.Put("/", h.HandleUpdateBot)
-				r.Delete("/", h.HandleDeleteBot)
-				r.Post("/heartbeat", h.HandleBotHeartbeat)
-				r.Get("/jobs", h.HandleGetBotJobs)
+	// API routes (router is already mounted at /api/v1, so no prefix needed here)
+	// Bot endpoints
+	r.Route("/bots", func(r chi.Router) {
+		r.Get("/", h.HandleListBots)
+		r.Post("/", h.HandleCreateBot)
+		r.Route("/{id}", func(r chi.Router) {
+			r.Get("/", h.HandleGetBot)
+			r.Put("/", h.HandleUpdateBot)
+			r.Delete("/", h.HandleDeleteBot)
+			r.Post("/heartbeat", h.HandleBotHeartbeat)
+			r.Get("/jobs", h.HandleGetBotJobs)
+			r.Post("/jobs/next", h.HandleGetNextJob)
+			r.Post("/jobs/complete", h.HandleCompleteJob)
+			r.Get("/metrics", h.HandleGetBotMetrics)
+		})
+	})
+
+	// Binary upload endpoint (for uploading fuzz targets)
+	r.Post("/binaries", h.HandleUploadBinary)
+
+	// Job endpoints
+	r.Route("/jobs", func(r chi.Router) {
+		r.Get("/", h.HandleListJobs)
+		r.Post("/", h.HandleCreateJob)
+		r.Route("/{id}", func(r chi.Router) {
+			r.Get("/", h.HandleGetJob)
+			r.Put("/", h.HandleUpdateJob)
+			r.Delete("/", h.HandleDeleteJob)
+			r.Post("/ack", h.HandleJobAck)
+			r.Post("/heartbeat", h.HandleJobHeartbeat)
+			r.Post("/cancel", h.HandleCancelJob)
+			r.Get("/logs", h.HandleGetJobLogs)
+			r.Post("/logs/push", h.HandlePushJobLogs)
+			r.Get("/progress", h.HandleGetJobProgress)
+			r.Get("/crashes", h.HandleGetJobCrashes)
+			r.Get("/coverage", h.HandleGetJobCoverage)
+			r.Get("/artifacts", h.HandleGetJobArtifacts)
+			r.Get("/coverage/reports/{reportId}", h.HandleDownloadCoverageReport)
+			r.Get("/binary/download", h.HandleDownloadJobBinary)
+
+			// Raw coverage file endpoints (AFL++ fuzzer_stats, plot_data, fuzz_bitmap)
+			r.Route("/coverage/raw", func(r chi.Router) {
+				r.Get("/", h.HandleListRawCoverage)
+				r.Get("/{fileType}", h.HandleDownloadRawCoverageFile)
+				r.Get("/all/zip", h.HandleDownloadRawCoverageZip)
 			})
 		})
+	})
 
-		// Job endpoints
-		r.Route("/jobs", func(r chi.Router) {
-			r.Get("/", h.HandleListJobs)
-			r.Post("/", h.HandleCreateJob)
-			r.Route("/{id}", func(r chi.Router) {
-				r.Get("/", h.HandleGetJob)
-				r.Put("/", h.HandleUpdateJob)
-				r.Delete("/", h.HandleDeleteJob)
-				r.Post("/ack", h.HandleJobAck)
-				r.Post("/heartbeat", h.HandleJobHeartbeat)
-				r.Get("/logs", h.HandleGetJobLogs)
-				r.Get("/coverage", h.HandleGetJobCoverage)
-				r.Get("/artifacts", h.HandleGetJobArtifacts)
-				r.Get("/coverage/reports/{reportId}", h.HandleDownloadCoverageReport)
+	// Campaign endpoints
+	r.Route("/campaigns", func(r chi.Router) {
+		r.Get("/", h.HandleListCampaigns)
+		r.Post("/", h.HandleCreateCampaign)
+		r.Route("/{id}", func(r chi.Router) {
+			r.Get("/", h.HandleGetCampaign)
+			r.Put("/", h.HandleUpdateCampaign)
+			r.Delete("/", h.HandleDeleteCampaign)
+			r.Post("/start", h.HandleStartCampaign)
+			r.Post("/stop", h.HandleStopCampaign)
+			r.Get("/stats", h.HandleGetCampaignStats)
+		})
+	})
+
+	// Corpus endpoints
+	r.Route("/corpus", func(r chi.Router) {
+		r.Get("/", h.HandleListCorpus)
+		r.Post("/", h.HandleUploadCorpus)
+		r.Post("/sync", h.HandleSyncCorpus)
+		r.Post("/select", h.HandleSelectCorpus)
+		r.Post("/promote", h.HandlePromoteCrashToCorpus)
+		r.Get("/quarantine", h.HandleListQuarantinedCorpus)
+		r.Route("/{id}", func(r chi.Router) {
+			r.Get("/", h.HandleGetCorpusEntry)
+			r.Delete("/", h.HandleDeleteCorpusEntry)
+			r.Get("/download", h.HandleDownloadCorpusFile)
+		})
+
+		// Corpus collections endpoints
+		r.Route("/collections", func(r chi.Router) {
+			r.Get("/", h.HandleListCorpusCollections)
+			r.Post("/", h.HandleCreateCorpusCollection)
+			r.Route("/{collectionId}", func(r chi.Router) {
+				r.Get("/", h.HandleGetCorpusCollection)
+				r.Put("/", h.HandleUpdateCorpusCollection)
+				r.Delete("/", h.HandleDeleteCorpusCollection)
+				r.Post("/upload", h.HandleUploadCorpusCollectionFiles)
+				r.Get("/files", h.HandleListCorpusCollectionFiles)
 			})
 		})
+	})
 
-		// Campaign endpoints
-		r.Route("/campaigns", func(r chi.Router) {
-			r.Get("/", h.HandleListCampaigns)
-			r.Post("/", h.HandleCreateCampaign)
-			r.Route("/{id}", func(r chi.Router) {
-				r.Get("/", h.HandleGetCampaign)
-				r.Put("/", h.HandleUpdateCampaign)
-				r.Delete("/", h.HandleDeleteCampaign)
-				r.Post("/start", h.HandleStartCampaign)
-				r.Post("/stop", h.HandleStopCampaign)
-				r.Get("/stats", h.HandleGetCampaignStats)
-			})
+	// Crash endpoints
+	r.Route("/crashes", func(r chi.Router) {
+		r.Get("/", h.HandleListCrashes)
+		r.Post("/", h.HandleCreateCrash)
+		r.Route("/{id}", func(r chi.Router) {
+			r.Get("/", h.HandleGetCrash)
+			r.Get("/input", h.HandleGetCrashInput)
+			r.Post("/minimize", h.HandleMinimizeCrash)
+			r.Post("/reproduce", h.HandleReproduceCrash)
+			r.Post("/deduplicate", h.HandleDeduplicateCrash)
 		})
+	})
 
-		// Corpus endpoints
-		r.Route("/corpus", func(r chi.Router) {
-			r.Get("/", h.HandleListCorpus)
-			r.Post("/", h.HandleUploadCorpus)
-			r.Post("/sync", h.HandleSyncCorpus)
-			r.Post("/select", h.HandleSelectCorpus)
-			r.Get("/quarantine", h.HandleListQuarantinedCorpus)
-			r.Route("/{id}", func(r chi.Router) {
-				r.Get("/", h.HandleGetCorpusEntry)
-				r.Delete("/", h.HandleDeleteCorpusEntry)
-				r.Get("/download", h.HandleDownloadCorpusFile)
-			})
-		})
+	// Analytics endpoints
+	r.Route("/analytics", func(r chi.Router) {
+		r.Get("/", h.HandleGetAnalytics)
+		r.Get("/metrics", h.HandleGetMetrics)
+		r.Get("/coverage", h.HandleGetCoverageTrends)
+		r.Get("/performance", h.HandleGetPerformanceStats)
+	})
 
-		// Crash endpoints
-		r.Route("/crashes", func(r chi.Router) {
-			r.Get("/", h.HandleListCrashes)
-			r.Post("/", h.HandleCreateCrash)
-			r.Route("/{id}", func(r chi.Router) {
-				r.Get("/", h.HandleGetCrash)
-				r.Post("/minimize", h.HandleMinimizeCrash)
-				r.Post("/reproduce", h.HandleReproduceCrash)
-				r.Post("/deduplicate", h.HandleDeduplicateCrash)
-			})
-		})
+	// Batch operations endpoint
+	r.Post("/batch", h.HandleBatchOperations)
 
-		// Analytics endpoints
-		r.Route("/analytics", func(r chi.Router) {
-			r.Get("/", h.HandleGetAnalytics)
-			r.Get("/metrics", h.HandleGetMetrics)
-			r.Get("/coverage", h.HandleGetCoverageTrends)
-			r.Get("/performance", h.HandleGetPerformanceStats)
-		})
+	// SSE events endpoint
+	r.Get("/events", h.HandleEvents)
 
-		// Batch operations endpoint
-		r.Post("/batch", h.HandleBatchOperations)
+	// System management endpoints
+	r.Route("/system", func(r chi.Router) {
+		r.Get("/status", h.HandleGetSystemStatus)
+		r.Get("/stats", h.HandleGetSystemStats)
+		r.Get("/version", h.HandleGetVersion)
+		r.Post("/recovery", h.HandleTriggerRecovery)
+		r.Post("/maintenance", h.HandleTriggerMaintenance)
+		r.Get("/timeouts", h.HandleListTimeouts)
+		r.Post("/timeouts/{type}/{id}", h.HandleForceTimeout)
+		r.Get("/health/detailed", h.HandleDetailedHealthCheck)
+	})
 
-		// SSE events endpoint
-		r.Get("/events", h.HandleEvents)
+	// Results submission endpoints (from v3)
+	r.Route("/results", func(r chi.Router) {
+		r.Post("/batch", h.HandleSubmitBatchResults)
+		r.Post("/crash", h.HandleSubmitCrashResult)
+		r.Post("/coverage", h.HandleSubmitCoverageResult)
+		r.Post("/corpus", h.HandleSubmitCorpusUpdate)
 	})
 }
 

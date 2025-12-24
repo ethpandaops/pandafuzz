@@ -89,6 +89,8 @@ async function createSeedCorpus(): Promise<string> {
   return corpusDir;
 }
 
+// Note: AFL++ tests require real fuzzing which can be slow
+// These tests validate the corpus collection API endpoints
 test.describe('AFL++ Corpus Collection and Crash Detection', () => {
   let testBinary: string;
   let seedCorpus: string;

@@ -6,11 +6,16 @@ export interface Bot {
   hostname: string;
   status: BotStatus;
   capabilities: string[];
-  current_job?: string;
-  last_seen: string;
+  current_job_id?: string | null;
+  last_heartbeat: string;
   registered_at: string;
-  ip: string;
-  failure_count: number;
+  api_endpoint?: string;
+  is_online: boolean;
+  // Legacy fields for backward compatibility
+  current_job?: string;
+  last_seen?: string;
+  ip?: string;
+  failure_count?: number;
 }
 
 export enum BotStatus {
@@ -73,13 +78,21 @@ export interface CrashResult {
   id: string;
   job_id: string;
   bot_id: string;
-  timestamp: string;
-  input: string; // Base64 encoded
-  size: number;
+  campaign_id: string;
+  discovered_at: string;  // ISO 8601 timestamp
+  input_size_bytes: number;
   hash: string;
   type: string;
-  output?: string;
+  severity: string;
+  is_unique?: boolean;
+  signal?: number;
+  exit_code?: number;
   stack_trace?: string;
+  input?: string; // Base64 encoded (only when downloading)
+  output?: string;
+  // Legacy field aliases for backward compatibility
+  timestamp?: string;
+  size?: number;
 }
 
 export interface CoverageResult {

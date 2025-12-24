@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/ethpandaops/pandafuzz/pkg/retry"
 )
 
 // Common errors
@@ -122,6 +124,17 @@ type CoverageResult struct {
 	ExecCount int64     `json:"exec_count" db:"exec_count"` // Total executions
 }
 
+// JobLog represents a single log entry for a job
+type JobLog struct {
+	ID        int64                  `json:"id" db:"id"`
+	JobID     string                 `json:"job_id" db:"job_id"`
+	Level     string                 `json:"level" db:"level"`
+	Source    string                 `json:"source" db:"source"`
+	Message   string                 `json:"message" db:"message"`
+	Timestamp time.Time              `json:"timestamp" db:"timestamp"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty" db:"metadata"`
+}
+
 // Persistent storage structures
 type JobAssignment struct {
 	JobID     string    `json:"job_id" db:"job_id"`
@@ -140,15 +153,8 @@ type SystemConfig struct {
 	StoragePath       string        `json:"storage_path" yaml:"storage_path"`
 }
 
-// Retry policy configuration
-type RetryPolicy struct {
-	MaxRetries      int           `json:"max_retries" yaml:"max_retries"`
-	InitialDelay    time.Duration `json:"initial_delay" yaml:"initial_delay"`
-	MaxDelay        time.Duration `json:"max_delay" yaml:"max_delay"`
-	Multiplier      float64       `json:"multiplier" yaml:"multiplier"`
-	Jitter          bool          `json:"jitter" yaml:"jitter"`
-	RetryableErrors []string      `json:"retryable_errors" yaml:"retryable_errors"`
-}
+// RetryPolicy is an alias to retry.Policy for backward compatibility
+type RetryPolicy = retry.Policy
 
 // Resource limits configuration
 type ResourceLimits struct {

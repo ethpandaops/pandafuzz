@@ -187,8 +187,11 @@ type Storage interface {
 	CreateCrash(ctx context.Context, crash *CrashResult) error
 	GetCrash(ctx context.Context, id string) (*CrashResult, error)
 	ListCrashes(ctx context.Context, jobID string, limit, offset int) ([]*CrashResult, error)
+	GetCrashCount(ctx context.Context, jobID string) (int, error)
 	GetCrashesByCampaign(ctx context.Context, campaignID string) ([]*CrashResult, error)
 	UpdateCrashWithCampaign(ctx context.Context, crashID, campaignID string) error
+	StoreCrashInput(ctx context.Context, crashID string, input []byte) error
+	GetCrashInput(ctx context.Context, crashID string) ([]byte, error)
 
 	CreateCoverage(ctx context.Context, coverage *CoverageResult) error
 	GetLatestCoverage(ctx context.Context, jobID string) (*CoverageResult, error)
@@ -202,11 +205,11 @@ type Storage interface {
 
 	// Maintenance operations
 	Cleanup(ctx context.Context) error
-	Backup(ctx context.Context) error
+	Backup(ctx context.Context, path string) error
 
 	// Health check
 	Ping(ctx context.Context) error
-	Close() error
+	Close(ctx context.Context) error
 
 	// Reproduction operations
 	CreateReproductionResult(ctx context.Context, result *ReproductionResult) error
@@ -229,4 +232,8 @@ type Storage interface {
 	AddCorpusCollectionFile(ctx context.Context, file *CorpusCollectionFile) error
 	GetCorpusCollectionFiles(ctx context.Context, collectionID string) ([]*CorpusCollectionFile, error)
 	DeleteCorpusCollectionFile(ctx context.Context, fileID string) error
+
+	// Job log operations
+	StoreJobLogs(ctx context.Context, jobID string, logs []*JobLog) error
+	GetJobLogs(ctx context.Context, jobID string, limit, offset int) ([]*JobLog, int, error)
 }

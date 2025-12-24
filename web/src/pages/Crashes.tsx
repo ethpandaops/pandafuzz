@@ -81,8 +81,8 @@ function Crashes() {
 
   const downloadCrash = async (crash: CrashResult) => {
     try {
-      // Use the new API endpoint to download crash input
-      const response = await fetch(`/api/v1/results/crashes/${crash.id}/input`);
+      // Use the unified API endpoint to download crash input
+      const response = await fetch(`/api/v3/crashes/${crash.id}/input`);
       if (!response.ok) {
         throw new Error('Failed to download crash input');
       }
@@ -266,14 +266,14 @@ function Crashes() {
                     {crash.bot_id.substring(0, 8)}...
                   </Typography>
                 </TableCell>
-                <TableCell>{formatSize(crash.size)}</TableCell>
+                <TableCell>{formatSize(crash.input_size_bytes)}</TableCell>
                 <TableCell>
                   {count > 1 && (
                     <Chip label={`${count}x`} size="small" color="warning" />
                   )}
                 </TableCell>
                 <TableCell>
-                  {formatDateTime(crash.timestamp)}
+                  {formatDateTime(crash.discovered_at)}
                 </TableCell>
                 <TableCell>
                   <IconButton
@@ -351,7 +351,7 @@ function Crashes() {
                     Size
                   </Typography>
                   <Typography variant="body1" gutterBottom>
-                    {formatSize(selectedCrash.size)}
+                    {formatSize(selectedCrash.input_size_bytes)}
                   </Typography>
                 </Grid>
                 <Grid item xs={6}>
@@ -380,10 +380,10 @@ function Crashes() {
                 </Grid>
                 <Grid item xs={12}>
                   <Typography variant="subtitle2" color="textSecondary">
-                    Timestamp
+                    Discovered At
                   </Typography>
                   <Typography variant="body1" gutterBottom>
-                    {formatDateTime(selectedCrash.timestamp)}
+                    {formatDateTime(selectedCrash.discovered_at)}
                   </Typography>
                 </Grid>
                 {selectedCrash.output && (

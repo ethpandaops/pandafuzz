@@ -422,9 +422,53 @@ func (s *analyticsService) GetCoverageTrend(ctx context.Context, campaignID stri
 		DataPoints: make([]CoveragePoint, 0),
 	}
 
-	// TODO: Implement actual data retrieval from store
-	// This would involve querying coverage results and aggregating them
-	// For now, returning a placeholder
+	// Get all jobs for this campaign
+	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	if err != nil {
+		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
+	} else {
+		// Aggregate coverage data points from all jobs
+		coverageByTime := make(map[int64]*CoveragePoint)
+
+		for _, job := range jobs {
+			jobCoverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, startTime, endTime)
+			if err != nil {
+				s.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to get job coverage history")
+				continue
+			}
+
+			for _, cov := range jobCoverage {
+				// Bucket by hour for trend analysis
+				bucketTime := cov.Timestamp.Truncate(time.Hour).Unix()
+				if point, exists := coverageByTime[bucketTime]; exists {
+					point.TotalEdges += int64(cov.Edges)
+					point.NewEdges += int64(cov.NewEdges)
+					point.ExecCount += cov.ExecCount
+				} else {
+					coverageByTime[bucketTime] = &CoveragePoint{
+						Timestamp:  time.Unix(bucketTime, 0),
+						TotalEdges: int64(cov.Edges),
+						NewEdges:   int64(cov.NewEdges),
+						ExecCount:  cov.ExecCount,
+					}
+				}
+			}
+		}
+
+		// Convert map to sorted slice
+		for _, point := range coverageByTime {
+			trend.DataPoints = append(trend.DataPoints, *point)
+		}
+
+		// Sort by timestamp
+		for i := 0; i < len(trend.DataPoints)-1; i++ {
+			for j := i + 1; j < len(trend.DataPoints); j++ {
+				if trend.DataPoints[i].Timestamp.After(trend.DataPoints[j].Timestamp) {
+					trend.DataPoints[i], trend.DataPoints[j] = trend.DataPoints[j], trend.DataPoints[i]
+				}
+			}
+		}
+	}
 
 	// Calculate derived metrics
 	if len(trend.DataPoints) > 0 {
@@ -460,14 +504,87 @@ func (s *analyticsService) GetCrashRate(ctx context.Context, campaignID string, 
 		}
 	}
 
+	endTime := time.Now()
+	startTime := endTime.Add(-window)
+
 	metrics := &CrashRateMetrics{
 		CampaignID:     campaignID,
 		Window:         window,
 		TimeSeriesData: make([]CrashRatePoint, 0),
 	}
 
-	// TODO: Implement actual crash rate calculation
-	// This would involve querying crash results and calculating rates
+	// Get all jobs for this campaign
+	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	if err != nil {
+		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
+		return metrics, nil
+	}
+
+	// Collect crashes from all jobs
+	crashesByHour := make(map[int64]*CrashRatePoint)
+	uniqueHashes := make(map[string]bool)
+
+	for _, job := range jobs {
+		crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+		if err != nil {
+			s.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to get job crashes")
+			continue
+		}
+
+		for _, crash := range crashes {
+			// Filter by time window
+			if crash.Timestamp.Before(startTime) || crash.Timestamp.After(endTime) {
+				continue
+			}
+
+			metrics.TotalCrashes++
+			if !uniqueHashes[crash.Hash] {
+				uniqueHashes[crash.Hash] = true
+				metrics.UniqueCrashes++
+			}
+
+			// Bucket by hour for time series
+			bucketTime := crash.Timestamp.Truncate(time.Hour).Unix()
+			if point, exists := crashesByHour[bucketTime]; exists {
+				point.CrashCount++
+				if crash.IsUnique {
+					point.UniqueCrashes++
+				}
+			} else {
+				uniqueCount := 0
+				if crash.IsUnique {
+					uniqueCount = 1
+				}
+				crashesByHour[bucketTime] = &CrashRatePoint{
+					Timestamp:     time.Unix(bucketTime, 0),
+					CrashCount:    1,
+					UniqueCrashes: uniqueCount,
+				}
+			}
+		}
+	}
+
+	// Convert map to sorted slice and calculate rates
+	for _, point := range crashesByHour {
+		point.Rate = float64(point.CrashCount)
+		metrics.TimeSeriesData = append(metrics.TimeSeriesData, *point)
+	}
+
+	// Sort by timestamp
+	for i := 0; i < len(metrics.TimeSeriesData)-1; i++ {
+		for j := i + 1; j < len(metrics.TimeSeriesData); j++ {
+			if metrics.TimeSeriesData[i].Timestamp.After(metrics.TimeSeriesData[j].Timestamp) {
+				metrics.TimeSeriesData[i], metrics.TimeSeriesData[j] = metrics.TimeSeriesData[j], metrics.TimeSeriesData[i]
+			}
+		}
+	}
+
+	// Calculate rates per hour
+	hours := window.Hours()
+	if hours > 0 {
+		metrics.CrashRate = float64(metrics.TotalCrashes) / hours
+		metrics.UniqueCrashRate = float64(metrics.UniqueCrashes) / hours
+	}
 
 	// Determine trend
 	metrics.Trend = s.analyzeTrend(metrics.TimeSeriesData)
@@ -490,13 +607,68 @@ func (s *analyticsService) GetFuzzerPerformance(ctx context.Context, fuzzerType 
 		}
 	}
 
+	endTime := time.Now()
+	startTime := endTime.Add(-window)
+
 	perf := &FuzzerPerformance{
 		FuzzerType: fuzzerType,
 		Window:     window,
 	}
 
-	// TODO: Implement actual performance metrics calculation
-	// This would involve querying jobs by fuzzer type and calculating metrics
+	// Get all jobs and filter by fuzzer type
+	allJobs, err := s.store.ListJobs()
+	if err != nil {
+		s.logger.WithError(err).Warn("Failed to list jobs for fuzzer performance")
+		return perf, nil
+	}
+
+	var totalRuntime time.Duration
+	var completedJobs int
+
+	for _, job := range allJobs {
+		// Filter by fuzzer type and time window
+		if job.Fuzzer != fuzzerType {
+			continue
+		}
+		if job.CreatedAt.Before(startTime) {
+			continue
+		}
+
+		perf.TotalJobs++
+
+		if job.Status == common.JobStatusCompleted {
+			perf.SuccessfulJobs++
+			completedJobs++
+			if job.CompletedAt != nil && job.StartedAt != nil {
+				totalRuntime += job.CompletedAt.Sub(*job.StartedAt)
+			}
+		} else if job.Status == common.JobStatusFailed || job.Status == common.JobStatusTimedOut {
+			perf.FailedJobs++
+		}
+
+		// Get coverage and crashes for this job
+		if job.Status == common.JobStatusCompleted || job.Status == common.JobStatusRunning {
+			coverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, startTime, endTime)
+			if err == nil && len(coverage) > 0 {
+				lastCov := coverage[len(coverage)-1]
+				perf.CoverageGain += int64(lastCov.Edges)
+				perf.TotalExecCount += lastCov.ExecCount
+			}
+
+			crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+			if err == nil {
+				perf.CrashesFound += len(crashes)
+			}
+		}
+	}
+
+	// Calculate averages
+	if completedJobs > 0 {
+		perf.AverageRuntime = totalRuntime / time.Duration(completedJobs)
+	}
+	if perf.TotalExecCount > 0 && perf.AverageRuntime > 0 {
+		perf.AverageExecSpeed = float64(perf.TotalExecCount) / perf.AverageRuntime.Seconds()
+	}
 
 	// Calculate efficiency score (composite metric)
 	perf.EfficiencyScore = s.calculateEfficiencyScore(perf)
@@ -724,101 +896,696 @@ func (c *analyticsCache) cleanup() {
 
 // CompareCampaigns compares multiple campaigns
 func (s *analyticsService) CompareCampaigns(ctx context.Context, campaignIDs []string) (*CampaignComparison, error) {
-	// TODO: Implement campaign comparison logic
 	comparison := &CampaignComparison{
 		Campaigns: make([]CampaignComparisonData, 0, len(campaignIDs)),
 	}
 
-	// For now, return empty comparison data
-	for _, id := range campaignIDs {
-		comparison.Campaigns = append(comparison.Campaigns, CampaignComparisonData{
-			CampaignID: id,
-		})
+	var bestCoverage, mostCrashes, mostEfficient, bestPerformer string
+	var maxCoverage int64
+	var maxCrashes int
+	var maxEfficiency, maxScore float64
+
+	for _, campaignID := range campaignIDs {
+		data := CampaignComparisonData{CampaignID: campaignID}
+
+		// Get campaign jobs
+		jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+		if err != nil {
+			s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
+			comparison.Campaigns = append(comparison.Campaigns, data)
+			continue
+		}
+
+		endTime := time.Now()
+		startTime := endTime.Add(-24 * time.Hour)
+
+		var totalExecs int64
+		for _, job := range jobs {
+			// Get coverage
+			coverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, startTime, endTime)
+			if err == nil && len(coverage) > 0 {
+				lastCov := coverage[len(coverage)-1]
+				data.Coverage += int64(lastCov.Edges)
+				totalExecs += lastCov.ExecCount
+			}
+
+			// Get crashes
+			crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+			if err == nil {
+				data.CrashCount += len(crashes)
+			}
+		}
+
+		// Calculate efficiency
+		if totalExecs > 0 {
+			data.Efficiency = float64(data.Coverage) / float64(totalExecs) * 1000000
+		}
+
+		// Calculate overall score
+		data.OverallScore = float64(data.Coverage)*0.4 + float64(data.CrashCount)*10*0.3 + data.Efficiency*0.3
+
+		// Track best performers
+		if data.Coverage > maxCoverage {
+			maxCoverage = data.Coverage
+			bestCoverage = campaignID
+		}
+		if data.CrashCount > maxCrashes {
+			maxCrashes = data.CrashCount
+			mostCrashes = campaignID
+		}
+		if data.Efficiency > maxEfficiency {
+			maxEfficiency = data.Efficiency
+			mostEfficient = campaignID
+		}
+		if data.OverallScore > maxScore {
+			maxScore = data.OverallScore
+			bestPerformer = campaignID
+		}
+
+		comparison.Campaigns = append(comparison.Campaigns, data)
 	}
+
+	comparison.HighestCoverage = bestCoverage
+	comparison.MostCrashes = mostCrashes
+	comparison.MostEfficient = mostEfficient
+	comparison.BestPerformer = bestPerformer
 
 	return comparison, nil
 }
 
 // GetBotUtilization gets bot utilization metrics
 func (s *analyticsService) GetBotUtilization(ctx context.Context, window time.Duration) (*BotUtilization, error) {
-	// TODO: Implement bot utilization logic
-	return &BotUtilization{
+	util := &BotUtilization{
 		Window:          window,
-		TotalBots:       0,
-		ActiveBots:      0,
-		IdleBots:        0,
-		UtilizationRate: 0.0,
-		AverageJobTime:  0,
 		BotPerformance:  make(map[string]BotStats),
 		CapabilityUsage: make(map[string]int),
-	}, nil
+	}
+
+	// Get all bots
+	bots, err := s.store.ListBots()
+	if err != nil {
+		s.logger.WithError(err).Warn("Failed to list bots for utilization")
+		return util, nil
+	}
+
+	util.TotalBots = len(bots)
+	endTime := time.Now()
+	startTime := endTime.Add(-window)
+
+	for _, bot := range bots {
+		if bot.IsOnline {
+			if bot.CurrentJob != nil {
+				util.ActiveBots++
+			} else {
+				util.IdleBots++
+			}
+		}
+
+		// Track capability usage
+		for _, cap := range bot.Capabilities {
+			util.CapabilityUsage[cap]++
+		}
+
+		// Calculate bot performance
+		stats := BotStats{
+			BotID: bot.ID,
+		}
+
+		// Get jobs completed by this bot in the time window
+		allJobs, err := s.store.ListJobs()
+		if err == nil {
+			for _, job := range allJobs {
+				if job.AssignedBot == nil || *job.AssignedBot != bot.ID {
+					continue
+				}
+				if job.CompletedAt == nil || job.CompletedAt.Before(startTime) {
+					continue
+				}
+
+				stats.JobsCompleted++
+				if job.Status == common.JobStatusCompleted {
+					if job.StartedAt != nil && job.CompletedAt != nil {
+						stats.AverageRuntime += job.CompletedAt.Sub(*job.StartedAt)
+					}
+				}
+
+				// Count crashes
+				crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+				if err == nil {
+					stats.CrashesFound += len(crashes)
+				}
+			}
+
+			if stats.JobsCompleted > 0 {
+				stats.AverageRuntime = stats.AverageRuntime / time.Duration(stats.JobsCompleted)
+				stats.SuccessRate = 1.0 // Simplified - all completed jobs are successful
+				util.AverageJobTime += stats.AverageRuntime
+			}
+		}
+
+		util.BotPerformance[bot.ID] = stats
+	}
+
+	// Calculate utilization rate
+	if util.TotalBots > 0 {
+		util.UtilizationRate = float64(util.ActiveBots) / float64(util.TotalBots)
+		if util.ActiveBots > 0 {
+			util.AverageJobTime = util.AverageJobTime / time.Duration(util.ActiveBots)
+		}
+	}
+
+	return util, nil
 }
 
 // GetCampaignProgress gets progress metrics for a campaign
 func (s *analyticsService) GetCampaignProgress(ctx context.Context, campaignID string) (*CampaignProgress, error) {
-	// TODO: Implement campaign progress logic
-	return &CampaignProgress{
-		CampaignID: campaignID,
-	}, nil
+	progress := &CampaignProgress{
+		CampaignID:        campaignID,
+		MilestonesReached: make([]Milestone, 0),
+	}
+
+	// Get campaign jobs
+	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	if err != nil {
+		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
+		return progress, nil
+	}
+
+	if len(jobs) == 0 {
+		return progress, nil
+	}
+
+	// Find start time from earliest job
+	var startTime time.Time
+	totalJobs := len(jobs)
+	completedJobs := 0
+	var totalCoverage int64
+
+	for _, job := range jobs {
+		if startTime.IsZero() || job.CreatedAt.Before(startTime) {
+			startTime = job.CreatedAt
+		}
+
+		if job.Status == common.JobStatusCompleted {
+			completedJobs++
+		}
+
+		// Get coverage for this job
+		coverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, startTime, time.Now())
+		if err == nil && len(coverage) > 0 {
+			totalCoverage += int64(coverage[len(coverage)-1].Edges)
+		}
+	}
+
+	progress.ElapsedTime = time.Since(startTime)
+	if totalJobs > 0 {
+		progress.ProgressPercentage = float64(completedJobs) / float64(totalJobs) * 100
+	}
+
+	// Add milestones
+	if completedJobs > 0 {
+		progress.MilestonesReached = append(progress.MilestonesReached, Milestone{
+			Name:        "First job completed",
+			Description: "Completed first fuzzing job",
+			ReachedAt:   time.Now(),
+			Value:       1,
+		})
+	}
+	if totalCoverage >= 1000 {
+		progress.MilestonesReached = append(progress.MilestonesReached, Milestone{
+			Name:        "1K coverage edges",
+			Description: "Reached 1000 coverage edges",
+			ReachedAt:   time.Now(),
+			Value:       totalCoverage,
+		})
+	}
+
+	return progress, nil
 }
 
 // GetCampaignSummary gets summary metrics for a campaign
 func (s *analyticsService) GetCampaignSummary(ctx context.Context, campaignID string) (*CampaignSummary, error) {
-	// TODO: Implement campaign summary logic
-	return &CampaignSummary{
+	summary := &CampaignSummary{
 		CampaignID: campaignID,
 		StartTime:  time.Now(),
-	}, nil
+	}
+
+	// Get campaign jobs
+	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	if err != nil {
+		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
+		return summary, nil
+	}
+
+	summary.TotalJobs = len(jobs)
+
+	for _, job := range jobs {
+		if summary.StartTime.IsZero() || job.CreatedAt.Before(summary.StartTime) {
+			summary.StartTime = job.CreatedAt
+		}
+
+		if job.Status == common.JobStatusCompleted {
+			summary.CompletedJobs++
+		}
+
+		// Get coverage and crashes
+		coverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, summary.StartTime, time.Now())
+		if err == nil && len(coverage) > 0 {
+			lastCov := coverage[len(coverage)-1]
+			summary.TotalCoverage += int64(lastCov.Edges)
+			summary.ExecutionCount += lastCov.ExecCount
+		}
+
+		crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+		if err == nil {
+			for _, c := range crashes {
+				if c.IsUnique {
+					summary.UniqueCrashes++
+				}
+			}
+		}
+	}
+
+	summary.Runtime = time.Since(summary.StartTime)
+	if summary.Runtime.Seconds() > 0 {
+		summary.ExecPerSecond = float64(summary.ExecutionCount) / summary.Runtime.Seconds()
+	}
+
+	// Calculate efficiency rating
+	if summary.TotalCoverage > 10000 && summary.UniqueCrashes > 5 {
+		summary.EfficiencyRating = "high"
+	} else if summary.TotalCoverage > 1000 || summary.UniqueCrashes > 0 {
+		summary.EfficiencyRating = "medium"
+	} else {
+		summary.EfficiencyRating = "low"
+	}
+
+	return summary, nil
 }
 
 // GetCoverageComparison compares coverage across campaigns
 func (s *analyticsService) GetCoverageComparison(ctx context.Context, campaignIDs []string) (*CoverageComparison, error) {
-	// TODO: Implement coverage comparison logic
-	return &CoverageComparison{
-		Campaigns: make([]CampaignCoverage, 0),
-	}, nil
+	comparison := &CoverageComparison{
+		Campaigns: make([]CampaignCoverage, 0, len(campaignIDs)),
+	}
+
+	var bestCoverage, fastestGrowth, mostEfficient string
+	var maxCoverage int64
+	var maxGrowth, maxEfficiency float64
+
+	for _, campaignID := range campaignIDs {
+		campCov := CampaignCoverage{
+			CampaignID:  campaignID,
+			LastUpdated: time.Now(),
+		}
+
+		jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+		if err != nil {
+			comparison.Campaigns = append(comparison.Campaigns, campCov)
+			continue
+		}
+
+		endTime := time.Now()
+		startTime := endTime.Add(-24 * time.Hour)
+		var totalExecs int64
+		var firstEdges, lastEdges int64
+		var firstTime, lastTime time.Time
+
+		for _, job := range jobs {
+			coverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, startTime, endTime)
+			if err == nil && len(coverage) > 0 {
+				for _, cov := range coverage {
+					campCov.TotalCoverage += int64(cov.Edges)
+					totalExecs += cov.ExecCount
+
+					if firstTime.IsZero() || cov.Timestamp.Before(firstTime) {
+						firstTime = cov.Timestamp
+						firstEdges = int64(cov.Edges)
+					}
+					if lastTime.IsZero() || cov.Timestamp.After(lastTime) {
+						lastTime = cov.Timestamp
+						lastEdges = int64(cov.Edges)
+					}
+				}
+			}
+		}
+
+		// Calculate growth rate
+		if !firstTime.IsZero() && !lastTime.IsZero() {
+			hours := lastTime.Sub(firstTime).Hours()
+			if hours > 0 {
+				campCov.GrowthRate = float64(lastEdges-firstEdges) / hours
+			}
+		}
+
+		// Calculate efficiency
+		if totalExecs > 0 {
+			campCov.EfficiencyRatio = float64(campCov.TotalCoverage) / float64(totalExecs)
+		}
+
+		// Track best performers
+		if campCov.TotalCoverage > maxCoverage {
+			maxCoverage = campCov.TotalCoverage
+			bestCoverage = campaignID
+		}
+		if campCov.GrowthRate > maxGrowth {
+			maxGrowth = campCov.GrowthRate
+			fastestGrowth = campaignID
+		}
+		if campCov.EfficiencyRatio > maxEfficiency {
+			maxEfficiency = campCov.EfficiencyRatio
+			mostEfficient = campaignID
+		}
+
+		comparison.Campaigns = append(comparison.Campaigns, campCov)
+	}
+
+	comparison.BestCoverage = bestCoverage
+	comparison.FastestGrowth = fastestGrowth
+	comparison.MostEfficient = mostEfficient
+
+	return comparison, nil
 }
 
 // GetCrashDistribution gets crash distribution metrics
 func (s *analyticsService) GetCrashDistribution(ctx context.Context, campaignID string) (*CrashDistribution, error) {
-	// TODO: Implement crash distribution logic
-	return &CrashDistribution{
-		CampaignID: campaignID,
-	}, nil
+	dist := &CrashDistribution{
+		CampaignID:       campaignID,
+		ByType:           make(map[string]int),
+		BySignal:         make(map[int]int),
+		BySeverity:       make(map[string]int),
+		ByBot:            make(map[string]int),
+		TimeDistribution: make([]HourlyDistribution, 24),
+	}
+
+	// Initialize hourly distribution
+	for i := 0; i < 24; i++ {
+		dist.TimeDistribution[i] = HourlyDistribution{Hour: i}
+	}
+
+	// Get campaign jobs
+	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	if err != nil {
+		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
+		return dist, nil
+	}
+
+	for _, job := range jobs {
+		crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+		if err != nil {
+			continue
+		}
+
+		for _, crash := range crashes {
+			dist.TotalCrashes++
+
+			// By type
+			dist.ByType[crash.Type]++
+
+			// By signal
+			if crash.Signal != 0 {
+				dist.BySignal[crash.Signal]++
+			}
+
+			// By bot
+			dist.ByBot[crash.BotID]++
+
+			// By severity (based on signal)
+			severity := "low"
+			if crash.Signal == 11 || crash.Signal == 6 { // SIGSEGV or SIGABRT
+				severity = "high"
+			} else if crash.Signal != 0 {
+				severity = "medium"
+			}
+			dist.BySeverity[severity]++
+
+			// By hour
+			hour := crash.Timestamp.Hour()
+			dist.TimeDistribution[hour].CrashCount++
+		}
+	}
+
+	return dist, nil
 }
 
 // GetTopCrashGroups gets top crash groups
 func (s *analyticsService) GetTopCrashGroups(ctx context.Context, campaignID string, limit int) ([]*CrashGroupStats, error) {
-	// TODO: Implement top crash groups logic
-	return make([]*CrashGroupStats, 0), nil
+	groups := make(map[string]*CrashGroupStats)
+
+	// Get campaign jobs
+	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	if err != nil {
+		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
+		return make([]*CrashGroupStats, 0), nil
+	}
+
+	for _, job := range jobs {
+		crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+		if err != nil {
+			continue
+		}
+
+		for _, crash := range crashes {
+			if group, exists := groups[crash.Hash]; exists {
+				group.Count++
+				if crash.Timestamp.After(group.LastSeen) {
+					group.LastSeen = crash.Timestamp
+				}
+			} else {
+				groups[crash.Hash] = &CrashGroupStats{
+					GroupID:   crash.Hash[:8],
+					StackHash: crash.Hash,
+					Count:     1,
+					FirstSeen: crash.Timestamp,
+					LastSeen:  crash.Timestamp,
+					Severity:  determineSeverity(crash.Signal),
+				}
+			}
+		}
+	}
+
+	// Convert to slice and sort by count
+	result := make([]*CrashGroupStats, 0, len(groups))
+	for _, group := range groups {
+		result = append(result, group)
+	}
+
+	// Sort by count descending
+	for i := 0; i < len(result)-1; i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[i].Count < result[j].Count {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+
+	// Limit results
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+
+	return result, nil
+}
+
+// determineSeverity returns severity based on signal number
+func determineSeverity(signal int) string {
+	switch signal {
+	case 11, 6: // SIGSEGV, SIGABRT
+		return "high"
+	case 4, 7, 8: // SIGILL, SIGBUS, SIGFPE
+		return "medium"
+	default:
+		return "low"
+	}
 }
 
 // GetJobThroughput gets job throughput metrics
 func (s *analyticsService) GetJobThroughput(ctx context.Context, window time.Duration) (*JobThroughput, error) {
-	// TODO: Implement job throughput logic
-	return &JobThroughput{
+	throughput := &JobThroughput{
 		Window: window,
-	}, nil
+	}
+
+	endTime := time.Now()
+	startTime := endTime.Add(-window)
+
+	// Get all jobs
+	allJobs, err := s.store.ListJobs()
+	if err != nil {
+		s.logger.WithError(err).Warn("Failed to list jobs for throughput")
+		return throughput, nil
+	}
+
+	var totalQueueTime, totalRunTime time.Duration
+	var queuedJobs, runningJobs int
+
+	for _, job := range allJobs {
+		if job.CreatedAt.Before(startTime) {
+			continue
+		}
+
+		throughput.TotalJobs++
+
+		switch job.Status {
+		case common.JobStatusCompleted:
+			throughput.CompletedJobs++
+			if job.StartedAt != nil {
+				totalQueueTime += job.StartedAt.Sub(job.CreatedAt)
+			}
+			if job.StartedAt != nil && job.CompletedAt != nil {
+				totalRunTime += job.CompletedAt.Sub(*job.StartedAt)
+			}
+		case common.JobStatusFailed, common.JobStatusTimedOut:
+			throughput.FailedJobs++
+		case common.JobStatusPending:
+			throughput.QueueLength++
+		case common.JobStatusRunning, common.JobStatusAssigned:
+			runningJobs++
+			if job.StartedAt != nil {
+				queuedJobs++
+				totalQueueTime += job.StartedAt.Sub(job.CreatedAt)
+			}
+		}
+	}
+
+	// Calculate averages
+	if throughput.CompletedJobs > 0 {
+		throughput.AverageQueueTime = totalQueueTime / time.Duration(throughput.CompletedJobs+queuedJobs)
+		throughput.AverageRunTime = totalRunTime / time.Duration(throughput.CompletedJobs)
+	}
+
+	// Calculate throughput rate (jobs per hour)
+	hours := window.Hours()
+	if hours > 0 {
+		throughput.ThroughputRate = float64(throughput.CompletedJobs) / hours
+	}
+
+	throughput.Backlog = throughput.QueueLength
+
+	return throughput, nil
 }
 
 // GetRealtimeMetrics gets real-time metrics for a campaign
 func (s *analyticsService) GetRealtimeMetrics(ctx context.Context, campaignID string) (*RealtimeMetrics, error) {
-	// TODO: Implement real-time metrics logic
-	return &RealtimeMetrics{
+	metrics := &RealtimeMetrics{
 		CampaignID: campaignID,
 		Timestamp:  time.Now(),
-	}, nil
+		Alerts:     make([]Alert, 0),
+	}
+
+	// Get campaign jobs
+	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	if err != nil {
+		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
+		return metrics, nil
+	}
+
+	endTime := time.Now()
+	startTime := endTime.Add(-5 * time.Minute)
+
+	for _, job := range jobs {
+		if job.Status == common.JobStatusRunning {
+			metrics.ActiveBots++
+		}
+		if job.Status == common.JobStatusPending {
+			metrics.QueueLength++
+		}
+
+		// Get recent coverage
+		coverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, startTime, endTime)
+		if err == nil && len(coverage) > 0 {
+			lastCov := coverage[len(coverage)-1]
+			metrics.CurrentCoverage += int64(lastCov.Edges)
+			if lastCov.ExecCount > 0 {
+				// Approximate exec/sec based on recent data
+				duration := endTime.Sub(startTime).Seconds()
+				if duration > 0 {
+					metrics.ExecPerSecond += float64(lastCov.ExecCount) / duration
+				}
+			}
+		}
+
+		// Get recent crashes
+		crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+		if err == nil {
+			for _, c := range crashes {
+				if c.Timestamp.After(startTime) {
+					metrics.RecentCrashes++
+				}
+			}
+		}
+	}
+
+	// Add alerts for potential issues
+	if metrics.QueueLength > 10 {
+		metrics.Alerts = append(metrics.Alerts, Alert{
+			Level:          "warning",
+			Message:        fmt.Sprintf("Job queue is backing up (%d pending jobs)", metrics.QueueLength),
+			Timestamp:      time.Now(),
+			Component:      "scheduler",
+			ActionRequired: false,
+		})
+	}
+
+	return metrics, nil
 }
 
 // SubscribeToMetrics subscribes to real-time metrics updates
 func (s *analyticsService) SubscribeToMetrics(ctx context.Context, campaignID string) (<-chan *RealtimeMetrics, error) {
-	// TODO: Implement metrics subscription logic
-	ch := make(chan *RealtimeMetrics)
+	s.subscribersMu.Lock()
+	defer s.subscribersMu.Unlock()
+
+	// Check max subscribers
+	if len(s.metricsSubscribers) >= s.config.MaxSubscribers {
+		return nil, fmt.Errorf("maximum number of subscribers reached")
+	}
+
+	// Create subscription channel
+	ch := make(chan *RealtimeMetrics, 10)
+	subscriptionID := fmt.Sprintf("%s_%d", campaignID, time.Now().UnixNano())
+	s.metricsSubscribers[subscriptionID] = ch
+
+	// Start a goroutine to push metrics for this subscription
+	go func() {
+		ticker := time.NewTicker(s.config.MetricsInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				s.subscribersMu.Lock()
+				delete(s.metricsSubscribers, subscriptionID)
+				close(ch)
+				s.subscribersMu.Unlock()
+				return
+			case <-ticker.C:
+				metrics, err := s.GetRealtimeMetrics(ctx, campaignID)
+				if err != nil {
+					continue
+				}
+				select {
+				case ch <- metrics:
+				default:
+					// Channel full, skip this update
+				}
+			}
+		}
+	}()
+
 	return ch, nil
 }
 
 // UnsubscribeFromMetrics unsubscribes from metrics updates
 func (s *analyticsService) UnsubscribeFromMetrics(ctx context.Context, subscriptionID string) error {
-	// TODO: Implement unsubscribe logic
+	s.subscribersMu.Lock()
+	defer s.subscribersMu.Unlock()
+
+	ch, exists := s.metricsSubscribers[subscriptionID]
+	if !exists {
+		return fmt.Errorf("subscription not found: %s", subscriptionID)
+	}
+
+	delete(s.metricsSubscribers, subscriptionID)
+	close(ch)
+
 	return nil
 }

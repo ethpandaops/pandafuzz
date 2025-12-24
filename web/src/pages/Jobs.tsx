@@ -732,7 +732,7 @@ function Jobs() {
         <DialogTitle>
           <Box display="flex" justifyContent="space-between" alignItems="center">
             <Typography variant="h6">Job Logs - {logsJob?.name}</Typography>
-            {jobLogs && jobLogs.has_more && (
+            {jobLogs && jobLogs.has_more && jobLogs.logs && (
               <Typography variant="body2" color="textSecondary">
                 Showing {jobLogs.logs.length} of {jobLogs.total_lines} lines
               </Typography>
@@ -744,7 +744,7 @@ function Jobs() {
             <Box display="flex" justifyContent="center" p={4}>
               <CircularProgress />
             </Box>
-          ) : jobLogs && jobLogs.logs.length > 0 ? (
+          ) : jobLogs && jobLogs.logs && jobLogs.logs.length > 0 ? (
             <Box
               sx={{
                 backgroundColor: '#1e1e1e',
@@ -823,7 +823,7 @@ function Jobs() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setLogsDialogOpen(false)}>Close</Button>
-          {jobLogs && jobLogs.logs.length > 0 && (
+          {jobLogs && jobLogs.logs && jobLogs.logs.length > 0 && (
             <Button
               variant="contained"
               onClick={() => {
