@@ -3,8 +3,6 @@ package honggfuzz
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 
 	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/types"
@@ -782,11 +781,9 @@ func (e *Engine) checkForCrashes() {
 	}
 }
 
-// generateCrashID generates a unique crash ID
+// generateCrashID generates a unique crash ID using UUID
 func (e *Engine) generateCrashID() string {
-	hash := sha256.New()
-	hash.Write([]byte(fmt.Sprintf("%s-%d-%d", time.Now().String(), e.lastCrashes, len(e.crashes))))
-	return hex.EncodeToString(hash.Sum(nil))[:16]
+	return uuid.New().String()
 }
 
 // monitorProcess monitors the fuzzer process

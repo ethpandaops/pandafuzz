@@ -19,6 +19,7 @@ import (
 	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/config"
 	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -1371,9 +1372,9 @@ func (a *Agent) checkAndReportCrashes(job *common.Job) int {
 					continue
 				}
 
-				// Create crash result
+				// Create crash result with UUID
 				crash := &common.CrashResult{
-					ID:          fmt.Sprintf("%s_%s", job.ID, entry.Name()),
+					ID:          uuid.New().String(),
 					JobID:       job.ID,
 					BotID:       a.config.ID,
 					Timestamp:   info.ModTime(),

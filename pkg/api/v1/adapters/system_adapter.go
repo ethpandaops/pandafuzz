@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 
 	"github.com/ethpandaops/pandafuzz/pkg/api/v1/sse"
@@ -683,8 +684,8 @@ func (a *SystemAdapter) SubmitCrashResult(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Generate crash ID
-	crashID := fmt.Sprintf("crash_%d", time.Now().UnixNano())
+	// Generate crash ID using UUID
+	crashID := uuid.New().String()
 
 	// Create crash result to store
 	crash := &common.CrashResult{
