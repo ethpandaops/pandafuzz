@@ -209,12 +209,26 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
 }
 EOF
 
-        # Compile the LibFuzzer test program
+        # Compile the LibFuzzer test program inside the container for compatibility
         echo -e "${YELLOW}Compiling LibFuzzer test binary...${NC}"
 
-        # Check for clang++ or g++
-        if command -v clang++ >/dev/null 2>&1; then
-            echo -e "${GREEN}✓ Found clang++, building LibFuzzer binary${NC}"
+        # Check if we can use docker to compile inside the container
+        if docker ps --format '{{.Names}}' | grep -q 'pandafuzz-bot'; then
+            echo -e "${GREEN}✓ Found pandafuzz-bot container, compiling inside container for compatibility${NC}"
+            # Copy source to container
+            docker cp libfuzzer_test.cpp pandafuzz-bot-1:/tmp/libfuzzer_test.cpp
+            # Compile inside container
+            if docker exec pandafuzz-bot-1 clang++ -g -O1 -fsanitize=fuzzer,address -o /tmp/libfuzzer_test /tmp/libfuzzer_test.cpp 2>/dev/null; then
+                echo -e "${GREEN}✓ Successfully built with LibFuzzer instrumentation inside container${NC}"
+                # Copy back to host
+                docker cp pandafuzz-bot-1:/tmp/libfuzzer_test libfuzzer_test
+            else
+                echo -e "${RED}✗ Failed to compile inside container${NC}"
+                return 1
+            fi
+        # Fallback to local compilation if container not available
+        elif command -v clang++ >/dev/null 2>&1; then
+            echo -e "${YELLOW}⚠️  Container not available, building locally (may have compatibility issues)${NC}"
             # Try to compile with LibFuzzer support
             if clang++ -g -O1 -fsanitize=fuzzer,address -o libfuzzer_test libfuzzer_test.cpp 2>/dev/null; then
                 echo -e "${GREEN}✓ Successfully built with LibFuzzer instrumentation${NC}"

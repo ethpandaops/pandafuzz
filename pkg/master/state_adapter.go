@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -249,6 +250,23 @@ func (a *StateStoreAdapter) AtomicJobAssignmentOptimized(ctx context.Context, bo
 					WorkDir:        fmt.Sprintf("job_%s", jobID), // Relative path for bot to resolve
 					LeaseToken:     &leaseToken,
 					LeaseExpiresAt: &leaseExpiresAt,
+				}
+
+				// Parse config JSON from database
+				if configVal, ok := row["config"]; ok && configVal != nil {
+					var configStr string
+					switch v := configVal.(type) {
+					case string:
+						configStr = v
+					case []byte:
+						configStr = string(v)
+					}
+					if configStr != "" {
+						if err := json.Unmarshal([]byte(configStr), &assignedJob.Config); err != nil {
+							// Log error but don't fail - use default config
+							a.PS.logger.WithError(err).WithField("job_id", jobID).Warn("Failed to unmarshal job config during assignment")
+						}
+					}
 				}
 
 				// Update caches

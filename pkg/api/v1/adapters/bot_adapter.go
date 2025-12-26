@@ -1291,8 +1291,36 @@ func (a *BotAdapter) GetNextJob(w http.ResponseWriter, r *http.Request, botId ge
 		}
 
 		apiJob := a.convertCommonJobToAPI(commonJob)
+
+		// Build custom job response with fields the bot expects
+		// The bot client expects duration/timeout/memory_limit fields
+		jobResponse := map[string]interface{}{
+			"id":              apiJob.Id,
+			"name":            apiJob.Name,
+			"fuzzer":          apiJob.Fuzzer,
+			"target":          commonJob.Target,
+			"status":          apiJob.Status,
+			"work_dir":        commonJob.WorkDir,
+			"corpus_dir":      "",
+			"duration":        int(commonJob.Config.Duration.Seconds()),
+			"timeout":         int(commonJob.Config.Timeout.Seconds()),
+			"memory_limit":    commonJob.Config.MemoryLimit,
+			"created_at":      apiJob.CreatedAt,
+			"enable_coverage": commonJob.EnableCoverage,
+			"coverage_format": commonJob.CoverageFormat,
+		}
+		if apiJob.AssignedBotId != nil {
+			jobResponse["assigned_bot_id"] = apiJob.AssignedBotId.String()
+		}
+		if apiJob.StartedAt != nil {
+			jobResponse["started_at"] = *apiJob.StartedAt
+		}
+		if apiJob.CompletedAt != nil {
+			jobResponse["completed_at"] = *apiJob.CompletedAt
+		}
+
 		response := map[string]interface{}{
-			"job":              apiJob,
+			"job":              jobResponse,
 			"lease_token":      "", // Service handles lease internally
 			"lease_expires_at": time.Now().Add(60 * time.Second),
 		}
@@ -1361,8 +1389,36 @@ func (a *BotAdapter) GetNextJob(w http.ResponseWriter, r *http.Request, botId ge
 	}
 
 	apiJob := a.convertJobToAPI(job)
+
+	// Build custom job response with fields the bot expects
+	// The bot client expects duration/timeout/memory_limit fields
+	jobResponse := map[string]interface{}{
+		"id":              apiJob.Id,
+		"name":            apiJob.Name,
+		"fuzzer":          apiJob.Fuzzer,
+		"target":          job.TargetBinary,
+		"status":          apiJob.Status,
+		"work_dir":        job.OutputPath,
+		"corpus_dir":      job.CorpusPath,
+		"duration":        int(job.MaxDuration.Seconds()),
+		"timeout":         0, // Not available in domain job type
+		"memory_limit":    int64(0),
+		"created_at":      apiJob.CreatedAt,
+		"enable_coverage": false,
+		"coverage_format": "",
+	}
+	if apiJob.AssignedBotId != nil {
+		jobResponse["assigned_bot_id"] = apiJob.AssignedBotId.String()
+	}
+	if apiJob.StartedAt != nil {
+		jobResponse["started_at"] = *apiJob.StartedAt
+	}
+	if apiJob.CompletedAt != nil {
+		jobResponse["completed_at"] = *apiJob.CompletedAt
+	}
+
 	response := map[string]interface{}{
-		"job":              apiJob,
+		"job":              jobResponse,
 		"lease_token":      leaseToken,
 		"lease_expires_at": leaseExpiresAt,
 	}
