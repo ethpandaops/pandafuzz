@@ -296,7 +296,6 @@ func ExecuteRetryableWithResult[T any](r *RetryableOperation, ctx context.Contex
 // Legacy compatibility functions for gradual migration
 
 // ExecuteWithRetry provides backward compatibility for existing code
-// This function signature matches the existing implementation in sqlite_retry.go
 func ExecuteWithRetry(ctx context.Context, config common.DatabaseConfig, fn func() error) error {
 	opts := RetryOptions{
 		MaxRetries:      config.MaxRetries,
@@ -313,7 +312,6 @@ func ExecuteWithRetry(ctx context.Context, config common.DatabaseConfig, fn func
 }
 
 // ExecuteWithRetryResult provides backward compatibility for existing code
-// This function signature matches the existing implementation in sqlite_retry.go
 func ExecuteWithRetryResult[T any](ctx context.Context, config common.DatabaseConfig, fn func() (T, error)) (T, error) {
 	opts := RetryOptions{
 		MaxRetries:      config.MaxRetries,
@@ -342,5 +340,91 @@ func RetryableExec(ctx context.Context, db *sql.DB, config common.DatabaseConfig
 
 	return WithRetry(ctx, opts, func(ctx context.Context) (sql.Result, error) {
 		return db.ExecContext(ctx, query, args...)
+	})
+}
+
+// RetryableQuery executes a query with retry logic and returns multiple rows
+func RetryableQuery[T any](ctx context.Context, db *sql.DB, config common.DatabaseConfig, query string, scanFunc func(*sql.Rows) (T, error), args ...any) ([]T, error) {
+	opts := RetryOptions{
+		MaxRetries:      config.MaxRetries,
+		InitialDelay:    config.RetryDelay,
+		MaxDelay:        config.MaxRetryDelay,
+		Multiplier:      config.RetryMultiplier,
+		Jitter:          true,
+		RetryableErrors: []error{sql.ErrConnDone, sql.ErrTxDone},
+	}
+
+	return WithRetry(ctx, opts, func(ctx context.Context) ([]T, error) {
+		rows, err := db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		var results []T
+		for rows.Next() {
+			item, err := scanFunc(rows)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, item)
+		}
+
+		return results, rows.Err()
+	})
+}
+
+// RetryableQueryRow executes a single row query with retry logic
+func RetryableQueryRow[T any](ctx context.Context, db *sql.DB, config common.DatabaseConfig, query string, scanFunc func(*sql.Row) (T, error), args ...any) (T, error) {
+	opts := RetryOptions{
+		MaxRetries:      config.MaxRetries,
+		InitialDelay:    config.RetryDelay,
+		MaxDelay:        config.MaxRetryDelay,
+		Multiplier:      config.RetryMultiplier,
+		Jitter:          true,
+		RetryableErrors: []error{sql.ErrConnDone, sql.ErrTxDone},
+	}
+
+	return WithRetry(ctx, opts, func(ctx context.Context) (T, error) {
+		row := db.QueryRowContext(ctx, query, args...)
+		return scanFunc(row)
+	})
+}
+
+// RetryableTransaction wraps a transaction function with retry logic
+func RetryableTransaction(ctx context.Context, db *sql.DB, config common.DatabaseConfig, fn func(tx *sql.Tx) error) error {
+	opts := RetryOptions{
+		MaxRetries:      config.MaxRetries,
+		InitialDelay:    config.RetryDelay,
+		MaxDelay:        config.MaxRetryDelay,
+		Multiplier:      config.RetryMultiplier,
+		Jitter:          true,
+		RetryableErrors: []error{sql.ErrConnDone, sql.ErrTxDone},
+	}
+
+	return WithRetryVoid(ctx, opts, func(ctx context.Context) error {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+
+		// Ensure rollback on panic
+		defer func() {
+			if p := recover(); p != nil {
+				tx.Rollback()
+				panic(p)
+			}
+		}()
+
+		// Execute transaction function
+		if err := fn(tx); err != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				logrus.WithError(rollbackErr).Error("Failed to rollback transaction")
+			}
+			return err
+		}
+
+		// Commit transaction
+		return tx.Commit()
 	})
 }

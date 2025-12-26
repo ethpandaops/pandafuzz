@@ -67,47 +67,56 @@ func (v *BinaryValidator) validateLibFuzzerBinary(binaryPath string) error {
 
 	cmd := exec.CommandContext(ctx, binaryPath, "-help=1")
 	output, err := cmd.CombinedOutput()
+	outputStr := string(output)
+
+	// Check for LibFuzzer-specific output FIRST, even if process crashed
+	// LibFuzzer+ASAN binaries may crash when output is piped but still produce valid output
+	isLibFuzzerOutput := strings.Contains(outputStr, "libFuzzer") ||
+		strings.Contains(outputStr, "LLVMFuzzerTestOneInput") ||
+		strings.Contains(outputStr, "-max_total_time") ||
+		strings.Contains(outputStr, "Usage:") && strings.Contains(outputStr, "fuzzing")
+
+	if isLibFuzzerOutput {
+		v.logger.WithField("binary", binaryPath).Info("LibFuzzer binary validation passed (detected LibFuzzer output)")
+		return nil
+	}
+
+	// Check if binary has LLVMFuzzerTestOneInput symbol (heuristic for valid LibFuzzer binary)
+	fileContent, readErr := os.ReadFile(binaryPath)
+	if readErr == nil {
+		contentStr := string(fileContent)
+		if strings.Contains(contentStr, "LLVMFuzzerTestOneInput") {
+			v.logger.WithField("binary", binaryPath).Info("LibFuzzer binary validation passed (found LLVMFuzzerTestOneInput symbol)")
+			return nil
+		}
+	}
 
 	if err != nil {
-		// Check if it crashed immediately
+		// Check if it crashed immediately without any LibFuzzer output
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if exitErr.ExitCode() == -1 {
-				// Process was killed by signal (likely segfault)
+				// Process was killed by signal - for LibFuzzer, don't try stdin test
+				// Instead, check for the symbol directly
 				v.logger.WithFields(logrus.Fields{
 					"binary": binaryPath,
 					"signal": exitErr.ExitCode(),
-				}).Debug("Binary crashed with signal, trying standalone test")
+					"output": outputStr,
+				}).Debug("Binary crashed with signal during -help=1")
 
-				// Try as a standalone test binary that reads from stdin
-				return v.validateStandaloneLibFuzzerBinary(binaryPath)
+				// If no LibFuzzer symbols found, it's not a valid LibFuzzer binary
+				return fmt.Errorf("binary crashed with -help=1 and has no LibFuzzer symbols - not a valid LibFuzzer binary")
 			}
 		}
-		// LibFuzzer might return non-zero with help, but shouldn't crash
-		outputStr := string(output)
-		if !strings.Contains(outputStr, "libFuzzer") && !strings.Contains(outputStr, "LLVMFuzzerTestOneInput") {
-			v.logger.WithFields(logrus.Fields{
-				"binary": binaryPath,
-				"output": outputStr,
-				"error":  err,
-			}).Debug("Binary doesn't respond to -help=1, trying standalone test")
-
-			// Try as a standalone test binary
-			return v.validateStandaloneLibFuzzerBinary(binaryPath)
-		}
+		v.logger.WithFields(logrus.Fields{
+			"binary": binaryPath,
+			"output": outputStr,
+			"error":  err,
+		}).Debug("Binary doesn't respond to -help=1 as LibFuzzer")
+		return fmt.Errorf("not a valid LibFuzzer binary: %w", err)
 	}
 
-	// Check for LibFuzzer-specific output
-	outputStr := string(output)
-	if !strings.Contains(outputStr, "libFuzzer") &&
-		!strings.Contains(outputStr, "LLVMFuzzerTestOneInput") &&
-		!strings.Contains(outputStr, "-max_total_time") {
-		v.logger.WithField("binary", binaryPath).Debug("No LibFuzzer help output, trying standalone test")
-		// Try as a standalone test binary
-		return v.validateStandaloneLibFuzzerBinary(binaryPath)
-	}
-
-	v.logger.WithField("binary", binaryPath).Info("LibFuzzer binary validation passed")
-	return nil
+	v.logger.WithField("binary", binaryPath).Debug("No LibFuzzer signatures found")
+	return fmt.Errorf("binary does not appear to be a LibFuzzer instrumented binary")
 }
 
 // validateStandaloneLibFuzzerBinary validates a standalone LibFuzzer-compatible binary
