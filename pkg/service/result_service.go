@@ -14,7 +14,7 @@ type resultService struct {
 	state  StateStore
 	config *common.MasterConfig
 	logger *logrus.Logger
-	
+
 	// Lifecycle management
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -127,9 +127,12 @@ func (s *resultService) GetCrashResults(ctx context.Context, jobID string) ([]*c
 		return nil, errors.NewValidationError("get_crash_results", "Job ID is required")
 	}
 
-	// TODO: Implement actual crash result retrieval from database
-	// For now, return empty list
-	return []*common.CrashResult{}, nil
+	crashes, err := s.state.GetJobCrashes(ctx, jobID)
+	if err != nil {
+		return nil, errors.Wrap(errors.ErrorTypeDatabase, "get_crash_results", "Failed to retrieve crash results", err)
+	}
+
+	return crashes, nil
 }
 
 // GetCoverageHistory retrieves coverage history
@@ -138,18 +141,25 @@ func (s *resultService) GetCoverageHistory(ctx context.Context, jobID string) ([
 		return nil, errors.NewValidationError("get_coverage_history", "Job ID is required")
 	}
 
-	// TODO: Implement actual coverage history retrieval from database
-	// For now, return empty list
-	return []*common.CoverageResult{}, nil
+	// Use a wide time range to get all coverage history
+	startTime := time.Time{}                  // Zero time (earliest possible)
+	endTime := time.Now().Add(24 * time.Hour) // Include future entries just in case
+
+	coverage, err := s.state.GetJobCoverageHistory(ctx, jobID, startTime, endTime)
+	if err != nil {
+		return nil, errors.Wrap(errors.ErrorTypeDatabase, "get_coverage_history", "Failed to retrieve coverage history", err)
+	}
+
+	return coverage, nil
 }
 
 // Start starts the result service
 func (s *resultService) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
-	
+
 	// Start result processing goroutine
 	go s.processResultsQueue()
-	
+
 	s.logger.Info("Result service started")
 	return nil
 }
@@ -159,10 +169,10 @@ func (s *resultService) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	
+
 	// Clean up any resources
 	// Currently result service doesn't have resources to clean up
-	
+
 	s.logger.Info("Result service stopped")
 	return nil
 }
@@ -173,7 +183,7 @@ func (s *resultService) processResultsQueue() {
 	// Currently results are processed synchronously
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-s.ctx.Done():

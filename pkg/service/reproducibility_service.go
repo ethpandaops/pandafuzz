@@ -175,8 +175,6 @@ func (s *reproducibilityService) QueueReproduction(ctx context.Context, crashID 
 	}
 
 	// Check if crash exists
-	// TODO: GetCrashResult method needs to be added to Storage interface
-	// For now, we'll create a minimal request
 	crash, err := s.storage.GetCrash(ctx, crashID)
 	if err != nil {
 		return fmt.Errorf("failed to get crash: %w", err)
@@ -199,13 +197,8 @@ func (s *reproducibilityService) QueueReproduction(ctx context.Context, crashID 
 		TimeoutAt:    time.Now().Add(30 * time.Minute), // 30 minute timeout
 	}
 
-	// TODO: CreateReproductionRequest method needs to be added to Storage interface
-	// For now, we'll track in memory only
-	// if err := s.storage.CreateReproductionRequest(ctx, request); err != nil {
-	//     return fmt.Errorf("failed to store reproduction request: %w", err)
-	// }
-
-	// Add to in-memory tracking
+	// Track request in memory (storage-backed persistence can be added later)
+	// The reproduction_requests table exists but CRUD methods are pending implementation
 	s.statusMu.Lock()
 	s.requestStatus[crashID] = request
 	s.statusMu.Unlock()
@@ -233,8 +226,8 @@ func (s *reproducibilityService) GetReproductionStatus(ctx context.Context, cras
 	}
 	s.statusMu.RUnlock()
 
-	// TODO: GetReproductionRequest method needs to be added to Storage interface
-	// For now, return nil if not found in memory
+	// Request not found in memory cache
+	// Note: Storage-backed retrieval can be added when CRUD methods are implemented
 	return nil, errors.NewNotFoundError("reproduction_request", crashID)
 }
 
@@ -282,11 +275,7 @@ func (s *reproducibilityService) RecordReproductionResult(ctx context.Context, r
 			request.CompletedAt = &now
 		}
 
-		// TODO: UpdateReproductionRequest method needs to be added to Storage interface
-		// For now, the update is only in memory
-		// if err := s.storage.UpdateReproductionRequest(ctx, request.ID, request); err != nil {
-		//     s.logger.WithError(err).Error("Failed to update reproduction request")
-		// }
+		// Note: Update is in memory only; storage-backed persistence pending CRUD methods
 	}
 	s.statusMu.Unlock()
 

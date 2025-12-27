@@ -1,8 +1,12 @@
 package service
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
@@ -488,8 +492,8 @@ func (s *jobService) GetJobLogs(ctx context.Context, jobID string) ([]string, er
 		return nil, errors.NewValidationError("get_job_logs", "Job ID is required")
 	}
 
-	// Verify job exists
-	_, err := s.state.GetJob(jobID)
+	// Get job to find its work directory
+	job, err := s.state.GetJob(jobID)
 	if err != nil {
 		if common.IsNotFoundError(err) {
 			return nil, errors.NewNotFoundError("get_job_logs", "job")
@@ -497,15 +501,67 @@ func (s *jobService) GetJobLogs(ctx context.Context, jobID string) ([]string, er
 		return nil, errors.Wrap(errors.ErrorTypeDatabase, "get_job_logs", "Failed to get job", err)
 	}
 
-	// TODO: Implement actual log retrieval from storage
-	// For now, return placeholder logs
-	logs := []string{
-		fmt.Sprintf("[%s] Job %s started", time.Now().Format(time.RFC3339), jobID),
-		fmt.Sprintf("[%s] Fuzzer initialized", time.Now().Format(time.RFC3339)),
-		fmt.Sprintf("[%s] Fuzzing in progress...", time.Now().Format(time.RFC3339)),
+	// Read logs from the job's work directory
+	return s.readJobLogFiles(job.WorkDir, jobID)
+}
+
+// readJobLogFiles reads log files from a job's work directory
+func (s *jobService) readJobLogFiles(workDir, jobID string) ([]string, error) {
+	if workDir == "" {
+		return []string{fmt.Sprintf("[INFO] No work directory configured for job %s", jobID)}, nil
 	}
 
-	return logs, nil
+	var allLogs []string
+
+	// Common log file names to look for
+	logFiles := []string{
+		"fuzzer.log",
+		"output.log",
+		"stderr.log",
+		"stdout.log",
+		"afl.log",
+		"libfuzzer.log",
+	}
+
+	for _, logFile := range logFiles {
+		logPath := filepath.Join(workDir, logFile)
+		if _, err := os.Stat(logPath); os.IsNotExist(err) {
+			continue
+		}
+
+		file, err := os.Open(logPath)
+		if err != nil {
+			s.logger.WithError(err).WithField("path", logPath).Debug("Failed to open log file")
+			continue
+		}
+
+		scanner := bufio.NewScanner(file)
+		// Limit to last 1000 lines to avoid memory issues
+		var lines []string
+		for scanner.Scan() {
+			lines = append(lines, scanner.Text())
+			if len(lines) > 1000 {
+				lines = lines[1:]
+			}
+		}
+		file.Close()
+
+		if err := scanner.Err(); err != nil {
+			s.logger.WithError(err).WithField("path", logPath).Debug("Error reading log file")
+			continue
+		}
+
+		// Prefix lines with the log file name for clarity
+		for _, line := range lines {
+			allLogs = append(allLogs, fmt.Sprintf("[%s] %s", strings.TrimSuffix(logFile, ".log"), line))
+		}
+	}
+
+	if len(allLogs) == 0 {
+		return []string{fmt.Sprintf("[INFO] No log files found in %s", workDir)}, nil
+	}
+
+	return allLogs, nil
 }
 
 // Start starts the job service
@@ -575,31 +631,105 @@ func (s *jobService) Stop() error {
 	return nil
 }
 
-// StreamLogs streams job logs
+// StreamLogs streams job logs (tails the log file)
 func (s *jobService) StreamLogs(ctx context.Context, jobID string) (<-chan string, error) {
 	if jobID == "" {
 		return nil, errors.NewValidationError("stream_logs", "Job ID is required")
 	}
 
+	// Get job to find its work directory
+	job, err := s.state.GetJob(jobID)
+	if err != nil {
+		if common.IsNotFoundError(err) {
+			return nil, errors.NewNotFoundError("stream_logs", "job")
+		}
+		return nil, errors.Wrap(errors.ErrorTypeDatabase, "stream_logs", "Failed to get job", err)
+	}
+
 	// Create a channel for streaming logs
 	logsChan := make(chan string, 100)
 
-	// TODO: Implement actual log streaming from storage or log files
-	// For now, return a channel that closes immediately
-	close(logsChan)
+	if job.WorkDir == "" {
+		// No work directory, close immediately
+		close(logsChan)
+		return logsChan, nil
+	}
+
+	// Find the primary log file
+	logPath := s.findPrimaryLogFile(job.WorkDir)
+	if logPath == "" {
+		// No log file found, close immediately
+		close(logsChan)
+		return logsChan, nil
+	}
+
+	// Start a goroutine to tail the log file
+	go func() {
+		defer close(logsChan)
+		s.tailLogFile(ctx, logPath, logsChan)
+	}()
 
 	return logsChan, nil
 }
 
-// GetLogs retrieves job logs
-func (s *jobService) GetLogs(ctx context.Context, jobID string) ([]string, error) {
-	if jobID == "" {
-		return nil, errors.NewValidationError("get_logs", "Job ID is required")
+// findPrimaryLogFile finds the primary log file in a work directory
+func (s *jobService) findPrimaryLogFile(workDir string) string {
+	logFiles := []string{"fuzzer.log", "output.log", "stdout.log", "afl.log", "libfuzzer.log"}
+	for _, logFile := range logFiles {
+		logPath := filepath.Join(workDir, logFile)
+		if _, err := os.Stat(logPath); err == nil {
+			return logPath
+		}
+	}
+	return ""
+}
+
+// tailLogFile tails a log file and sends new lines to the channel
+func (s *jobService) tailLogFile(ctx context.Context, logPath string, logsChan chan<- string) {
+	file, err := os.Open(logPath)
+	if err != nil {
+		s.logger.WithError(err).WithField("path", logPath).Error("Failed to open log file for tailing")
+		return
+	}
+	defer file.Close()
+
+	// Seek to end of file
+	_, err = file.Seek(0, 2)
+	if err != nil {
+		s.logger.WithError(err).WithField("path", logPath).Error("Failed to seek to end of log file")
+		return
 	}
 
-	// TODO: Implement actual log retrieval from storage
-	// For now, return empty logs
-	return []string{}, nil
+	reader := bufio.NewReader(file)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					break // No more data available
+				}
+				line = strings.TrimSpace(line)
+				if line != "" {
+					select {
+					case logsChan <- line:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}
+	}
+}
+
+// GetLogs retrieves job logs (alias for GetJobLogs)
+func (s *jobService) GetLogs(ctx context.Context, jobID string) ([]string, error) {
+	return s.GetJobLogs(ctx, jobID)
 }
 
 // GetJobStats retrieves statistics for a job
@@ -626,11 +756,21 @@ func (s *jobService) GetJobStats(ctx context.Context, jobID string) (*JobStats, 
 		return nil, err
 	}
 
-	// Calculate statistics
+	// Calculate statistics with proper deduplication based on crash hash
+	uniqueHashes := make(map[string]struct{})
+	for _, crash := range crashes {
+		if crash.Hash != "" {
+			uniqueHashes[crash.Hash] = struct{}{}
+		} else {
+			// If no hash, treat each crash as unique
+			uniqueHashes[crash.ID] = struct{}{}
+		}
+	}
+
 	stats := &JobStats{
 		JobID:         jobID,
 		CrashesFound:  len(crashes),
-		UniqueCrashes: len(crashes), // TODO: Implement proper deduplication
+		UniqueCrashes: len(uniqueHashes),
 		CorpusSize:    len(corpusFiles),
 		StartTime:     job.CreatedAt,
 	}
@@ -646,10 +786,35 @@ func (s *jobService) GetJobStats(ctx context.Context, jobID string) (*JobStats, 
 		stats.Duration = time.Since(stats.StartTime)
 	}
 
-	// TODO: Get actual coverage and execution metrics from fuzzer
+	// Get coverage and execution metrics from the latest coverage result
 	stats.CoveragePercent = 0.0
 	stats.ExecutionsTotal = 0
 	stats.ExecutionsPerSec = 0.0
+
+	// Query coverage history to get the latest metrics
+	// Use a wide time range to ensure we get all coverage data
+	startTime := job.CreatedAt.Add(-time.Hour) // Buffer for any timing issues
+	endTime := time.Now().Add(time.Hour)
+
+	coverageHistory, err := s.state.GetJobCoverageHistory(ctx, jobID, startTime, endTime)
+	if err != nil {
+		s.logger.WithError(err).WithField("job_id", jobID).Debug("Failed to get coverage history")
+	} else if len(coverageHistory) > 0 {
+		// Use the latest coverage result
+		latest := coverageHistory[len(coverageHistory)-1]
+		stats.ExecutionsTotal = latest.ExecCount
+
+		// Calculate executions per second if we have duration
+		if stats.Duration > 0 {
+			stats.ExecutionsPerSec = float64(stats.ExecutionsTotal) / stats.Duration.Seconds()
+		}
+
+		// Calculate coverage percentage from edges if available
+		// Coverage is approximated as new edges / total edges (if we have baseline)
+		if latest.Edges > 0 {
+			stats.CoveragePercent = float64(latest.NewEdges) / float64(latest.Edges) * 100.0
+		}
+	}
 
 	return stats, nil
 }
@@ -660,10 +825,15 @@ func (s *jobService) GetJobCrashes(ctx context.Context, jobID string) ([]*common
 		return nil, errors.NewValidationError("get_job_crashes", "Job ID is required")
 	}
 
-	// TODO: Implement crash retrieval
-	// This requires access to the storage interface which is not exposed through StateStore
-	// For now, return empty list
-	return []*common.CrashResult{}, nil
+	// Use the StateStore's GetJobCrashes method
+	crashes, err := s.state.GetJobCrashes(ctx, jobID)
+	if err != nil {
+		// Log but don't fail - crashes may not be available in all storage backends
+		s.logger.WithError(err).WithField("job_id", jobID).Debug("Failed to get job crashes")
+		return []*common.CrashResult{}, nil
+	}
+
+	return crashes, nil
 }
 
 // GetQueueStats returns queue statistics (for asynq mode)

@@ -431,6 +431,11 @@ func (e *Engine) processStdout() {
 			fmt.Fprintf(e.config.OutputWriter, "%s [stdout] %s\n", timestamp, line)
 		}
 	}
+
+	// Log any scanner errors (e.g., if process was killed)
+	if err := e.stdoutScanner.Err(); err != nil {
+		e.log.WithError(err).Debug("Stdout scanner encountered error")
+	}
 }
 
 // processStderr processes the stderr output from LibFuzzer
@@ -452,6 +457,11 @@ func (e *Engine) processStderr() {
 		if e.crashRegex.MatchString(line) {
 			e.handleCrash(line)
 		}
+	}
+
+	// Log any scanner errors (e.g., if process was killed)
+	if err := e.stderrScanner.Err(); err != nil {
+		e.log.WithError(err).Debug("Stderr scanner encountered error")
 	}
 }
 
@@ -601,6 +611,12 @@ func (e *Engine) monitorProcess() {
 		err := e.cmd.Wait()
 		if err != nil && !errors.Is(err, context.Canceled) {
 			e.log.WithError(err).Error("Fuzzer process exited with error")
+
+			// Write error to job log file so users can see why fuzzer failed
+			if e.config != nil && e.config.OutputWriter != nil {
+				timestamp := time.Now().Format(time.RFC3339)
+				fmt.Fprintf(e.config.OutputWriter, "%s [error] Fuzzer process exited with error: %v\n", timestamp, err)
+			}
 		}
 	}
 

@@ -125,15 +125,9 @@ func (s *Server) corsMiddlewareForChi() func(http.Handler) http.Handler {
 }
 
 // rateLimitMiddlewareForChi returns rate limiting middleware for Chi router
+// This delegates to the main rateLimitMiddleware implementation
 func (s *Server) rateLimitMiddlewareForChi() func(http.Handler) http.Handler {
-	// For now, this is a simple implementation
-	// In production, you'd want to use a proper rate limiter
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// TODO: Implement proper rate limiting
-			next.ServeHTTP(w, r)
-		})
-	}
+	return s.rateLimitMiddleware
 }
 
 // setupStaticFileServingOnChi configures static file serving for Chi router

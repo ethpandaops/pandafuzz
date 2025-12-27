@@ -1,4 +1,4 @@
-package filesystem
+package coverage
 
 import (
 	"context"

@@ -16,8 +16,8 @@ import (
 	"github.com/ethpandaops/pandafuzz/pkg/domain/bot/types"
 	fuzzertypes "github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/types"
 	jobtypes "github.com/ethpandaops/pandafuzz/pkg/domain/job/types"
-	"github.com/ethpandaops/pandafuzz/pkg/infrastructure/storage/filesystem"
 	"github.com/ethpandaops/pandafuzz/pkg/storage/backend"
+	"github.com/ethpandaops/pandafuzz/pkg/storage/coverage"
 )
 
 // FuzzerExecutor implements the Executor interface for fuzzing jobs
@@ -612,7 +612,7 @@ func (fe *FuzzerExecutor) collectCoverageBasic(ctx context.Context, execCtx *Exe
 
 	// Create coverage repository
 	// We need a logger, use a simple approach for now
-	coverageRepo, err := filesystem.NewFilesystemCoverageRepository(
+	coverageRepo, err := coverage.NewFilesystemCoverageRepository(
 		filepath.Join("/tmp", "pandafuzz", "coverage"),
 		nil, // TODO: Pass proper logger
 	)

@@ -628,9 +628,63 @@ func (ps *PersistentState) GetCampaignCoverageHistory(ctx context.Context, campa
 
 // GetCampaignCorpusUpdates retrieves corpus updates for a campaign
 func (ps *PersistentState) GetCampaignCorpusUpdates(ctx context.Context, campaignID string) ([]*common.CorpusUpdate, error) {
-	// TODO: Implement corpus updates retrieval
-	// This requires either extending the Database interface or using Storage interface
-	return []*common.CorpusUpdate{}, nil
+	// Use AdvancedDatabase.Select to query corpus_updates joined with jobs
+	advDB, ok := ps.db.(common.AdvancedDatabase)
+	if !ok {
+		ps.logger.Warn("Database does not support advanced operations, returning empty corpus updates")
+		return []*common.CorpusUpdate{}, nil
+	}
+
+	query := `
+		SELECT cu.id, cu.job_id, cu.bot_id, cu.files, cu.timestamp, cu.total_size
+		FROM corpus_updates cu
+		INNER JOIN jobs j ON cu.job_id = j.id
+		WHERE j.campaign_id = ?
+		ORDER BY cu.timestamp DESC
+	`
+
+	rows, err := advDB.Select(ctx, query, campaignID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return []*common.CorpusUpdate{}, nil
+		}
+		return nil, fmt.Errorf("failed to query corpus updates: %w", err)
+	}
+
+	updates := make([]*common.CorpusUpdate, 0, len(rows))
+	for _, row := range rows {
+		update := &common.CorpusUpdate{}
+
+		if id, ok := row["id"].(string); ok {
+			update.ID = id
+		}
+		if jobID, ok := row["job_id"].(string); ok {
+			update.JobID = jobID
+		}
+		if botID, ok := row["bot_id"].(string); ok {
+			update.BotID = botID
+		}
+		if totalSize, ok := row["total_size"].(int64); ok {
+			update.TotalSize = totalSize
+		}
+		if timestamp, ok := row["timestamp"].(time.Time); ok {
+			update.Timestamp = timestamp
+		}
+
+		// Parse files JSON array
+		if filesJSON, ok := row["files"].(string); ok && filesJSON != "" {
+			var files []string
+			if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
+				ps.logger.WithError(err).WithField("update_id", update.ID).Warn("Failed to parse corpus files JSON")
+			} else {
+				update.Files = files
+			}
+		}
+
+		updates = append(updates, update)
+	}
+
+	return updates, nil
 }
 
 // GetBotCompletedJobs is now implemented above (line 1382)

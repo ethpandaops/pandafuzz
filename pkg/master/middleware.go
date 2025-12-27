@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"golang.org/x/time/rate"
 )
 
 // loggingMiddleware logs HTTP requests
@@ -231,12 +232,106 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// rateLimitMiddleware implements rate limiting
+// ipRateLimiter manages per-IP rate limiters
+type ipRateLimiter struct {
+	limiters map[string]*rate.Limiter
+	mu       sync.RWMutex
+	rps      rate.Limit
+	burst    int
+}
+
+// newIPRateLimiter creates a new IP rate limiter
+func newIPRateLimiter(rps int, burst int) *ipRateLimiter {
+	if rps <= 0 {
+		rps = 100 // Default 100 requests per second
+	}
+	if burst <= 0 {
+		burst = 200 // Default burst of 200
+	}
+	return &ipRateLimiter{
+		limiters: make(map[string]*rate.Limiter),
+		rps:      rate.Limit(rps),
+		burst:    burst,
+	}
+}
+
+// getLimiter returns the rate limiter for an IP, creating one if necessary
+func (rl *ipRateLimiter) getLimiter(ip string) *rate.Limiter {
+	rl.mu.RLock()
+	limiter, exists := rl.limiters[ip]
+	rl.mu.RUnlock()
+
+	if exists {
+		return limiter
+	}
+
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if limiter, exists = rl.limiters[ip]; exists {
+		return limiter
+	}
+
+	limiter = rate.NewLimiter(rl.rps, rl.burst)
+	rl.limiters[ip] = limiter
+
+	// Cleanup old limiters periodically (simple LRU would be better, but this works)
+	if len(rl.limiters) > 10000 {
+		// Remove ~10% of entries randomly
+		count := 0
+		for key := range rl.limiters {
+			if count >= 1000 {
+				break
+			}
+			delete(rl.limiters, key)
+			count++
+		}
+	}
+
+	return limiter
+}
+
+// rateLimitMiddleware implements rate limiting using token bucket algorithm
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
-	// This is a simplified rate limiter
-	// In production, you'd use a more sophisticated implementation
+	// Create IP rate limiter with config values
+	rps := s.config.Server.RateLimitRPS
+	burst := s.config.Server.RateLimitBurst
+
+	// Use defaults if not configured
+	if rps <= 0 {
+		rps = 100
+	}
+	if burst <= 0 {
+		burst = 200
+	}
+
+	limiter := newIPRateLimiter(rps, burst)
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// TODO: Implement proper rate limiting based on config
+		// Extract client IP (handle X-Forwarded-For for proxied requests)
+		clientIP := r.RemoteAddr
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			clientIP = xff
+		}
+
+		// Get rate limiter for this IP
+		ipLimiter := limiter.getLimiter(clientIP)
+
+		// Check if request is allowed
+		if !ipLimiter.Allow() {
+			s.logger.WithFields(logrus.Fields{
+				"client_ip": clientIP,
+				"path":      r.URL.Path,
+			}).Warn("Rate limit exceeded")
+
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", rps))
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }

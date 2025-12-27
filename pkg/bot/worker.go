@@ -94,20 +94,27 @@ func (w *Worker) Start(ctx context.Context, workerCfg WorkerConfig) error {
 
 	w.ctx, w.cancel = context.WithCancel(ctx)
 
-	// Create Redis config from bot config or defaults
-	redisCfg := &config.RedisConfig{
-		Host:         "localhost", // TODO: Get from config
-		Port:         6379,
-		Password:     "",
-		DB:           0,
-		PoolSize:     10,
-		MinIdleConns: 5,
-		MaxRetries:   3,
-		DialTimeout:  5 * time.Second,
-		ReadTimeout:  3 * time.Second,
-		WriteTimeout: 3 * time.Second,
-		IdleTimeout:  5 * time.Minute,
-		MaxConnAge:   30 * time.Minute,
+	// Create Redis config from bot config or use defaults
+	var redisCfg *config.RedisConfig
+	if w.config.Redis != nil {
+		redisCfg = w.config.Redis
+	} else {
+		// Default Redis config if not specified in bot config
+		redisCfg = &config.RedisConfig{
+			Host:         "localhost",
+			Port:         6379,
+			Password:     "",
+			DB:           0,
+			PoolSize:     10,
+			MinIdleConns: 5,
+			MaxRetries:   3,
+			DialTimeout:  5 * time.Second,
+			ReadTimeout:  3 * time.Second,
+			WriteTimeout: 3 * time.Second,
+			IdleTimeout:  5 * time.Minute,
+			MaxConnAge:   30 * time.Minute,
+		}
+		w.logger.Warn("No Redis config provided, using default localhost:6379")
 	}
 
 	// Create server config

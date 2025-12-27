@@ -2,6 +2,7 @@ package bot
 
 import (
 	"archive/zip"
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -1103,9 +1104,10 @@ func (a *Agent) completeCurrentJob(success bool, message string) {
 		output := fmt.Sprintf("Job completed: %s", message)
 		logPath := filepath.Join(job.WorkDir, "job.log")
 		if _, err := os.Stat(logPath); err == nil {
-			// Try to read last few lines of log
-			// TODO: Implement tail functionality
-			output = fmt.Sprintf("%s\nLog: %s", output, logPath)
+			// Read last 50 lines of log
+			if lastLines := a.tailFile(logPath, 50); lastLines != "" {
+				output = fmt.Sprintf("%s\n\n--- Last 50 lines of log ---\n%s", output, lastLines)
+			}
 		}
 		a.apiServer.MarkJobCompleted(job.ID, success, message, output)
 	}
@@ -1934,4 +1936,32 @@ func (a *Agent) downloadCorpusCollection(collectionID, targetDir string) error {
 	}
 
 	return nil
+}
+
+// tailFile reads the last n lines from a file
+func (a *Agent) tailFile(filePath string, n int) string {
+	file, err := os.Open(filePath)
+	if err != nil {
+		a.logger.WithError(err).WithField("path", filePath).Debug("Failed to open file for tail")
+		return ""
+	}
+	defer file.Close()
+
+	// Read all lines (for small log files this is acceptable)
+	scanner := bufio.NewScanner(file)
+	var lines []string
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+		// Keep only the last n lines
+		if len(lines) > n {
+			lines = lines[1:]
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		a.logger.WithError(err).WithField("path", filePath).Debug("Error reading file for tail")
+		return ""
+	}
+
+	return strings.Join(lines, "\n")
 }

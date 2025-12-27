@@ -412,7 +412,13 @@ func (s *Server) initializeAPIv1() error {
 	// Configure based on master config
 	if s.config.Server.EnableCORS {
 		apiConfig.EnableCORS = true
-		apiConfig.CORSOrigins = []string{"*"} // TODO: make this configurable
+		// Use configured CORS origins, fall back to "*" if not specified
+		if len(s.config.Server.CORSOrigins) > 0 {
+			apiConfig.CORSOrigins = s.config.Server.CORSOrigins
+		} else {
+			apiConfig.CORSOrigins = []string{"*"}
+			s.logger.Warn("CORS enabled but no origins configured, allowing all origins (*)")
+		}
 	}
 
 	if s.config.Server.RateLimitRPS > 0 {
