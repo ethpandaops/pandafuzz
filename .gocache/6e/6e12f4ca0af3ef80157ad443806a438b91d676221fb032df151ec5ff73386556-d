@@ -1,0 +1,17 @@
+./assume_role.go
+./chain.go
+./credentials.go
+./doc.go
+./env_aws.go
+./env_minio.go
+./error_response.go
+./file_aws_credentials.go
+./file_minio_client.go
+./iam_aws.go
+./signature_type.go
+./static.go
+./sts_client_grants.go
+./sts_custom_identity.go
+./sts_ldap_identity.go
+./sts_tls_identity.go
+./sts_web_identity.go

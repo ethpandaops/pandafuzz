@@ -31,37 +31,6 @@ func (h *Handlers) HandleListCampaigns(w http.ResponseWriter, r *http.Request) {
 		params.Status = &statusVal
 	}
 
-	// TODO: Add these parameters to OpenAPI spec
-	// if fuzzer := r.URL.Query().Get("fuzzer"); fuzzer != "" {
-	// 	fuzzerVal := generated.FuzzerType(fuzzer)
-	// 	params.Fuzzer = &fuzzerVal
-	// }
-
-	// if tags := r.URL.Query().Get("tags"); tags != "" {
-	// 	params.Tags = &tags
-	// }
-
-	// if createdBy := r.URL.Query().Get("created_by"); createdBy != "" {
-	// 	params.CreatedBy = &createdBy
-	// }
-
-	// if sortBy := r.URL.Query().Get("sort_by"); sortBy != "" {
-	// 	params.SortBy = &sortBy
-	// }
-
-	// if sortOrder := r.URL.Query().Get("sort_order"); sortOrder != "" {
-	// 	sortOrderVal := generated.SortOrder(sortOrder)
-	// 	params.SortOrder = &sortOrderVal
-	// }
-
-	// if since := r.URL.Query().Get("since"); since != "" {
-	// 	params.Since = &since
-	// }
-
-	// if until := r.URL.Query().Get("until"); until != "" {
-	// 	params.Until = &until
-	// }
-
 	// Delegate to adapter
 	h.adapter.ListCampaigns(w, r, params)
 }
@@ -77,37 +46,6 @@ func (h *Handlers) HandleGetCampaign(w http.ResponseWriter, r *http.Request) {
 
 	// Parse query parameters
 	params := generated.GetCampaignParams{}
-
-	// TODO: Add these include parameters to OpenAPI spec
-	// if includeJobs := r.URL.Query().Get("include_jobs"); includeJobs != "" {
-	// 	if include, err := strconv.ParseBool(includeJobs); err == nil {
-	// 		params.IncludeJobs = &include
-	// 	}
-	// }
-
-	// if includeStats := r.URL.Query().Get("include_stats"); includeStats != "" {
-	// 	if include, err := strconv.ParseBool(includeStats); err == nil {
-	// 		params.IncludeStats = &include
-	// 	}
-	// }
-
-	// if includeCrashes := r.URL.Query().Get("include_crashes"); includeCrashes != "" {
-	// 	if include, err := strconv.ParseBool(includeCrashes); err == nil {
-	// 		params.IncludeCrashes = &include
-	// 	}
-	// }
-
-	// if includeCorpus := r.URL.Query().Get("include_corpus"); includeCorpus != "" {
-	// 	if include, err := strconv.ParseBool(includeCorpus); err == nil {
-	// 		params.IncludeCorpus = &include
-	// 	}
-	// }
-
-	// if includeCoverage := r.URL.Query().Get("include_coverage"); includeCoverage != "" {
-	// 	if include, err := strconv.ParseBool(includeCoverage); err == nil {
-	// 		params.IncludeCoverage = &include
-	// 	}
-	// }
 
 	// Delegate to adapter
 	h.adapter.GetCampaign(w, r, campaignId, params)

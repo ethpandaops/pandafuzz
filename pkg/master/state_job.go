@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -475,8 +476,9 @@ func (ps *PersistentState) findAvailableJobTx(botID string) (*common.Job, error)
 		botCapabilities[normalized] = true
 	}
 
-	// Find a job that matches bot capabilities
+	// Collect eligible jobs that match bot capabilities and are not timed out
 	now := time.Now()
+	var eligibleJobs []*common.Job
 	for _, job := range ps.jobs {
 		if job.Status == common.JobStatusPending {
 			// Check if job has not timed out
@@ -484,12 +486,22 @@ func (ps *PersistentState) findAvailableJobTx(botID string) (*common.Job, error)
 				// Check if bot has capability for this fuzzer type
 				normalizedFuzzer := normalizeFuzzer(job.Fuzzer)
 				if botCapabilities[normalizedFuzzer] {
-					return job, nil
+					eligibleJobs = append(eligibleJobs, job)
 				}
 			}
 		}
 	}
-	return nil, nil
+
+	if len(eligibleJobs) == 0 {
+		return nil, nil
+	}
+
+	// Sort by CreatedAt (FIFO order) to ensure deterministic job assignment
+	sort.Slice(eligibleJobs, func(i, j int) bool {
+		return eligibleJobs[i].CreatedAt.Before(eligibleJobs[j].CreatedAt)
+	})
+
+	return eligibleJobs[0], nil
 }
 
 // normalizeCapability converts capability names to a standard format

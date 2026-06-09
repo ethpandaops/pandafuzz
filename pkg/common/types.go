@@ -8,6 +8,9 @@ import (
 	"github.com/ethpandaops/pandafuzz/pkg/retry"
 )
 
+// Version is the current version of PandaFuzz, set at build time via ldflags
+var Version = "dev"
+
 // Common errors
 var (
 	ErrNotImplemented = errors.New("not implemented")
@@ -122,6 +125,18 @@ type CoverageResult struct {
 	NewEdges  int       `json:"new_edges" db:"new_edges"` // New edges this run
 	Timestamp time.Time `json:"timestamp" db:"timestamp"`
 	ExecCount int64     `json:"exec_count" db:"exec_count"` // Total executions
+}
+
+// CoverageData represents aggregated coverage data for a job
+type CoverageData struct {
+	JobID            string    `json:"job_id"`
+	TotalLines       int       `json:"total_lines"`       // Total lines in coverage
+	CoveredLines     int       `json:"covered_lines"`     // Lines covered
+	TotalFunctions   int       `json:"total_functions"`   // Total functions
+	CoveredFunctions int       `json:"covered_functions"` // Functions covered
+	TotalBranches    int       `json:"total_branches"`    // Total branches
+	CoveredBranches  int       `json:"covered_branches"`  // Branches covered
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // JobLog represents a single log entry for a job

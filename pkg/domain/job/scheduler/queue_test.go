@@ -204,17 +204,7 @@ func TestQueue_BasicOperations(t *testing.T) {
 }
 
 func TestQueue_PriorityScheduling(t *testing.T) {
-	ctx := context.Background()
 	log := logrus.New()
-
-	repo := NewMockJobRepository()
-	processor := &MockJobProcessor{}
-
-	config := scheduler.DefaultConfig()
-	config.Workers = 1
-	config.EnablePriority = true
-
-	queue := scheduler.NewPriorityScheduler(config, repo, processor, log)
 
 	// Create jobs with different priorities
 	jobs := []*types.Job{}
@@ -231,10 +221,6 @@ func TestQueue_PriorityScheduling(t *testing.T) {
 		job.Priority = priority
 		jobs = append(jobs, job)
 	}
-
-	// Setup mocks
-	repo.On("Create", mock.Anything, mock.Anything).Return(nil)
-	repo.On("ListByStatus", mock.Anything, types.JobStatus("queued")).Return([]*types.Job{}, nil)
 
 	// Test priority queue
 	pq := scheduler.NewPriorityQueue(log)
@@ -267,15 +253,6 @@ func TestQueue_PriorityScheduling(t *testing.T) {
 }
 
 func TestQueue_JobDependencies(t *testing.T) {
-	ctx := context.Background()
-	log := logrus.New()
-
-	repo := NewMockJobRepository()
-	processor := &MockJobProcessor{}
-
-	config := scheduler.DefaultConfig()
-	queue := scheduler.NewQueue(config, repo, processor, log)
-
 	// Create jobs with dependencies
 	job1, _ := types.NewJob("job-1", "libfuzzer", "/bin/target", "/corpus", "/output")
 	job2, _ := types.NewJob("job-2", "libfuzzer", "/bin/target", "/corpus", "/output")
@@ -297,6 +274,8 @@ func TestQueue_RetryLogic(t *testing.T) {
 	job.RetryDelay = 1 * time.Second
 
 	// Test retry logic
+	assert.False(t, job.CanRetry())
+	job.Status = types.StatusFailed
 	assert.True(t, job.CanRetry())
 
 	// Simulate failures and retries
@@ -333,9 +312,17 @@ func TestQueue_ScheduledJobs(t *testing.T) {
 
 	// Setup mock
 	repo.On("Create", mock.Anything, mock.Anything).Return(nil)
+	repo.On("ListPending", mock.Anything, mock.Anything).Return([]*types.Job{}, nil)
+	repo.On("ListScheduled", mock.Anything, mock.Anything).Return([]*types.Job{}, nil)
+	repo.On("GetStaleJobs", mock.Anything, mock.Anything).Return([]*types.Job{}, nil)
+	repo.On("CountByStatus", mock.Anything).Return(map[types.JobStatus]int64{}, nil)
+
+	err := queue.Start(ctx)
+	require.NoError(t, err)
+	defer queue.Stop()
 
 	// Enqueue with delay
-	err := queue.EnqueueWithDelay(ctx, job, 2*time.Hour)
+	err = queue.EnqueueWithDelay(ctx, job, 2*time.Hour)
 	assert.NoError(t, err)
 }
 

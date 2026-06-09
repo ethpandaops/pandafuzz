@@ -45,7 +45,7 @@ func (h *Handlers) RegisterRoutes(r chi.Router) {
 		r.Use(h.middleware.RequestMetrics())
 		r.Use(h.middleware.RateLimit())
 		r.Use(h.middleware.ValidateRequest())
-		r.Use(h.middleware.JWTAuth())
+		r.Use(h.middleware.Auth())
 	}
 
 	// Health and system endpoints (no auth required)

@@ -47,10 +47,6 @@ The E2E test suite covers:
 ### Quick Start
 
 ```bash
-# Using the test runner script
-./run-e2e-tests.sh
-
-# Or manually with npm
 npm install
 npm run e2e
 ```
@@ -80,6 +76,7 @@ npm run docker:down
 ### Environment Variables
 
 - `MASTER_URL`: Override the master URL (default: http://localhost:8088)
+- `PANDAFUZZ_API_KEY`: API key to use for authenticated API requests
 - `CI`: Set to true for CI environments
 
 ### Test Configuration

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -22,34 +21,41 @@ import (
 func TestBotRegistration(t *testing.T) {
 	tests := []struct {
 		name           string
-		setupServer    func() *httptest.Server
+		setupTransport func(t *testing.T) http.RoundTripper
 		expectedError  bool
 		errorContains  string
 		validateResult func(t *testing.T, result *bot.BotRegisterResponse)
 	}{
 		{
 			name: "successful registration",
-			setupServer: func() *httptest.Server {
-				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					assert.Equal(t, "/api/v1/bots/register", r.URL.Path)
+			setupTransport: func(t *testing.T) http.RoundTripper {
+				handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					assert.Equal(t, "/api/v1/bots", r.URL.Path)
 					assert.Equal(t, "POST", r.Method)
 					assert.Contains(t, r.Header.Get("User-Agent"), "PandaFuzz-Bot")
 
-					// var req common.BotRegistrationRequest
-					// err := json.NewDecoder(r.Body).Decode(&req)
-					// require.NoError(t, err)
-					// // assert.NotEmpty(t, req.Hostname)
-					// assert.Contains(t, req.Capabilities, "afl++")
+					var req map[string]any
+					err := json.NewDecoder(r.Body).Decode(&req)
+					require.NoError(t, err)
+					capabilities, ok := req["capabilities"].([]any)
+					require.True(t, ok)
+					assert.Contains(t, capabilities, "afl++")
 
-					resp := bot.BotRegisterResponse{
-						BotID:     "test-bot-123",
-						Status:    "registered",
-						Timestamp: time.Now(),
-						Timeout:   time.Now().Add(time.Hour),
+					now := time.Now()
+					resp := map[string]any{
+						"id":             "test-bot-123",
+						"name":           "test-bot",
+						"status":         "registered",
+						"hostname":       "test-host",
+						"is_online":      true,
+						"registered_at":  now,
+						"last_heartbeat": now,
 					}
 					w.Header().Set("Content-Type", "application/json")
 					json.NewEncoder(w).Encode(resp)
-				}))
+				})
+
+				return handlerRoundTripper{handler: handler}
 			},
 			expectedError: false,
 			validateResult: func(t *testing.T, result *bot.BotRegisterResponse) {
@@ -61,59 +67,46 @@ func TestBotRegistration(t *testing.T) {
 		},
 		{
 			name: "server returns error",
-			setupServer: func() *httptest.Server {
-				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			setupTransport: func(t *testing.T) http.RoundTripper {
+				handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusInternalServerError)
 					json.NewEncoder(w).Encode(map[string]string{
 						"error": "internal server error",
 					})
-				}))
+				})
+				return handlerRoundTripper{handler: handler}
 			},
 			expectedError: true,
 			errorContains: "server error (500)",
 		},
 		{
 			name: "invalid response format",
-			setupServer: func() *httptest.Server {
-				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			setupTransport: func(t *testing.T) http.RoundTripper {
+				handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
 					w.Write([]byte("invalid json"))
-				}))
+				})
+				return handlerRoundTripper{handler: handler}
 			},
 			expectedError: true,
 			errorContains: "failed to parse response",
 		},
 		{
-			name: "network error",
-			setupServer: func() *httptest.Server {
-				// Create server and immediately close it to simulate network error
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-				server.Close()
-				return server
-			},
-			expectedError: true,
-			errorContains: "", // Error could be "connection refused" or "circuit breaker is open" depending on retry behavior
+			name:           "network error",
+			setupTransport: func(t *testing.T) http.RoundTripper { return errorRoundTripper{} },
+			expectedError:  true,
+			errorContains:  "", // Error could be "connection refused" or "circuit breaker is open" depending on retry behavior
 		},
 		{
-			name: "timeout",
-			setupServer: func() *httptest.Server {
-				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					// Simulate timeout by sleeping longer than client timeout
-					time.Sleep(100 * time.Millisecond)
-				}))
-			},
-			expectedError: true,
-			errorContains: "context deadline exceeded",
+			name:           "timeout",
+			setupTransport: func(t *testing.T) http.RoundTripper { return timeoutRoundTripper{} },
+			expectedError:  true,
+			errorContains:  "context deadline exceeded",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := tt.setupServer()
-			if server != nil && tt.name != "network error" {
-				defer server.Close()
-			}
-
 			// Create bot config with fast retry policy for tests
 			retryPolicy := common.RetryPolicy{
 				MaxRetries:   2,                     // Only 2 retries for fast tests
@@ -126,7 +119,7 @@ func TestBotRegistration(t *testing.T) {
 			cfg := &common.BotConfig{
 				ID:           "test-bot",
 				Name:         "test-bot",
-				MasterURL:    server.URL,
+				MasterURL:    "http://master.test",
 				Capabilities: []string{"afl++", "libfuzzer"},
 				Timeouts: common.BotTimeoutConfig{
 					MasterCommunication: 50 * time.Millisecond, // Short timeout for tests
@@ -139,7 +132,11 @@ func TestBotRegistration(t *testing.T) {
 			// Create client
 			logger := logrus.New()
 			logger.SetLevel(logrus.InfoLevel)
-			client, err := bot.NewRetryClient(cfg, logger)
+			httpClient := &http.Client{
+				Timeout:   cfg.Timeouts.MasterCommunication,
+				Transport: tt.setupTransport(t),
+			}
+			client, err := bot.NewRetryClientWithHTTPClient(cfg, logger, httpClient)
 			if err != nil {
 				t.Fatalf("Failed to create client: %v", err)
 			}
@@ -168,7 +165,7 @@ func TestBotHeartbeat(t *testing.T) {
 	botID := "test-bot-123"
 	heartbeatCount := 0
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expectedPath := fmt.Sprintf("/api/v1/bots/%s/heartbeat", botID)
 		assert.Equal(t, expectedPath, r.URL.Path)
 		assert.Equal(t, "POST", r.Method)
@@ -178,7 +175,7 @@ func TestBotHeartbeat(t *testing.T) {
 		err := json.NewDecoder(r.Body).Decode(&req)
 		require.NoError(t, err)
 		assert.NotEmpty(t, req["status"])
-		assert.NotNil(t, req["last_activity"])
+		assert.Nil(t, req["current_job_id"])
 
 		heartbeatCount++
 
@@ -188,12 +185,11 @@ func TestBotHeartbeat(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
+	})
 
 	cfg := &common.BotConfig{
 		ID:        botID,
-		MasterURL: server.URL,
+		MasterURL: "http://master.test",
 		Timeouts: common.BotTimeoutConfig{
 			MasterCommunication: time.Second,
 			HeartbeatInterval:   50 * time.Millisecond, // Fast heartbeat for tests
@@ -202,7 +198,8 @@ func TestBotHeartbeat(t *testing.T) {
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.InfoLevel)
-	client, err := bot.NewRetryClient(cfg, logger)
+	httpClient := newHandlerClient(handler, time.Second)
+	client, err := bot.NewRetryClientWithHTTPClient(cfg, logger, httpClient)
 	require.NoError(t, err)
 
 	// Send heartbeat
@@ -227,25 +224,26 @@ func TestConcurrentBotRegistrations(t *testing.T) {
 	registrationCount := 0
 	registrationChan := make(chan string, 10)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/bots/register" {
-			// var req common.BotRegistrationRequest
-			// json.NewDecoder(r.Body).Decode(&req)
-
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/bots" {
 			registrationCount++
 			botID := fmt.Sprintf("bot-%d", registrationCount)
 			registrationChan <- botID
 
-			resp := bot.BotRegisterResponse{
-				BotID:     botID,
-				Status:    "registered",
-				Timestamp: time.Now(),
+			now := time.Now()
+			resp := map[string]any{
+				"id":             botID,
+				"name":           botID,
+				"status":         "registered",
+				"hostname":       "test-host",
+				"is_online":      true,
+				"registered_at":  now,
+				"last_heartbeat": now,
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 		}
-	}))
-	defer server.Close()
+	})
 
 	// Register 5 bots concurrently
 	numBots := 5
@@ -256,7 +254,7 @@ func TestConcurrentBotRegistrations(t *testing.T) {
 		go func(index int) {
 			cfg := &common.BotConfig{
 				ID:           fmt.Sprintf("bot-%d", index),
-				MasterURL:    server.URL,
+				MasterURL:    "http://master.test",
 				Capabilities: []string{"afl++"},
 				Timeouts: common.BotTimeoutConfig{
 					MasterCommunication: time.Second,
@@ -265,7 +263,8 @@ func TestConcurrentBotRegistrations(t *testing.T) {
 
 			logger := logrus.New()
 			logger.SetLevel(logrus.InfoLevel)
-			client, err := bot.NewRetryClient(cfg, logger)
+			httpClient := newHandlerClient(handler, time.Second)
+			client, err := bot.NewRetryClientWithHTTPClient(cfg, logger, httpClient)
 			require.NoError(t, err)
 			result, err := client.RegisterBot(cfg.ID, cfg.Capabilities, "http://localhost:9000")
 			if err != nil {
@@ -318,31 +317,24 @@ func TestBotRegistrationValidation(t *testing.T) {
 		},
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// var req common.BotRegistrationRequest
-		// json.NewDecoder(r.Body).Decode(&req)
-
-		// Server-side validation
-		// if len(req.Capabilities) == 0 {
-		//	w.WriteHeader(http.StatusBadRequest)
-		//	json.NewEncoder(w).Encode(map[string]string{
-		//		"error": "no capabilities provided",
-		//	})
-		//	return
-		// }
-
-		resp := bot.BotRegisterResponse{
-			BotID:  "valid-bot",
-			Status: "registered",
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		now := time.Now()
+		resp := map[string]any{
+			"id":             "valid-bot",
+			"name":           "valid-bot",
+			"status":         "registered",
+			"hostname":       "test-host",
+			"is_online":      true,
+			"registered_at":  now,
+			"last_heartbeat": now,
 		}
 		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
+	})
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &common.BotConfig{
-				MasterURL: server.URL,
+				MasterURL: "http://master.test",
 				Timeouts: common.BotTimeoutConfig{
 					MasterCommunication: time.Second,
 				},
@@ -350,7 +342,8 @@ func TestBotRegistrationValidation(t *testing.T) {
 
 			logger := logrus.New()
 			logger.SetLevel(logrus.InfoLevel)
-			client, err := bot.NewRetryClient(cfg, logger)
+			httpClient := newHandlerClient(handler, time.Second)
+			client, err := bot.NewRetryClientWithHTTPClient(cfg, logger, httpClient)
 			require.NoError(t, err)
 			result, err := client.RegisterBot("test-bot", tt.capabilities, "http://localhost:9000")
 
@@ -367,20 +360,24 @@ func TestBotRegistrationValidation(t *testing.T) {
 
 // BenchmarkBotRegistration benchmarks the registration process
 func BenchmarkBotRegistration(b *testing.B) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := bot.BotRegisterResponse{
-			BotID:     "bench-bot",
-			Status:    "registered",
-			Timestamp: time.Now(),
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		now := time.Now()
+		resp := map[string]any{
+			"id":             "bench-bot",
+			"name":           "bench-bot",
+			"status":         "registered",
+			"hostname":       "test-host",
+			"is_online":      true,
+			"registered_at":  now,
+			"last_heartbeat": now,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
+	})
 
 	cfg := &common.BotConfig{
 		ID:           "bench-bot",
-		MasterURL:    server.URL,
+		MasterURL:    "http://master.test",
 		Capabilities: []string{"afl++"},
 		Timeouts: common.BotTimeoutConfig{
 			MasterCommunication: time.Second,
@@ -389,7 +386,8 @@ func BenchmarkBotRegistration(b *testing.B) {
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.InfoLevel)
-	client, err := bot.NewRetryClient(cfg, logger)
+	httpClient := newHandlerClient(handler, time.Second)
+	client, err := bot.NewRetryClientWithHTTPClient(cfg, logger, httpClient)
 	if err != nil {
 		b.Fatal(err)
 	}

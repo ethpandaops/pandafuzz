@@ -21,11 +21,12 @@ docker-compose down
 
 ### For Docker Deployment
 - `bot-docker.yaml` - Bot configuration for Docker containers (uses `http://master:8080`)
-- `master.yaml` - Master configuration
+- `master-docker.yaml` - Master configuration for Docker
 - `docker-compose.yml` - Docker Compose orchestration
 
 ### For Local Development
-- `bot.yaml` - Bot configuration for local development (uses `http://localhost:8080`)
+- `configs/master.yaml` - Master configuration example
+- `configs/bot.example.yaml` - Bot configuration example
 
 ## Why Two Bot Config Files?
 
@@ -34,18 +35,6 @@ The bot configuration needs different master URLs depending on the environment:
 - **Local**: Bots connect to `http://localhost:8080`
 
 Since Go's `os.ExpandEnv()` doesn't support shell-style default values like `${VAR:-default}`, we use separate config files for clarity.
-
-## Testing Bot Connection
-
-Use the provided test script to verify bot-master connectivity:
-
-```bash
-# From host (master on localhost:8080)
-./scripts/test-bot-connection.sh
-
-# From inside container (master on master:8080)
-docker-compose exec bot sh -c "MASTER_URL=http://master:8080 /app/scripts/test-bot-connection.sh"
-```
 
 ## Troubleshooting
 
@@ -99,5 +88,5 @@ docker-compose --profile postgres up -d
 docker-compose up -d --scale bot=10
 
 # Check bot status
-curl http://localhost:8080/api/v1/bots
+curl -H "X-API-Key: dev-api-key" http://localhost:8080/api/v1/bots
 ```

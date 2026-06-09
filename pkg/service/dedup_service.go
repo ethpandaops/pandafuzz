@@ -188,22 +188,8 @@ func (ds *dedupService) extractFrames(trace string) []common.StackFrame {
 	var frames []common.StackFrame
 
 	// Try different stack trace formats
-	// Format 1: GDB/LLDB style (#0 0x00000000 in function at file:line)
-	gdbPattern := regexp.MustCompile(`#\d+\s+0x[0-9a-fA-F]+\s+in\s+([^\s]+)\s+(?:at\s+)?([^:]+):(\d+)`)
-	if matches := gdbPattern.FindAllStringSubmatch(trace, -1); len(matches) > 0 {
-		for _, match := range matches {
-			line, _ := strconv.Atoi(match[3])
-			frames = append(frames, common.StackFrame{
-				Function: match[1],
-				File:     match[2],
-				Line:     line,
-			})
-		}
-		return frames
-	}
-
-	// Format 2: AddressSanitizer style (    #0 0x7f... in function file:line:col)
-	asanPattern := regexp.MustCompile(`#\d+\s+0x[0-9a-fA-F]+\s+in\s+([^\s]+)\s+([^:]+):(\d+)(?::\d+)?`)
+	// Format 1: AddressSanitizer style (    #0 0x7f... in function file:line:col)
+	asanPattern := regexp.MustCompile(`(?m)^[ \t]*#\d+[ \t]+0x[0-9a-fA-F]+[ \t]+in[ \t]+([^\s]+)[ \t]+([^\s:]+):(\d+)(?::\d+)?`)
 	if matches := asanPattern.FindAllStringSubmatch(trace, -1); len(matches) > 0 {
 		for _, match := range matches {
 			line, _ := strconv.Atoi(match[3])
@@ -216,8 +202,32 @@ func (ds *dedupService) extractFrames(trace string) []common.StackFrame {
 		return frames
 	}
 
+	// Format 2: GDB/LLDB style (#0 0x00000000 in function () at file:line or from /path/lib.so)
+	gdbPattern := regexp.MustCompile(`(?m)^[ \t]*#\d+[ \t]+0x[0-9a-fA-F]+[ \t]+in[ \t]+([^\s]+)(?:[ \t]*\([^)]*\))?[ \t]+(?:at[ \t]+([^:]+):(\d+)|from[ \t]+(\S+))`)
+	if matches := gdbPattern.FindAllStringSubmatch(trace, -1); len(matches) > 0 {
+		for _, match := range matches {
+			file := match[2]
+			line := 0
+			if match[3] != "" {
+				line, _ = strconv.Atoi(match[3])
+			}
+			if file == "" {
+				file = match[4]
+			}
+
+			function, offset := parseFunctionOffset(match[1])
+			frames = append(frames, common.StackFrame{
+				Function: function,
+				File:     file,
+				Line:     line,
+				Offset:   offset,
+			})
+		}
+		return frames
+	}
+
 	// Format 3: Simple format (function at file:line)
-	simplePattern := regexp.MustCompile(`([^\s]+)\s+at\s+([^:]+):(\d+)`)
+	simplePattern := regexp.MustCompile(`(?m)^[ \t]*([^\s]+)[ \t]+at[ \t]+([^:]+):(\d+)`)
 	if matches := simplePattern.FindAllStringSubmatch(trace, -1); len(matches) > 0 {
 		for _, match := range matches {
 			line, _ := strconv.Atoi(match[3])
@@ -264,6 +274,32 @@ func (ds *dedupService) extractFrames(trace string) []common.StackFrame {
 	}
 
 	return frames
+}
+
+func parseFunctionOffset(function string) (string, uint64) {
+	if function == "" {
+		return function, 0
+	}
+
+	if idx := strings.LastIndex(function, "+0x"); idx != -1 {
+		offsetHex := function[idx+3:]
+		if offsetHex != "" {
+			if offset, err := strconv.ParseUint(offsetHex, 16, 64); err == nil {
+				return function[:idx], offset
+			}
+		}
+	}
+
+	if idx := strings.LastIndex(function, "+"); idx != -1 {
+		offsetDec := function[idx+1:]
+		if offsetDec != "" {
+			if offset, err := strconv.ParseUint(offsetDec, 10, 64); err == nil {
+				return function[:idx], offset
+			}
+		}
+	}
+
+	return function, 0
 }
 
 // computeStackHash computes a hash of the top N stack frames

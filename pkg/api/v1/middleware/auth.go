@@ -59,6 +59,84 @@ type AuthConfig struct {
 	SkipPaths       []string // Paths to skip authentication
 }
 
+// AuthWithConfig creates a middleware that accepts either JWT or API key authentication.
+func AuthWithConfig(config AuthConfig) func(http.Handler) http.Handler {
+	if config.Logger == nil {
+		config.Logger = logrus.NewEntry(logrus.StandardLogger())
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip authentication for configured paths
+			for _, path := range config.SkipPaths {
+				if strings.HasPrefix(r.URL.Path, path) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				token := strings.TrimPrefix(authHeader, "Bearer ")
+				claims, err := validateJWT(token, config.JWTSecret)
+				if err != nil {
+					config.Logger.WithFields(logrus.Fields{
+						"path":  r.URL.Path,
+						"error": err.Error(),
+					}).Warn("Invalid JWT token")
+					errors.WriteErrorSimple(w, http.StatusUnauthorized, "Invalid or expired token")
+					return
+				}
+				if claims.ExpiresAt > 0 && time.Now().Unix() > claims.ExpiresAt {
+					config.Logger.WithFields(logrus.Fields{
+						"path":       r.URL.Path,
+						"expires_at": claims.ExpiresAt,
+						"user_id":    claims.UserID,
+					}).Warn("Expired JWT token")
+					errors.WriteErrorSimple(w, http.StatusUnauthorized, "Token has expired")
+					return
+				}
+
+				ctx := context.WithValue(r.Context(), ClaimsContextKey, claims)
+				ctx = context.WithValue(ctx, UserContextKey, claims.UserID)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			apiKey := r.Header.Get("X-API-Key")
+			if apiKey == "" && strings.HasPrefix(authHeader, "ApiKey ") {
+				apiKey = strings.TrimPrefix(authHeader, "ApiKey ")
+			}
+
+			if apiKey != "" {
+				if config.APIKeyValidator == nil {
+					config.Logger.WithField("path", r.URL.Path).Error("API key validator not configured")
+					errors.WriteErrorSimple(w, http.StatusInternalServerError, "Authentication not properly configured")
+					return
+				}
+
+				keyInfo, err := config.APIKeyValidator(apiKey)
+				if err != nil {
+					config.Logger.WithFields(logrus.Fields{
+						"path":  r.URL.Path,
+						"error": err.Error(),
+					}).Warn("Invalid API key")
+					errors.WriteErrorSimple(w, http.StatusUnauthorized, "Invalid API key")
+					return
+				}
+
+				ctx := context.WithValue(r.Context(), APIKeyContextKey, keyInfo)
+				ctx = context.WithValue(ctx, UserContextKey, keyInfo.KeyID)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			config.Logger.WithField("path", r.URL.Path).Warn("Missing authentication")
+			errors.WriteErrorSimple(w, http.StatusUnauthorized, "Authentication required")
+		})
+	}
+}
+
 // JWTAuth creates a JWT authentication middleware
 func JWTAuth(secret string) func(http.Handler) http.Handler {
 	return JWTAuthWithConfig(AuthConfig{

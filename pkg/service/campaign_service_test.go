@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
-	"github.com/ethpandaops/pandafuzz/pkg/storage"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -280,6 +279,19 @@ func (m *MockStorage) ListJobs(ctx context.Context, limit, offset int, status st
 	return args.Get(0).([]*common.Job), args.Error(1)
 }
 
+func (m *MockStorage) StoreJobLogs(ctx context.Context, jobID string, logs []*common.JobLog) error {
+	args := m.Called(ctx, jobID, logs)
+	return args.Error(0)
+}
+
+func (m *MockStorage) GetJobLogs(ctx context.Context, jobID string, limit, offset int) ([]*common.JobLog, int, error) {
+	args := m.Called(ctx, jobID, limit, offset)
+	if args.Get(0) == nil {
+		return nil, 0, args.Error(2)
+	}
+	return args.Get(0).([]*common.JobLog), args.Int(1), args.Error(2)
+}
+
 func (m *MockStorage) DeleteJob(ctx context.Context, id string) error {
 	args := m.Called(ctx, id)
 	return args.Error(0)
@@ -298,12 +310,30 @@ func (m *MockStorage) GetCrash(ctx context.Context, id string) (*common.CrashRes
 	return args.Get(0).(*common.CrashResult), args.Error(1)
 }
 
+func (m *MockStorage) GetCrashCount(ctx context.Context, jobID string) (int, error) {
+	args := m.Called(ctx, jobID)
+	return args.Int(0), args.Error(1)
+}
+
 func (m *MockStorage) ListCrashes(ctx context.Context, jobID string, limit, offset int) ([]*common.CrashResult, error) {
 	args := m.Called(ctx, jobID, limit, offset)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
 	return args.Get(0).([]*common.CrashResult), args.Error(1)
+}
+
+func (m *MockStorage) StoreCrashInput(ctx context.Context, crashID string, input []byte) error {
+	args := m.Called(ctx, crashID, input)
+	return args.Error(0)
+}
+
+func (m *MockStorage) GetCrashInput(ctx context.Context, crashID string) ([]byte, error) {
+	args := m.Called(ctx, crashID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]byte), args.Error(1)
 }
 
 func (m *MockStorage) GetCrashesByCampaign(ctx context.Context, campaignID string) ([]*common.CrashResult, error) {
@@ -360,8 +390,8 @@ func (m *MockStorage) Cleanup(ctx context.Context) error {
 	return args.Error(0)
 }
 
-func (m *MockStorage) Backup(ctx context.Context) error {
-	args := m.Called(ctx)
+func (m *MockStorage) Backup(ctx context.Context, path string) error {
+	args := m.Called(ctx, path)
 	return args.Error(0)
 }
 
@@ -371,8 +401,8 @@ func (m *MockStorage) Ping(ctx context.Context) error {
 	return args.Error(0)
 }
 
-func (m *MockStorage) Close() error {
-	args := m.Called()
+func (m *MockStorage) Close(ctx context.Context) error {
+	args := m.Called(ctx)
 	return args.Error(0)
 }
 
@@ -418,6 +448,56 @@ func (m *MockStorage) GetMinimizationStats(ctx context.Context, campaignID strin
 		return nil, args.Error(1)
 	}
 	return args.Get(0).(map[string]interface{}), args.Error(1)
+}
+
+// Corpus collection operations
+func (m *MockStorage) CreateCorpusCollection(ctx context.Context, collection *common.CorpusCollection) error {
+	args := m.Called(ctx, collection)
+	return args.Error(0)
+}
+
+func (m *MockStorage) GetCorpusCollection(ctx context.Context, collectionID string) (*common.CorpusCollection, error) {
+	args := m.Called(ctx, collectionID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*common.CorpusCollection), args.Error(1)
+}
+
+func (m *MockStorage) GetCorpusCollections(ctx context.Context) ([]*common.CorpusCollection, error) {
+	args := m.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*common.CorpusCollection), args.Error(1)
+}
+
+func (m *MockStorage) UpdateCorpusCollection(ctx context.Context, collection *common.CorpusCollection) error {
+	args := m.Called(ctx, collection)
+	return args.Error(0)
+}
+
+func (m *MockStorage) DeleteCorpusCollection(ctx context.Context, collectionID string) error {
+	args := m.Called(ctx, collectionID)
+	return args.Error(0)
+}
+
+func (m *MockStorage) AddCorpusCollectionFile(ctx context.Context, file *common.CorpusCollectionFile) error {
+	args := m.Called(ctx, file)
+	return args.Error(0)
+}
+
+func (m *MockStorage) GetCorpusCollectionFiles(ctx context.Context, collectionID string) ([]*common.CorpusCollectionFile, error) {
+	args := m.Called(ctx, collectionID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*common.CorpusCollectionFile), args.Error(1)
+}
+
+func (m *MockStorage) DeleteCorpusCollectionFile(ctx context.Context, fileID string) error {
+	args := m.Called(ctx, fileID)
+	return args.Error(0)
 }
 
 // MockJobService is a mock implementation of the JobService interface
@@ -581,14 +661,28 @@ func TestCampaignService_RestartCampaign(t *testing.T) {
 
 		// Mock updating campaign status
 		mockStorage.On("UpdateCampaign", ctx, campaignID, mock.MatchedBy(func(updates map[string]interface{}) bool {
-			status, ok := updates["status"].(string)
-			return ok && status == string(common.CampaignStatusRunning)
+			statusValue, ok := updates["status"]
+			if !ok {
+				return false
+			}
+			status, ok := statusValue.(common.CampaignStatus)
+			if !ok {
+				if statusString, ok := statusValue.(string); ok {
+					status = common.CampaignStatus(statusString)
+				} else {
+					return false
+				}
+			}
+			completedAt, hasCompletedAt := updates["completed_at"]
+			return hasCompletedAt && completedAt == nil && status == common.CampaignStatusRunning
 		})).Return(nil).Once()
+
+		mockStorage.On("GetCampaignJobs", ctx, campaignID).Return([]*common.Job{}, nil).Once()
 
 		// Mock creating jobs
 		for i := 0; i < campaign.MaxJobs; i++ {
-			mockJobService.On("Create", ctx, mock.MatchedBy(func(job *common.Job) bool {
-				return job.CampaignID != nil && *job.CampaignID == campaignID && job.Status == common.JobStatusPending
+			mockJobService.On("CreateJob", ctx, mock.MatchedBy(func(job *common.Job) bool {
+				return job.Status == common.JobStatusPending && job.Target == campaign.TargetBinary
 			})).Return(nil).Once()
 
 			mockStorage.On("LinkJobToCampaign", ctx, campaignID, mock.Anything).Return(nil).Once()
@@ -607,7 +701,7 @@ func TestCampaignService_RestartCampaign(t *testing.T) {
 
 		err := cs.RestartCampaign(ctx, campaignID)
 		assert.Error(t, err)
-		assert.Equal(t, common.ErrCampaignNotFound, err)
+		assert.ErrorIs(t, err, common.ErrCampaignNotFound)
 		mockStorage.AssertExpectations(t)
 	})
 
@@ -622,7 +716,7 @@ func TestCampaignService_RestartCampaign(t *testing.T) {
 
 		err := cs.RestartCampaign(ctx, campaignID)
 		assert.Error(t, err)
-		assert.Equal(t, common.ErrCampaignRunning, err)
+		assert.EqualError(t, err, "can only restart completed or failed campaigns")
 		mockStorage.AssertExpectations(t)
 	})
 }
@@ -692,8 +786,35 @@ func TestCampaignService_checkCampaignCompletion(t *testing.T) {
 		mockStorage.On("GetCampaign", ctx, campaignID).Return(campaign, nil).Once()
 		mockStorage.On("GetCampaignJobs", ctx, campaignID).Return(jobs, nil).Once()
 		mockStorage.On("UpdateCampaign", ctx, campaignID, mock.MatchedBy(func(updates map[string]interface{}) bool {
-			status, ok := updates["status"].(string)
-			return ok && status == string(common.CampaignStatusCompleted)
+			statusValue, ok := updates["status"]
+			if !ok {
+				return false
+			}
+			status, ok := statusValue.(common.CampaignStatus)
+			if !ok {
+				if statusString, ok := statusValue.(string); ok {
+					status = common.CampaignStatus(statusString)
+				} else {
+					return false
+				}
+			}
+			completedValue, hasCompletedAt := updates["completed_at"]
+			if !hasCompletedAt {
+				return false
+			}
+			var completedAt time.Time
+			switch value := completedValue.(type) {
+			case time.Time:
+				completedAt = value
+			case *time.Time:
+				if value == nil {
+					return false
+				}
+				completedAt = *value
+			default:
+				return false
+			}
+			return !completedAt.IsZero() && status == common.CampaignStatusCompleted
 		})).Return(nil).Once()
 
 		err := cs.checkCampaignCompletion(ctx, campaignID)
@@ -755,6 +876,7 @@ func TestCampaignService_Delete(t *testing.T) {
 		}
 
 		mockStorage.On("GetCampaign", ctx, campaignID).Return(campaign, nil).Once()
+		mockStorage.On("GetCampaignJobs", ctx, campaignID).Return([]*common.Job{}, nil).Once()
 		mockStorage.On("DeleteCampaign", ctx, campaignID).Return(nil).Once()
 
 		err := cs.Delete(ctx, campaignID)

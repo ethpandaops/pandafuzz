@@ -38,6 +38,7 @@ import {
   RestoreFromTrash as RecoverIcon,
 } from '@mui/icons-material';
 import api from '../api/client';
+import { getAuthHeaders } from '../api/auth';
 import { Job, JobStatus, JobPriority, Bot, JobCoverageConfig } from '../types';
 import { SortableTableHeader, useSort } from '../components/SortableTableHeader';
 import JobCreationForm, { JobFormData } from '../components/JobCreationForm';
@@ -153,7 +154,9 @@ function Jobs() {
 
   const fetchCorpusCollections = async () => {
     try {
-      const response = await fetch('/api/v1/corpus/collections');
+      const response = await fetch('/api/v1/corpus/collections', {
+        headers: getAuthHeaders(),
+      });
       if (response.ok) {
         const data = await response.json();
         setCorpusCollections(data.collections || []);

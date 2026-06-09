@@ -4,6 +4,7 @@ import (
 	"context"
 	// "database/sql"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,11 +22,12 @@ import (
 
 // TestEnvironment holds the test environment components
 type TestEnvironment struct {
-	t            *testing.T
+	t            testing.TB
 	ctx          context.Context
 	cancel       context.CancelFunc
 	masterConfig *common.MasterConfig
 	botConfig    *common.BotConfig
+	apiKey       string
 	database     common.Database
 	state        *master.PersistentState
 	timeoutMgr   *master.TimeoutManager
@@ -37,8 +39,10 @@ type TestEnvironment struct {
 	logger       *logrus.Logger
 }
 
+const testAPIKey = "test-api-key"
+
 // SetupTestEnvironment creates a test environment
-func SetupTestEnvironment(t *testing.T) *TestEnvironment {
+func SetupTestEnvironment(t testing.TB) *TestEnvironment {
 	t.Helper()
 
 	// Create temp directory
@@ -48,11 +52,18 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 	// Create context
 	ctx, cancel := context.WithCancel(context.Background())
 
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("Skipping integration tests: cannot bind TCP listener: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	require.NoError(t, listener.Close())
+
 	// Create master config
 	masterConfig := &common.MasterConfig{
 		Server: common.ServerConfig{
 			Host: "127.0.0.1",
-			Port: 8765, // Use fixed port for testing
+			Port: port,
 		},
 		Database: common.DatabaseConfig{
 			Type: "sqlite",
@@ -88,8 +99,19 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 			Enabled:      true,
 		},
 		Monitoring: common.MonitoringConfig{},
-		Security:   common.SecurityConfig{},
-		Logging:    common.LoggingConfig{},
+		Security: common.SecurityConfig{
+			EnableAuth:            true,
+			AllowInsecure:         false,
+			APIKeys:               map[string]string{testAPIKey: "integration-tests"},
+			EnableInputValidation: true,
+			MaxRequestSize:        10 * 1024 * 1024, // 10MB
+			AllowedFileExtensions: []string{".txt", ".bin", ".data", ".input"},
+			EnableSanitization:    true,
+			MaxCrashFileSize:      10 * 1024 * 1024, // 10MB
+			MaxCorpusFileSize:     1024 * 1024,      // 1MB
+			ProcessIsolationLevel: "sandbox",
+		},
+		Logging: common.LoggingConfig{},
 	}
 
 	// Create bot config
@@ -97,6 +119,7 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 		ID:           "test-bot-" + fmt.Sprintf("%d", time.Now().UnixNano()),
 		Name:         "test-bot",
 		MasterURL:    "", // Will be set after server starts
+		APIKey:       testAPIKey,
 		Capabilities: []string{"afl++", "libfuzzer"},
 		Fuzzing: common.FuzzingConfig{
 			WorkDir:           filepath.Join(tempDir, "work"),
@@ -139,7 +162,8 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 
 	// Create HTTP client with shorter timeout for tests
 	httpClient := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout:   5 * time.Second,
+		Transport: newAuthRoundTripper(testAPIKey, http.DefaultTransport),
 	}
 
 	env := &TestEnvironment{
@@ -148,6 +172,7 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 		cancel:       cancel,
 		masterConfig: masterConfig,
 		botConfig:    botConfig,
+		apiKey:       testAPIKey,
 		database:     db,
 		state:        state,
 		timeoutMgr:   timeoutMgr,
@@ -263,6 +288,29 @@ func (env *TestEnvironment) CreateTestJob(name string) (*common.Job, error) {
 		Target:    "/bin/test",
 		CreatedAt: time.Now(),
 		TimeoutAt: time.Now().Add(5 * time.Minute),
+		Config: common.JobConfig{
+			Duration:    5 * time.Minute,
+			MemoryLimit: 1024 * 1024 * 1024, // 1GB
+			Timeout:     10 * time.Minute,
+		},
+	}
+
+	return job, env.state.SaveJobWithRetry(context.Background(), job)
+}
+
+// CreateTestJobWithTime creates a test job with a specific creation timestamp
+// This is useful for testing FIFO ordering where jobs need deterministic ordering
+// Note: TimeoutAt is set relative to now (not createdAt) to ensure jobs remain valid
+func (env *TestEnvironment) CreateTestJobWithTime(name string, createdAt time.Time) (*common.Job, error) {
+	jobID := uuid.New().String()
+	job := &common.Job{
+		ID:        jobID,
+		Name:      name,
+		Status:    common.JobStatusPending,
+		Fuzzer:    "afl++",
+		Target:    "/bin/test",
+		CreatedAt: createdAt,
+		TimeoutAt: time.Now().Add(5 * time.Minute), // TimeoutAt must be in the future
 		Config: common.JobConfig{
 			Duration:    5 * time.Minute,
 			MemoryLimit: 1024 * 1024 * 1024, // 1GB
@@ -400,4 +448,42 @@ func (m *MockFuzzer) AddCrash(crash *common.CrashResult) {
 
 func (m *MockFuzzer) GetCrashes() []*common.CrashResult {
 	return m.crashes
+}
+
+type authRoundTripper struct {
+	apiKey string
+	base   http.RoundTripper
+}
+
+func newAuthRoundTripper(apiKey string, base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &authRoundTripper{
+		apiKey: apiKey,
+		base:   base,
+	}
+}
+
+func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if rt.apiKey != "" && req.Header.Get("X-API-Key") == "" {
+		req.Header.Set("X-API-Key", rt.apiKey)
+	}
+	return rt.base.RoundTrip(req)
+}
+
+func waitForPortRelease(host string, port int, timeout time.Duration) error {
+	addr := fmt.Sprintf("%s:%d", host, port)
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		listener, err := net.Listen("tcp", addr)
+		if err == nil {
+			listener.Close()
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	return fmt.Errorf("port %s not released within %v", addr, timeout)
 }

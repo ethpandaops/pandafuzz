@@ -12,12 +12,12 @@ import (
 
 // systemService implements SystemService interface
 type systemService struct {
-	state           StateStore
+	systemRepo      SystemRepository
 	timeoutManager  TimeoutManager
 	recoveryManager RecoveryManager
 	config          *common.MasterConfig
 	logger          *logrus.Logger
-	
+
 	// Lifecycle management
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -26,16 +26,16 @@ type systemService struct {
 // Compile-time interface compliance check
 var _ SystemService = (*systemService)(nil)
 
-// NewSystemService creates a new system service
+// NewSystemService creates a new system service using repository interfaces.
 func NewSystemService(
-	state StateStore,
+	systemRepo SystemRepository,
 	timeoutManager TimeoutManager,
 	recoveryManager RecoveryManager,
 	config *common.MasterConfig,
 	logger *logrus.Logger,
 ) SystemService {
 	return &systemService{
-		state:           state,
+		systemRepo:      systemRepo,
 		timeoutManager:  timeoutManager,
 		recoveryManager: recoveryManager,
 		config:          config,
@@ -46,9 +46,9 @@ func NewSystemService(
 // GetSystemStats returns system statistics
 func (s *systemService) GetSystemStats(ctx context.Context) (SystemStats, error) {
 	stats := SystemStats{
-		StateStats:    s.state.GetStats(),
+		StateStats:    s.systemRepo.GetStats(),
 		TimeoutStats:  s.timeoutManager.GetStats(),
-		DatabaseStats: s.state.GetDatabaseStats(),
+		DatabaseStats: s.systemRepo.GetDatabaseStats(),
 		Timestamp:     time.Now(),
 	}
 
@@ -129,10 +129,10 @@ func (s *systemService) ForceTimeout(ctx context.Context, entityType string, ent
 // Start starts the system service
 func (s *systemService) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
-	
+
 	// Start system monitoring goroutine
 	go s.monitorSystemHealth()
-	
+
 	s.logger.Info("System service started")
 	return nil
 }
@@ -142,10 +142,7 @@ func (s *systemService) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	
-	// Clean up any resources
-	// Currently system service doesn't have resources to clean up
-	
+
 	s.logger.Info("System service stopped")
 	return nil
 }
@@ -154,7 +151,7 @@ func (s *systemService) Stop() error {
 func (s *systemService) monitorSystemHealth() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -166,7 +163,7 @@ func (s *systemService) monitorSystemHealth() {
 				s.logger.WithError(err).Error("Failed to get system stats")
 				continue
 			}
-			
+
 			s.logger.WithFields(logrus.Fields{
 				"state_stats":    stats.StateStats,
 				"timeout_stats":  stats.TimeoutStats,

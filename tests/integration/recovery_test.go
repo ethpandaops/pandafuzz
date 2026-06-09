@@ -116,6 +116,7 @@ func TestOrphanedJobRecovery(t *testing.T) {
 	bot2Client, err := bot.NewRetryClient(&common.BotConfig{
 		ID:           "bot-2",
 		MasterURL:    env.masterURL,
+		APIKey:       testAPIKey,
 		Capabilities: []string{"afl++"},
 	}, env.logger)
 	require.NoError(t, err)

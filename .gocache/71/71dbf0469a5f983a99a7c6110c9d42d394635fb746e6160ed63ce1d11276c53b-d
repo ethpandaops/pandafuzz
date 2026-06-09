@@ -1,0 +1,3 @@
+./server.gen.go
+./spec.gen.go
+./types.gen.go

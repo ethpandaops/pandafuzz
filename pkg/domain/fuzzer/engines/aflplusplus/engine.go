@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 
+	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/types"
 )
 
@@ -131,6 +132,13 @@ func (e *Engine) Start(ctx context.Context) error {
 	e.inputDir = e.config.AFLPlusPlusOptions.InputDir
 	if e.inputDir == "" {
 		return errors.New("input directory is required for AFL++")
+	}
+
+	// Security: Validate target binary path before execution (defense in depth)
+	if e.target != "" {
+		if err := common.ValidateBinaryPath(e.target, nil); err != nil {
+			return fmt.Errorf("invalid target binary: %w", err)
+		}
 	}
 
 	// Create directories

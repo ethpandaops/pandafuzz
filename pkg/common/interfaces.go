@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"io"
 )
 
 // CampaignService defines the interface for campaign management
@@ -36,6 +37,7 @@ type CorpusService interface {
 // FileStorage defines the interface for file storage operations
 type FileStorage interface {
 	SaveFile(ctx context.Context, path string, data []byte) error
+	SaveFileStream(ctx context.Context, path string, reader io.Reader, size int64) error
 	ReadFile(ctx context.Context, path string) ([]byte, error)
 	DeleteFile(ctx context.Context, path string) error
 	ListFiles(ctx context.Context, prefix string) ([]string, error)
@@ -66,65 +68,6 @@ type JobService interface {
 	AssignJob(ctx context.Context, jobID, botID string) error
 	CompleteJob(ctx context.Context, jobID string) error
 	GetJobsByStatus(ctx context.Context, status JobStatus) ([]*Job, error)
-}
-
-// ReproducibilityService defines the interface for crash reproducibility management
-type ReproducibilityService interface {
-	// Lifecycle methods
-	Start(ctx context.Context) error
-	Stop() error
-
-	// QueueReproduction adds a crash to the reproduction queue
-	QueueReproduction(ctx context.Context, crashID string, priority int) error
-
-	// QueueBatchReproduction queues multiple crashes for reproduction testing
-	QueueBatchReproduction(ctx context.Context, crashIDs []string, priority int) error
-
-	// GetReproductionStatus gets the current status of a reproduction task
-	GetReproductionStatus(ctx context.Context, crashID string) (*ReproductionRequest, error)
-
-	// RecordReproductionResult records the result of a reproduction attempt
-	RecordReproductionResult(ctx context.Context, result *ReproductionResult) error
-
-	// GetReproductionResults gets all reproduction results for a crash
-	GetReproductionResults(ctx context.Context, crashID string) ([]*ReproductionResult, error)
-
-	// CalculateReproducibilityScore calculates the reproducibility score for a crash
-	CalculateReproducibilityScore(ctx context.Context, crashID string) (float64, error)
-
-	// GetDetailedScore returns the full reproducibility score with all components
-	GetDetailedScore(ctx context.Context, crashID string) (interface{}, error)
-
-	// GetPlatformAnalysis returns platform-specific reproduction analysis
-	GetPlatformAnalysis(ctx context.Context, crashID string) (map[string]interface{}, error)
-
-	// GetTrendAnalysis returns reproduction trend analysis over time
-	GetTrendAnalysis(ctx context.Context, crashID string) (map[string]interface{}, error)
-
-	// VerifyFix triggers verification of a fix for a crash
-	VerifyFix(ctx context.Context, crashID, fixCommit string) error
-
-	// GetQueueStatus returns the current queue status
-	GetQueueStatus() map[string]interface{}
-}
-
-// CrashMinimizerService defines the interface for crash test case minimization
-type CrashMinimizerService interface {
-	// Lifecycle methods
-	Start(ctx context.Context) error
-	Stop() error
-
-	// MinimizeCrash minimizes a crash input using the specified strategy
-	MinimizeCrash(ctx context.Context, crashID string, strategy string) (*MinimizationResult, error)
-
-	// GetMinimizationResult retrieves a previous minimization result
-	GetMinimizationResult(ctx context.Context, resultID string) (*MinimizationResult, error)
-
-	// ListMinimizationResults lists minimization results for a crash
-	ListMinimizationResults(ctx context.Context, crashID string) ([]*MinimizationResult, error)
-
-	// GetBestMinimization returns the best (smallest) minimization for a crash
-	GetBestMinimization(ctx context.Context, crashID string) (*MinimizationResult, error)
 }
 
 // Storage defines the main storage interface (extending the existing one)
@@ -210,16 +153,6 @@ type Storage interface {
 	// Health check
 	Ping(ctx context.Context) error
 	Close(ctx context.Context) error
-
-	// Reproduction operations
-	CreateReproductionResult(ctx context.Context, result *ReproductionResult) error
-	GetReproductionResults(ctx context.Context, crashID string) ([]*ReproductionResult, error)
-
-	// Minimization operations
-	CreateMinimizationResult(ctx context.Context, result *MinimizationResult) error
-	GetMinimizationResult(ctx context.Context, resultID string) (*MinimizationResult, error)
-	ListMinimizationResults(ctx context.Context, crashID string) ([]*MinimizationResult, error)
-	GetMinimizationStats(ctx context.Context, campaignID string) (map[string]interface{}, error)
 
 	// Corpus collection operations
 	CreateCorpusCollection(ctx context.Context, collection *CorpusCollection) error

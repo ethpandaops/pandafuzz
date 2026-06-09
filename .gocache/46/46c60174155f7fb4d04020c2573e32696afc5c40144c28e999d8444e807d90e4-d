@@ -1,0 +1,3 @@
+./adapter.go
+./factory.go
+./types.go

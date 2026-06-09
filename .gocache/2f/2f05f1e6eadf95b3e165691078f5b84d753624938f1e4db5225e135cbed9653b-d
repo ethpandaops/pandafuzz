@@ -1,0 +1,5 @@
+./request-signature-streaming-unsigned-trailer.go
+./request-signature-streaming.go
+./request-signature-v2.go
+./request-signature-v4.go
+./utils.go

@@ -24,8 +24,8 @@ func TestPhantomJobDetection(t *testing.T) {
 	// Create temporary database
 	dbPath := t.TempDir() + "/test.db"
 	config := common.DatabaseConfig{
-		Path:   dbPath,
-		Driver: "sqlite3",
+		Type: "sqlite",
+		Path: dbPath,
 	}
 
 	// Initialize storage
@@ -33,18 +33,17 @@ func TestPhantomJobDetection(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close(context.Background())
 
+	storageDB, ok := db.(common.Storage)
+	require.True(t, ok, "expected SQLite storage to implement common.Storage")
+
 	// Initialize database schema
-	err = db.Initialize(context.Background())
+	err = db.CreateTables(context.Background())
 	require.NoError(t, err)
 
 	// Create master config
 	masterConfig := &common.MasterConfig{
-		ServerConfig: common.ServerConfig{
-			Address: "127.0.0.1:0",
-			Port:    0,
-		},
 		Database: config,
-		Limits: common.LimitsConfig{
+		Limits: common.ResourceLimits{
 			MaxCacheSize: 100,
 		},
 	}
@@ -67,11 +66,11 @@ func TestPhantomJobDetection(t *testing.T) {
 		}
 
 		// Store directly in database (this simulates a phantom job)
-		err := db.CreateJob(ctx, phantomJob)
+		err := storageDB.CreateJob(ctx, phantomJob)
 		require.NoError(t, err)
 
 		// Verify job exists in database
-		dbJob, err := db.GetJob(ctx, phantomJob.ID)
+		dbJob, err := storageDB.GetJob(ctx, phantomJob.ID)
 		require.NoError(t, err)
 		require.NotNil(t, dbJob)
 		require.Equal(t, phantomJob.ID, dbJob.ID)
@@ -100,7 +99,7 @@ func TestPhantomJobDetection(t *testing.T) {
 			Name:        "stuck-phantom-job",
 			Target:      "/test/target",
 			Fuzzer:      "afl++",
-			Status:      "running",
+			Status:      common.JobStatusRunning,
 			AssignedBot: &[]string{"bot-123"}[0],
 			CreatedAt:   time.Now().Add(-2 * time.Hour), // Old job
 			StartedAt:   &[]time.Time{time.Now().Add(-2 * time.Hour)}[0],
@@ -108,7 +107,7 @@ func TestPhantomJobDetection(t *testing.T) {
 		}
 
 		// Store directly in database
-		err := db.CreateJob(ctx, stuckJob)
+		err := storageDB.CreateJob(ctx, stuckJob)
 		require.NoError(t, err)
 
 		// Create job recovery manager (mock repository needed)
@@ -120,7 +119,7 @@ func TestPhantomJobDetection(t *testing.T) {
 
 		stuckJobs := []string{}
 		for _, job := range jobs {
-			if job.Status == "running" && job.TimeoutAt.Before(time.Now()) {
+			if job.Status == common.JobStatusRunning && job.TimeoutAt.Before(time.Now()) {
 				stuckJobs = append(stuckJobs, job.ID)
 			}
 		}
@@ -128,16 +127,16 @@ func TestPhantomJobDetection(t *testing.T) {
 		require.Contains(t, stuckJobs, stuckJob.ID, "Stuck job should be detected")
 
 		// Test recovery by updating status
-		err = db.UpdateJob(ctx, stuckJob.ID, map[string]interface{}{
-			"status":       "failed",
+		err = storageDB.UpdateJob(ctx, stuckJob.ID, map[string]interface{}{
+			"status":       common.JobStatusFailed,
 			"completed_at": time.Now(),
 		})
 		require.NoError(t, err)
 
 		// Verify job status changed
-		recoveredJob, err := db.GetJob(ctx, stuckJob.ID)
+		recoveredJob, err := storageDB.GetJob(ctx, stuckJob.ID)
 		require.NoError(t, err)
-		require.Equal(t, "failed", recoveredJob.Status)
+		require.Equal(t, common.JobStatusFailed, recoveredJob.Status)
 	})
 
 	t.Run("PreventPhantomJobCreation", func(t *testing.T) {
@@ -149,7 +148,7 @@ func TestPhantomJobDetection(t *testing.T) {
 			Name:      "proper-job",
 			Target:    "/test/target",
 			Fuzzer:    "honggfuzz",
-			Status:    "pending",
+			Status:    common.JobStatusPending,
 			CreatedAt: time.Now(),
 			TimeoutAt: time.Now().Add(1 * time.Hour),
 		}
@@ -172,7 +171,7 @@ func TestPhantomJobDetection(t *testing.T) {
 		require.True(t, found, "Properly created job should be visible")
 
 		// Also verify in database directly
-		dbJob, err := db.GetJob(ctx, properJob.ID)
+		dbJob, err := storageDB.GetJob(ctx, properJob.ID)
 		require.NoError(t, err)
 		require.NotNil(t, dbJob)
 		require.Equal(t, properJob.ID, dbJob.ID)
@@ -189,12 +188,12 @@ func TestPhantomJobDetection(t *testing.T) {
 				Name:      fmt.Sprintf("phantom-job-%d", i),
 				Target:    "/test/target",
 				Fuzzer:    "libfuzzer",
-				Status:    "running",
+				Status:    common.JobStatusRunning,
 				CreatedAt: time.Now().Add(time.Duration(-i) * time.Hour),
 				TimeoutAt: time.Now().Add(1 * time.Hour),
 			}
 
-			err := db.CreateJob(ctx, phantomJob)
+			err := storageDB.CreateJob(ctx, phantomJob)
 			require.NoError(t, err)
 			phantomIDs = append(phantomIDs, phantomJob.ID)
 		}
@@ -226,8 +225,8 @@ func TestJobTimeoutAndReassignment(t *testing.T) {
 	// Create temporary database
 	dbPath := t.TempDir() + "/test.db"
 	config := common.DatabaseConfig{
-		Path:   dbPath,
-		Driver: "sqlite3",
+		Type: "sqlite",
+		Path: dbPath,
 	}
 
 	// Initialize storage
@@ -235,8 +234,11 @@ func TestJobTimeoutAndReassignment(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close(context.Background())
 
+	storageDB, ok := db.(common.Storage)
+	require.True(t, ok, "expected SQLite storage to implement common.Storage")
+
 	// Initialize database schema
-	err = db.Initialize(context.Background())
+	err = db.CreateTables(context.Background())
 	require.NoError(t, err)
 
 	t.Run("DetectTimedOutJob", func(t *testing.T) {
@@ -248,17 +250,17 @@ func TestJobTimeoutAndReassignment(t *testing.T) {
 			Name:      "timeout-test-job",
 			Target:    "/test/target",
 			Fuzzer:    "afl++",
-			Status:    "running",
+			Status:    common.JobStatusRunning,
 			CreatedAt: time.Now().Add(-2 * time.Hour),
 			StartedAt: &[]time.Time{time.Now().Add(-2 * time.Hour)}[0],
 			TimeoutAt: time.Now().Add(-30 * time.Minute), // Timed out 30 minutes ago
 		}
 
-		err := db.CreateJob(ctx, timedOutJob)
+		err := storageDB.CreateJob(ctx, timedOutJob)
 		require.NoError(t, err)
 
 		// Check if job is detected as timed out
-		job, err := db.GetJob(ctx, timedOutJob.ID)
+		job, err := storageDB.GetJob(ctx, timedOutJob.ID)
 		require.NoError(t, err)
 		require.True(t, job.TimeoutAt.Before(time.Now()), "Job should be timed out")
 	})
@@ -272,27 +274,27 @@ func TestJobTimeoutAndReassignment(t *testing.T) {
 			Name:        "reassign-test-job",
 			Target:      "/test/target",
 			Fuzzer:      "libfuzzer",
-			Status:      "running",
+			Status:      common.JobStatusRunning,
 			AssignedBot: &[]string{"bot-456"}[0],
 			CreatedAt:   time.Now().Add(-1 * time.Hour),
 			StartedAt:   &[]time.Time{time.Now().Add(-1 * time.Hour)}[0],
 			TimeoutAt:   time.Now().Add(-10 * time.Minute),
 		}
 
-		err := db.CreateJob(ctx, reassignJob)
+		err := storageDB.CreateJob(ctx, reassignJob)
 		require.NoError(t, err)
 
 		// Simulate reassignment by updating status to pending
-		err = db.UpdateJob(ctx, reassignJob.ID, map[string]interface{}{
-			"status":       "pending",
+		err = storageDB.UpdateJob(ctx, reassignJob.ID, map[string]interface{}{
+			"status":       common.JobStatusPending,
 			"assigned_bot": nil,
 		})
 		require.NoError(t, err)
 
 		// Verify job is ready for reassignment
-		job, err := db.GetJob(ctx, reassignJob.ID)
+		job, err := storageDB.GetJob(ctx, reassignJob.ID)
 		require.NoError(t, err)
-		require.Equal(t, "pending", job.Status)
+		require.Equal(t, common.JobStatusPending, job.Status)
 		require.Nil(t, job.AssignedBot)
 	})
 }
@@ -303,8 +305,6 @@ func TestJobRecoveryMechanism(t *testing.T) {
 	// Note: This requires a mock repository since we don't have full implementation
 
 	t.Run("RecoveryManagerInitialization", func(t *testing.T) {
-		logger := logrus.New()
-
 		// Create a mock repository (would need actual implementation)
 		// For now, we test that the recovery manager can be created
 		require.NotNil(t, scheduler.JobRecoveryManager{})

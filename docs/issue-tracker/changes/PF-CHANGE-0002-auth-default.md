@@ -1,0 +1,12 @@
+# PF-CHANGE-0002: Enforce authentication by default
+- Status: completed
+- Type: security
+- Motivation: API defaults to no auth when JWT secret is unset or placeholder.
+- Scope: API middleware stack, config defaults, deployment docs, tests.
+- Design Notes: Require explicit config for dev-only unauthenticated mode; fail startup without a real secret.
+- Backwards Compatibility: Unauthenticated clients will fail until configured.
+- Breaking Change: yes
+- Deprecation Notice: none
+- Rollout Plan: Add strict config validation, update sample configs, update CI tests to include auth.
+- Test Plan: Auth-required integration tests; negative tests for missing/invalid credentials.
+- Risks: Operational friction for local/dev environments without updated configs.

@@ -26,15 +26,22 @@ type RateLimiter struct {
 	logger   logrus.FieldLogger
 }
 
+// EndpointLimit defines rate limits for specific endpoints
+type EndpointLimit struct {
+	Rate   int           // Requests per window
+	Window time.Duration // Time window for rate limiting
+}
+
 // RateLimitConfig holds rate limiting configuration
 type RateLimitConfig struct {
-	Rate         int                        // Requests per second
-	Burst        int                        // Burst capacity
-	TTL          time.Duration              // Time to live for rate limiter entries
-	KeyExtractor func(*http.Request) string // Function to extract rate limit key
-	SkipPaths    []string                   // Paths to skip rate limiting
-	RedisClient  *redis.Client              // Optional Redis client for distributed rate limiting
-	Logger       logrus.FieldLogger
+	Rate           int                        // Requests per second (global default)
+	Burst          int                        // Burst capacity
+	TTL            time.Duration              // Time to live for rate limiter entries
+	KeyExtractor   func(*http.Request) string // Function to extract rate limit key
+	SkipPaths      []string                   // Paths to skip rate limiting
+	EndpointLimits map[string]EndpointLimit   // Endpoint-specific rate limits (key: "METHOD /path")
+	RedisClient    *redis.Client              // Optional Redis client for distributed rate limiting
+	Logger         logrus.FieldLogger
 }
 
 // RedisRateLimiter provides Redis-based distributed rate limiting
@@ -220,6 +227,49 @@ func RateLimit() func(http.Handler) http.Handler {
 	})
 }
 
+// EndpointRateLimiter provides rate limiting for specific endpoints with different limits
+type EndpointRateLimiter struct {
+	limiters map[string]*RateLimiter // Key: "METHOD /path"
+	mu       sync.RWMutex
+	logger   logrus.FieldLogger
+}
+
+// NewEndpointRateLimiter creates a new endpoint-specific rate limiter
+func NewEndpointRateLimiter(limits map[string]EndpointLimit, logger logrus.FieldLogger) *EndpointRateLimiter {
+	erl := &EndpointRateLimiter{
+		limiters: make(map[string]*RateLimiter),
+		logger:   logger,
+	}
+
+	// Create a rate limiter for each endpoint
+	for endpoint, limit := range limits {
+		// Convert per-window rate to per-second rate
+		ratePerSecond := float64(limit.Rate) / limit.Window.Seconds()
+		if ratePerSecond < 0.1 {
+			ratePerSecond = 0.1 // Minimum rate to avoid issues
+		}
+		erl.limiters[endpoint] = NewRateLimiter(int(ratePerSecond)+1, limit.Rate)
+	}
+
+	return erl
+}
+
+// Allow checks if a request to a specific endpoint should be allowed
+func (erl *EndpointRateLimiter) Allow(method, path, clientKey string) (bool, *EndpointLimit) {
+	endpointKey := method + " " + path
+
+	erl.mu.RLock()
+	limiter, exists := erl.limiters[endpointKey]
+	erl.mu.RUnlock()
+
+	if !exists {
+		return true, nil // No endpoint-specific limit, allow
+	}
+
+	fullKey := endpointKey + ":" + clientKey
+	return limiter.Allow(fullKey), nil
+}
+
 // RateLimitWithConfig creates a rate limiting middleware with configuration
 func RateLimitWithConfig(config RateLimitConfig) func(http.Handler) http.Handler {
 	if config.Rate <= 0 {
@@ -246,6 +296,12 @@ func RateLimitWithConfig(config RateLimitConfig) func(http.Handler) http.Handler
 		rateLimiter = NewRateLimiterWithConfig(config)
 	}
 
+	// Create endpoint-specific rate limiters if configured
+	var endpointLimiter *EndpointRateLimiter
+	if len(config.EndpointLimits) > 0 {
+		endpointLimiter = NewEndpointRateLimiter(config.EndpointLimits, config.Logger)
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip rate limiting for configured paths
@@ -257,6 +313,31 @@ func RateLimitWithConfig(config RateLimitConfig) func(http.Handler) http.Handler
 			}
 
 			key := config.KeyExtractor(r)
+
+			// Check endpoint-specific rate limit first
+			if endpointLimiter != nil {
+				if allowed, _ := endpointLimiter.Allow(r.Method, r.URL.Path, key); !allowed {
+					config.Logger.WithFields(logrus.Fields{
+						"key":      key,
+						"path":     r.URL.Path,
+						"method":   r.Method,
+						"endpoint": r.Method + " " + r.URL.Path,
+					}).Warn("Endpoint rate limit exceeded")
+
+					// For endpoint limits, use a longer retry time
+					retryAfter := 60 // Default 60 seconds for endpoint limits
+					w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+					w.Header().Set("X-RateLimit-Remaining", "0")
+
+					errors.WriteErrorWithDetails(w, http.StatusTooManyRequests, "Endpoint rate limit exceeded", map[string]interface{}{
+						"retry_after_seconds": retryAfter,
+						"endpoint":            r.Method + " " + r.URL.Path,
+					})
+					return
+				}
+			}
+
+			// Then check global rate limit
 			var allowed bool
 			var err error
 

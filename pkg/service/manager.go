@@ -11,15 +11,22 @@ import (
 
 // Manager holds all service instances
 type Manager struct {
-	Bot             BotService
-	Job             JobService
-	Result          ResultService
-	System          SystemService
-	Monitoring      MonitoringService
-	Campaign        common.CampaignService
-	Corpus          common.CorpusService
-	Reproducibility common.ReproducibilityService
-	CrashMinimizer  common.CrashMinimizerService
+	Bot        BotService
+	Job        JobService
+	Result     ResultService
+	System     SystemService
+	Monitoring MonitoringService
+	Analytics  AnalyticsService
+	Campaign   common.CampaignService
+	Corpus     common.CorpusService
+
+	// Repository adapters for gradual migration (used internally)
+	botRepo       BotRepository
+	jobRepo       JobRepository
+	resultRepo    ResultRepository
+	crashRepo     CrashRepository
+	systemRepo    SystemRepository
+	analyticsRepo AnalyticsRepository
 
 	logger     *logrus.Logger
 	cancelFunc context.CancelFunc
@@ -50,8 +57,16 @@ func NewManager(
 		return nil, fmt.Errorf("service manager: logger is required")
 	}
 
-	// Create monitoring service first
-	monitoringService := NewMonitoringService(state, logger)
+	// Create repository adapters first (needed by all services)
+	botRepo := NewStateStoreBotRepository(state)
+	jobRepo := NewStateStoreJobRepository(state)
+	resultRepo := NewStateStoreResultRepository(state)
+	crashRepo := NewStateStoreCrashRepository(state)
+	systemRepo := NewStateStoreSystemRepository(state)
+	analyticsRepo := NewStateStoreAnalyticsRepository(state)
+
+	// Create monitoring service using repositories
+	monitoringService := NewMonitoringService(botRepo, jobRepo, logger)
 	collector := monitoringService.GetCollector()
 
 	// Create campaign-related services
@@ -97,36 +112,12 @@ func NewManager(
 		logger.Warn("State does not implement storage provider interface")
 	}
 
-	// Initialize reproducibility service if storage is available
-	var reproducibilityService common.ReproducibilityService
-	if storageProvider, ok := state.(interface{ GetStorage() common.Storage }); ok {
-		if storage := storageProvider.GetStorage(); storage != nil {
-			reproducibilityService = NewReproducibilityService(storage, config, logger)
-		}
-	}
-
-	// Initialize crash minimizer service if storage and file storage are available
-	var crashMinimizerService common.CrashMinimizerService
-	if storageProvider, ok := state.(interface{ GetStorage() common.Storage }); ok {
-		if storage := storageProvider.GetStorage(); storage != nil {
-			// Get file storage
-			var fileStorage common.FileStorage
-			if fsProvider, ok := state.(interface{ GetFileStorage() common.FileStorage }); ok {
-				fileStorage = fsProvider.GetFileStorage()
-			} else if config.Storage.Type == "filesystem" && config.Storage.Filesystem.BasePath != "" {
-				fileStorage = NewLocalFileStorage(config.Storage.Filesystem.BasePath, logger)
-			} else {
-				fileStorage = NewLocalFileStorage("./storage", logger)
-			}
-			crashMinimizerService = NewCrashMinimizerService(logger, storage, fileStorage)
-		}
-	}
-
-	// Create base services
-	botService := NewBotService(state, timeoutManager, config, logger)
-	jobService := NewJobService(state, timeoutManager, config, logger, corpusService)
-	resultService := NewResultService(state, config, logger)
-	systemService := NewSystemService(state, timeoutManager, recoveryManager, config, logger)
+	// Create base services using repository interfaces (no StateStore dependency)
+	botService := NewBotService(botRepo, jobRepo, timeoutManager, config, logger)
+	jobService := NewJobService(jobRepo, botRepo, crashRepo, timeoutManager, config, logger, corpusService)
+	resultService := NewResultService(resultRepo, crashRepo, jobRepo, config, logger)
+	systemService := NewSystemService(systemRepo, timeoutManager, recoveryManager, config, logger)
+	analyticsService := NewAnalyticsService(analyticsRepo, jobRepo, botRepo, nil, logger)
 
 	// If using asynq queue backend, create and set the queue
 	if config.Queue.Backend == "asynq" {
@@ -145,16 +136,21 @@ func NewManager(
 	}
 
 	return &Manager{
-		Bot:             botService,
-		Job:             jobService,
-		Result:          resultService,
-		System:          systemService,
-		Monitoring:      monitoringService,
-		Campaign:        campaignService,
-		Corpus:          corpusService,
-		Reproducibility: reproducibilityService,
-		CrashMinimizer:  crashMinimizerService,
-		logger:          logger,
+		Bot:           botService,
+		Job:           jobService,
+		Result:        resultService,
+		System:        systemService,
+		Monitoring:    monitoringService,
+		Analytics:     analyticsService,
+		Campaign:      campaignService,
+		Corpus:        corpusService,
+		botRepo:       botRepo,
+		jobRepo:       jobRepo,
+		resultRepo:    resultRepo,
+		crashRepo:     crashRepo,
+		systemRepo:    systemRepo,
+		analyticsRepo: analyticsRepo,
+		logger:        logger,
 	}, nil
 }
 
@@ -198,20 +194,6 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 	}
 
-	// Start reproducibility service if available
-	if m.Reproducibility != nil {
-		if err := m.Reproducibility.Start(serviceCtx); err != nil {
-			return fmt.Errorf("failed to start reproducibility service: %w", err)
-		}
-	}
-
-	// Start crash minimizer service if available
-	if m.CrashMinimizer != nil {
-		if err := m.CrashMinimizer.Start(serviceCtx); err != nil {
-			return fmt.Errorf("failed to start crash minimizer service: %w", err)
-		}
-	}
-
 	m.logger.Info("All services started successfully")
 	return nil
 }
@@ -228,22 +210,6 @@ func (m *Manager) Stop() error {
 	var errs []error
 
 	// Stop services in reverse order of dependency
-	// Stop crash minimizer service first
-	if m.CrashMinimizer != nil {
-		m.logger.Debug("Stopping crash minimizer service")
-		if err := m.CrashMinimizer.Stop(); err != nil && err != context.Canceled {
-			errs = append(errs, fmt.Errorf("failed to stop crash minimizer service: %w", err))
-		}
-	}
-
-	// Stop reproducibility service
-	if m.Reproducibility != nil {
-		m.logger.Debug("Stopping reproducibility service")
-		if err := m.Reproducibility.Stop(); err != nil && err != context.Canceled {
-			errs = append(errs, fmt.Errorf("failed to stop reproducibility service: %w", err))
-		}
-	}
-
 	// Stop system service
 	if stopper, ok := m.System.(interface{ Stop() error }); ok {
 		m.logger.Debug("Stopping system service")

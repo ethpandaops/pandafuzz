@@ -1,0 +1,5 @@
+./coverage_extractor.go
+./doc.go
+./engine.go
+./factory.go
+./coverage_extractor_test.go

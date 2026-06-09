@@ -29,13 +29,13 @@ docker-compose up -d --scale bot=10
 
 1. Copy the example configuration:
    ```bash
-   cp configs/master-docker.yaml configs/my-master.yaml
+   cp master-docker.yaml configs/my-master.yaml
    ```
 
 2. Mount your configuration in docker-compose.yml:
    ```yaml
    volumes:
-     - ./configs/my-master.yaml:/app/configs/master.yaml
+     - ./configs/my-master.yaml:/app/master.yaml
    ```
 
 ## Kubernetes
@@ -109,6 +109,7 @@ For bare metal deployments, systemd service files are provided:
 - Deploy behind VPN or secure network
 - Use reverse proxy for TLS termination
 - Configure firewall rules appropriately
+- Configure `security.jwt_secret` or `security.api_keys` for API access
 
 ### Monitoring
 

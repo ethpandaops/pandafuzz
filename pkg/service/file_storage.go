@@ -62,6 +62,47 @@ func (fs *LocalFileStorage) SaveFile(ctx context.Context, path string, data []by
 	return nil
 }
 
+// SaveFileStream saves data to a file from a reader
+func (fs *LocalFileStorage) SaveFileStream(ctx context.Context, path string, reader io.Reader, size int64) error {
+	// Ensure path is relative
+	if filepath.IsAbs(path) {
+		return fmt.Errorf("absolute paths not allowed: %s", path)
+	}
+
+	// Sanitize path to prevent directory traversal
+	cleanPath := filepath.Clean(path)
+	if strings.Contains(cleanPath, "..") {
+		return fmt.Errorf("invalid path: %s", path)
+	}
+
+	fullPath := filepath.Join(fs.basePath, cleanPath)
+
+	// Create directory if it doesn't exist
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	file, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	written, err := io.Copy(file, reader)
+	if err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	fs.logger.WithFields(logrus.Fields{
+		"path":  path,
+		"size":  written,
+		"limit": size,
+	}).Debug("File saved")
+
+	return nil
+}
+
 // ReadFile reads data from a file
 func (fs *LocalFileStorage) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	// Ensure path is relative
@@ -292,6 +333,34 @@ func (fs *BackendFileStorage) SaveFile(ctx context.Context, path string, data []
 	fs.logger.WithFields(logrus.Fields{
 		"key":  key,
 		"size": len(data),
+	}).Debug("File saved to backend storage")
+
+	return nil
+}
+
+// SaveFileStream saves data to a file using the storage backend
+func (fs *BackendFileStorage) SaveFileStream(ctx context.Context, path string, reader io.Reader, size int64) error {
+	// Ensure path is relative
+	if filepath.IsAbs(path) {
+		return fmt.Errorf("absolute paths not allowed: %s", path)
+	}
+
+	// Sanitize path to prevent directory traversal
+	cleanPath := filepath.Clean(path)
+	if strings.Contains(cleanPath, "..") {
+		return fmt.Errorf("invalid path: %s", path)
+	}
+
+	// Convert Windows paths to forward slashes for S3 compatibility
+	key := strings.ReplaceAll(cleanPath, "\\", "/")
+
+	if err := fs.backend.Store(ctx, key, reader, size); err != nil {
+		return fmt.Errorf("failed to store file: %w", err)
+	}
+
+	fs.logger.WithFields(logrus.Fields{
+		"key":  key,
+		"size": size,
 	}).Debug("File saved to backend storage")
 
 	return nil

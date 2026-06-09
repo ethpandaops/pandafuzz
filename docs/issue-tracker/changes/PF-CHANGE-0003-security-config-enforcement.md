@@ -1,0 +1,12 @@
+# PF-CHANGE-0003: Enforce security config limits in API/middleware
+- Status: completed
+- Type: security
+- Motivation: SecurityConfig exists but is not enforced in request handling or uploads.
+- Scope: Request size validation, file extension enforcement, upload streaming limits.
+- Design Notes: Centralize limits in config and validate at middleware + handler level; stream to storage to avoid memory spikes.
+- Backwards Compatibility: Requests previously allowed may be rejected.
+- Breaking Change: yes
+- Deprecation Notice: none
+- Rollout Plan: Wire SecurityConfig into API config, update middleware defaults, add per-endpoint limits.
+- Test Plan: Size limit tests, extension filtering tests, chunked upload tests.
+- Risks: Overly strict limits could break existing pipelines until configs are updated.

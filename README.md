@@ -57,11 +57,11 @@ services:
       - "8080:8080"
     volumes:
       - ./storage:/storage
-      - ./configs/master-docker.yaml:/app/configs/master.yaml
+      - ./master-docker.yaml:/app/master.yaml
     environment:
-      - PANDAFUZZ_CONFIG=/app/configs/master.yaml
+      - PANDAFUZZ_CONFIG=/app/master.yaml
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/api/v1/status"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -116,6 +116,9 @@ make docker
 ## Configuration
 
 PandaFuzz uses YAML configuration with environment variable overrides:
+
+- Authentication is required by default. Set `security.jwt_secret` or `security.api_keys` in the master config.
+- Bots must set `api_key` when API keys are enabled.
 
 ```yaml
 master:

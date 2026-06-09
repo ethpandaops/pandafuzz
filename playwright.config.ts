@@ -16,6 +16,9 @@ export default defineConfig({
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
+    extraHTTPHeaders: {
+      'X-API-Key': process.env.PANDAFUZZ_API_KEY || 'dev-api-key',
+    },
   },
 
   projects: [

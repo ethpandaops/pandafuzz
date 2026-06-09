@@ -103,6 +103,11 @@ master:
 
   # Security configuration
   security:
+    enable_auth: true
+    allow_insecure: false
+    jwt_secret: ""
+    api_keys:
+      "dev-api-key": "local-dev"
     enable_input_validation: true
     max_request_size: 10485760
     allowed_file_extensions: [".txt", ".bin", ".data", ".input"]
@@ -189,6 +194,7 @@ bot:
   id: ${BOT_ID:-bot-1}
   name: "fuzzer-bot"
   master_url: ${MASTER_URL:-http://localhost:8080}
+  api_key: ${API_KEY:-dev-api-key}
   api_port: 9049
   capabilities: ["afl++", "libfuzzer", "honggfuzz"]
 

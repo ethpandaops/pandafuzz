@@ -213,60 +213,6 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// EnqueueMinimizationTask enqueues a crash minimization task
-func (c *Client) EnqueueMinimizationTask(jobID, crashID, crashPath, targetPath, strategy string) error {
-	task, err := NewMinimizationTask(jobID, crashID, crashPath, targetPath, strategy)
-	if err != nil {
-		return fmt.Errorf("failed to create minimization task: %w", err)
-	}
-
-	opts := []asynq.Option{
-		asynq.Queue(QueueDefault),
-		asynq.MaxRetry(3),
-		asynq.Timeout(20 * time.Minute),
-	}
-
-	info, err := c.client.Enqueue(task, opts...)
-	if err != nil {
-		return fmt.Errorf("failed to enqueue minimization task: %w", err)
-	}
-
-	c.logger.WithFields(logrus.Fields{
-		"task_id":  info.ID,
-		"job_id":   jobID,
-		"crash_id": crashID,
-	}).Info("Minimization task enqueued")
-
-	return nil
-}
-
-// EnqueueReproductionTask enqueues a crash reproduction task
-func (c *Client) EnqueueReproductionTask(jobID, crashID string, crashInput []byte, targetPath string) error {
-	task, err := NewReproductionTask(jobID, crashID, crashInput, targetPath)
-	if err != nil {
-		return fmt.Errorf("failed to create reproduction task: %w", err)
-	}
-
-	opts := []asynq.Option{
-		asynq.Queue(QueueCritical), // High priority for reproductions
-		asynq.MaxRetry(3),
-		asynq.Timeout(5 * time.Minute),
-	}
-
-	info, err := c.client.Enqueue(task, opts...)
-	if err != nil {
-		return fmt.Errorf("failed to enqueue reproduction task: %w", err)
-	}
-
-	c.logger.WithFields(logrus.Fields{
-		"task_id":  info.ID,
-		"job_id":   jobID,
-		"crash_id": crashID,
-	}).Info("Reproduction task enqueued")
-
-	return nil
-}
-
 // ScheduleTask schedules a task for future execution
 func (c *Client) ScheduleTask(ctx context.Context, task queue.Task, processAt time.Time) error {
 	// Convert to asynq task

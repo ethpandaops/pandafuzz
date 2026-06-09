@@ -1,0 +1,8 @@
+./api_test.go
+./fuzzer_test.go
+./helpers_test.go
+./honggfuzz_crash_detection_test.go
+./job_flow_test.go
+./master_bot_test.go
+./recovery_test.go
+./suite_test.go

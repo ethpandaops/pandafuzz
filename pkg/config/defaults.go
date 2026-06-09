@@ -88,6 +88,8 @@ func DefaultMonitoringConfig() MonitoringConfig {
 func DefaultSecurityConfig() SecurityConfig {
 	return SecurityConfig{
 		EnableInputValidation: true,
+		EnableAuth:            true,
+		AllowInsecure:         false,
 		MaxRequestSize:        10 * 1024 * 1024, // 10MB
 		AllowedFileExtensions: []string{".txt", ".bin", ".data", ".input"},
 		ForbiddenPaths:        []string{"/etc", "/proc", "/sys"},
@@ -197,6 +199,10 @@ type MonitoringConfig struct {
 // SecurityConfig mirrors the common.SecurityConfig for use in this package
 type SecurityConfig struct {
 	EnableInputValidation bool     `yaml:"enable_input_validation" json:"enable_input_validation"`
+	EnableAuth            bool     `yaml:"enable_auth" json:"enable_auth"`
+	AllowInsecure         bool     `yaml:"allow_insecure" json:"allow_insecure"`
+	JWTSecret             string   `yaml:"jwt_secret" json:"jwt_secret"`
+	APIKeys               map[string]string `yaml:"api_keys" json:"api_keys"`
 	MaxRequestSize        int64    `yaml:"max_request_size" json:"max_request_size"`
 	AllowedFileExtensions []string `yaml:"allowed_file_extensions" json:"allowed_file_extensions"`
 	ForbiddenPaths        []string `yaml:"forbidden_paths" json:"forbidden_paths"`

@@ -43,50 +43,6 @@ func (h *Handlers) HandleListCorpus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// TODO: Add these parameters to OpenAPI spec
-	// if source := r.URL.Query().Get("source"); source != "" {
-	// 	sourceVal := generated.CorpusSource(source)
-	// 	params.Source = &sourceVal
-	// }
-
-	// if minSize := r.URL.Query().Get("min_size"); minSize != "" {
-	// 	if size, err := strconv.Atoi(minSize); err == nil {
-	// 		sizeVal := size
-	// 		params.MinSize = &sizeVal
-	// 	}
-	// }
-
-	// if maxSize := r.URL.Query().Get("max_size"); maxSize != "" {
-	// 	if size, err := strconv.Atoi(maxSize); err == nil {
-	// 		sizeVal := size
-	// 		params.MaxSize = &sizeVal
-	// 	}
-	// }
-
-	// if sortBy := r.URL.Query().Get("sort_by"); sortBy != "" {
-	// 	params.SortBy = &sortBy
-	// }
-
-	// if sortOrder := r.URL.Query().Get("sort_order"); sortOrder != "" {
-	// 	sortOrderVal := generated.SortOrder(sortOrder)
-	// 	params.SortOrder = &sortOrderVal
-	// }
-
-	// if since := r.URL.Query().Get("since"); since != "" {
-	// 	params.Since = &since
-	// }
-
-	// if until := r.URL.Query().Get("until"); until != "" {
-	// 	params.Until = &until
-	// }
-
-	// TODO: Add includeContent parameter to OpenAPI spec
-	// if includeContent := r.URL.Query().Get("include_content"); includeContent != "" {
-	// 	if include, err := strconv.ParseBool(includeContent); err == nil {
-	// 		params.IncludeContent = &include
-	// 	}
-	// }
-
 	// Delegate to adapter
 	h.adapter.ListCorpus(w, r, params)
 }
@@ -131,39 +87,6 @@ func (h *Handlers) HandleListQuarantinedCorpus(w http.ResponseWriter, r *http.Re
 		params.Reason = &reasonVal
 	}
 
-	// TODO: Add these parameters to OpenAPI spec
-	// if severity := r.URL.Query().Get("severity"); severity != "" {
-	// 	severityVal := generated.QuarantineSeverity(severity)
-	// 	params.Severity = &severityVal
-	// }
-
-	// if campaignId := r.URL.Query().Get("campaign_id"); campaignId != "" {
-	// 	params.CampaignId = &campaignId
-	// }
-
-	// if sortBy := r.URL.Query().Get("sort_by"); sortBy != "" {
-	// 	params.SortBy = &sortBy
-	// }
-
-	// if sortOrder := r.URL.Query().Get("sort_order"); sortOrder != "" {
-	// 	sortOrderVal := generated.SortOrder(sortOrder)
-	// 	params.SortOrder = &sortOrderVal
-	// }
-
-	// if since := r.URL.Query().Get("since"); since != "" {
-	// 	params.Since = &since
-	// }
-
-	// if until := r.URL.Query().Get("until"); until != "" {
-	// 	params.Until = &until
-	// }
-
-	// if includeContent := r.URL.Query().Get("include_content"); includeContent != "" {
-	// 	if include, err := strconv.ParseBool(includeContent); err == nil {
-	// 		params.IncludeContent = &include
-	// 	}
-	// }
-
 	// Delegate to adapter
 	h.adapter.ListQuarantinedCorpus(w, r, params)
 }
@@ -174,25 +97,6 @@ func (h *Handlers) HandleGetCorpusEntry(w http.ResponseWriter, r *http.Request) 
 
 	// Parse query parameters
 	params := generated.GetCorpusEntryParams{}
-
-	// TODO: Add these parameters to OpenAPI spec
-	// if includeContent := r.URL.Query().Get("include_content"); includeContent != "" {
-	// 	if include, err := strconv.ParseBool(includeContent); err == nil {
-	// 		params.IncludeContent = &include
-	// 	}
-	// }
-
-	// if includeMetadata := r.URL.Query().Get("include_metadata"); includeMetadata != "" {
-	// 	if include, err := strconv.ParseBool(includeMetadata); err == nil {
-	// 		params.IncludeMetadata = &include
-	// 	}
-	// }
-
-	// if includeStats := r.URL.Query().Get("include_stats"); includeStats != "" {
-	// 	if include, err := strconv.ParseBool(includeStats); err == nil {
-	// 		params.IncludeStats = &include
-	// 	}
-	// }
 
 	// Delegate to adapter
 	h.adapter.GetCorpusEntry(w, r, entryId, params)

@@ -94,7 +94,7 @@ func TestSuiteSmoke(t *testing.T) {
 
 // Benchmark tests can be added here
 func BenchmarkBotRegistration(b *testing.B) {
-	env := SetupTestEnvironment(&testing.T{})
+	env := SetupTestEnvironment(b)
 	defer env.Cleanup()
 
 	err := env.StartMaster()
@@ -114,7 +114,7 @@ func BenchmarkBotRegistration(b *testing.B) {
 }
 
 func BenchmarkJobAssignment(b *testing.B) {
-	env := SetupTestEnvironment(&testing.T{})
+	env := SetupTestEnvironment(b)
 	defer env.Cleanup()
 
 	err := env.StartMaster()

@@ -2,6 +2,7 @@ package master
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,20 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
+
+func newWebSocketTestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("Skipping websocket test: cannot bind TCP listener: %v", err)
+	}
+
+	server := httptest.NewUnstartedServer(handler)
+	server.Listener = listener
+	server.Start()
+	return server
+}
 
 func newTestLogger() logrus.FieldLogger {
 	logger := logrus.New()
@@ -222,7 +237,7 @@ func TestWSClient_readPump(t *testing.T) {
 		go hub.Run()
 
 		// Create test WebSocket server
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newWebSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			upgrader := websocket.Upgrader{
 				CheckOrigin: func(r *http.Request) bool { return true },
 			}
@@ -288,7 +303,7 @@ func TestWSClient_writePump(t *testing.T) {
 		logger := newTestLogger()
 
 		// Create test WebSocket server that echoes messages
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := newWebSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			upgrader := websocket.Upgrader{
 				CheckOrigin: func(r *http.Request) bool { return true },
 			}
@@ -351,7 +366,7 @@ func TestServer_handleWebSocket(t *testing.T) {
 		}
 
 		// Create test server
-		ts := httptest.NewServer(http.HandlerFunc(server.handleWebSocket))
+		ts := newWebSocketTestServer(t, http.HandlerFunc(server.handleWebSocket))
 		defer ts.Close()
 
 		// Connect WebSocket client

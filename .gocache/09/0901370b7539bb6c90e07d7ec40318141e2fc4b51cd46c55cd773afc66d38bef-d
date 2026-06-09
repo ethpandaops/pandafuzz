@@ -1,0 +1,14 @@
+./analytics_service.go
+./bot_service.go
+./campaign_service.go
+./corpus_quarantine.go
+./corpus_service.go
+./dedup_service.go
+./dependencies.go
+./file_storage.go
+./interfaces.go
+./job_service.go
+./manager.go
+./monitoring_service.go
+./result_service.go
+./system_service.go

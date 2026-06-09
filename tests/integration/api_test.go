@@ -545,59 +545,42 @@ func TestConcurrentAPIRequests(t *testing.T) {
 	}
 }
 
-// TestAPIAuthentication tests API authentication (if enabled)
-// TODO: This test needs to be updated when authentication is implemented
-/*
+// TestAPIAuthentication verifies API key auth enforcement.
 func TestAPIAuthentication(t *testing.T) {
 	env := SetupTestEnvironment(t)
-
-	// Enable authentication
-	env.masterConfig.Security.EnableAuth = true
-	env.masterConfig.Security.AuthToken = "test-token-123"
-
-	// Recreate API handlers with auth enabled
-	env.apiHandlers = master.NewAPIHandlers(
-		env.state,
-		env.timeoutMgr,
-		env.recoveryMgr,
-		env.masterConfig,
-	)
-	env.server = master.NewServer(env.masterConfig, env.apiHandlers)
 
 	// Start master server
 	err := env.StartMaster()
 	require.NoError(t, err)
 
-	// Test without auth token
-	resp, err := env.httpClient.Get(env.masterURL + "/api/v1/bots")
+	unauthClient := &http.Client{Timeout: 5 * time.Second}
+
+	// Test without auth header
+	resp, err := unauthClient.Get(env.masterURL + "/api/v1/bots")
 	require.NoError(t, err)
-	defer resp.Body.Close()
-
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	resp.Body.Close()
 
-	// Test with invalid auth token
+	// Test with invalid API key
 	req, err := http.NewRequest("GET", env.masterURL+"/api/v1/bots", nil)
 	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer invalid-token")
+	req.Header.Set("X-API-Key", "invalid-key")
 
-	resp, err = env.httpClient.Do(req)
+	resp, err = unauthClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
-
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	resp.Body.Close()
 
-	// Test with valid auth token
+	// Test with valid API key
 	req, err = http.NewRequest("GET", env.masterURL+"/api/v1/bots", nil)
 	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer test-token-123")
+	req.Header.Set("X-API-Key", env.apiKey)
 
-	resp, err = env.httpClient.Do(req)
+	resp, err = unauthClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
-
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
 }
-*/
 
 // TestWebSocketEndpoint tests WebSocket connections for real-time updates
 func TestWebSocketEndpoint(t *testing.T) {

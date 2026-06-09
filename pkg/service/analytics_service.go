@@ -290,9 +290,11 @@ type Alert struct {
 
 // analyticsService implementation
 type analyticsService struct {
-	store  StateStore
-	logger *logrus.Logger
-	config *AnalyticsConfig
+	analyticsRepo AnalyticsRepository
+	jobRepo       JobRepository
+	botRepo       BotRepository
+	logger        *logrus.Logger
+	config        *AnalyticsConfig
 
 	// Caching layer
 	cache    *analyticsCache
@@ -331,8 +333,14 @@ type cacheEntry struct {
 	hits      int
 }
 
-// NewAnalyticsService creates a new analytics service
-func NewAnalyticsService(store StateStore, config *AnalyticsConfig, logger *logrus.Logger) AnalyticsService {
+// NewAnalyticsService creates a new analytics service using repository interfaces.
+func NewAnalyticsService(
+	analyticsRepo AnalyticsRepository,
+	jobRepo JobRepository,
+	botRepo BotRepository,
+	config *AnalyticsConfig,
+	logger *logrus.Logger,
+) AnalyticsService {
 	if config == nil {
 		config = &AnalyticsConfig{
 			CacheTTL:          5 * time.Minute,
@@ -350,7 +358,9 @@ func NewAnalyticsService(store StateStore, config *AnalyticsConfig, logger *logr
 	ctx, cancel := context.WithCancel(context.Background())
 
 	svc := &analyticsService{
-		store:              store,
+		analyticsRepo:      analyticsRepo,
+		jobRepo:            jobRepo,
+		botRepo:            botRepo,
 		logger:             logger,
 		config:             config,
 		cache:              newAnalyticsCache(1000, config.CacheTTL),
@@ -423,7 +433,7 @@ func (s *analyticsService) GetCoverageTrend(ctx context.Context, campaignID stri
 	}
 
 	// Get all jobs for this campaign
-	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	jobs, err := s.analyticsRepo.GetCampaignJobs(ctx, campaignID)
 	if err != nil {
 		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
 	} else {
@@ -431,7 +441,7 @@ func (s *analyticsService) GetCoverageTrend(ctx context.Context, campaignID stri
 		coverageByTime := make(map[int64]*CoveragePoint)
 
 		for _, job := range jobs {
-			jobCoverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, startTime, endTime)
+			jobCoverage, err := s.analyticsRepo.GetCoverageHistory(ctx, job.ID, startTime, endTime)
 			if err != nil {
 				s.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to get job coverage history")
 				continue
@@ -514,7 +524,7 @@ func (s *analyticsService) GetCrashRate(ctx context.Context, campaignID string, 
 	}
 
 	// Get all jobs for this campaign
-	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	jobs, err := s.analyticsRepo.GetCampaignJobs(ctx, campaignID)
 	if err != nil {
 		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
 		return metrics, nil
@@ -525,7 +535,7 @@ func (s *analyticsService) GetCrashRate(ctx context.Context, campaignID string, 
 	uniqueHashes := make(map[string]bool)
 
 	for _, job := range jobs {
-		crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+		crashes, err := s.analyticsRepo.GetJobCrashes(ctx, job.ID)
 		if err != nil {
 			s.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to get job crashes")
 			continue
@@ -616,7 +626,7 @@ func (s *analyticsService) GetFuzzerPerformance(ctx context.Context, fuzzerType 
 	}
 
 	// Get all jobs and filter by fuzzer type
-	allJobs, err := s.store.ListJobs()
+	allJobs, err := s.jobRepo.ListAll(ctx)
 	if err != nil {
 		s.logger.WithError(err).Warn("Failed to list jobs for fuzzer performance")
 		return perf, nil
@@ -648,14 +658,14 @@ func (s *analyticsService) GetFuzzerPerformance(ctx context.Context, fuzzerType 
 
 		// Get coverage and crashes for this job
 		if job.Status == common.JobStatusCompleted || job.Status == common.JobStatusRunning {
-			coverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, startTime, endTime)
+			coverage, err := s.analyticsRepo.GetCoverageHistory(ctx, job.ID, startTime, endTime)
 			if err == nil && len(coverage) > 0 {
 				lastCov := coverage[len(coverage)-1]
 				perf.CoverageGain += int64(lastCov.Edges)
 				perf.TotalExecCount += lastCov.ExecCount
 			}
 
-			crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+			crashes, err := s.analyticsRepo.GetJobCrashes(ctx, job.ID)
 			if err == nil {
 				perf.CrashesFound += len(crashes)
 			}
@@ -805,20 +815,15 @@ func (s *analyticsService) metricsAggregationWorker() {
 }
 
 func (s *analyticsService) broadcastMetrics() {
-	// TODO: Implement real-time metrics aggregation and broadcasting
+	// Note: Individual subscriptions manage their own metric delivery via SubscribeToMetrics goroutines.
+	// This broadcast function serves as a health check for the aggregation worker and can be extended
+	// for future global metrics broadcasting if needed.
 	s.subscribersMu.RLock()
-	defer s.subscribersMu.RUnlock()
+	subscriberCount := len(s.metricsSubscribers)
+	s.subscribersMu.RUnlock()
 
-	// For each active campaign with subscribers, calculate and send metrics
-	for _, ch := range s.metricsSubscribers {
-		select {
-		case ch <- &RealtimeMetrics{
-			Timestamp: time.Now(),
-			// TODO: Fill with actual metrics
-		}:
-		default:
-			// Channel full, skip
-		}
+	if subscriberCount > 0 {
+		s.logger.WithField("active_subscribers", subscriberCount).Debug("Metrics aggregation worker running")
 	}
 }
 
@@ -909,7 +914,7 @@ func (s *analyticsService) CompareCampaigns(ctx context.Context, campaignIDs []s
 		data := CampaignComparisonData{CampaignID: campaignID}
 
 		// Get campaign jobs
-		jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+		jobs, err := s.analyticsRepo.GetCampaignJobs(ctx, campaignID)
 		if err != nil {
 			s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
 			comparison.Campaigns = append(comparison.Campaigns, data)
@@ -922,7 +927,7 @@ func (s *analyticsService) CompareCampaigns(ctx context.Context, campaignIDs []s
 		var totalExecs int64
 		for _, job := range jobs {
 			// Get coverage
-			coverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, startTime, endTime)
+			coverage, err := s.analyticsRepo.GetCoverageHistory(ctx, job.ID, startTime, endTime)
 			if err == nil && len(coverage) > 0 {
 				lastCov := coverage[len(coverage)-1]
 				data.Coverage += int64(lastCov.Edges)
@@ -930,7 +935,7 @@ func (s *analyticsService) CompareCampaigns(ctx context.Context, campaignIDs []s
 			}
 
 			// Get crashes
-			crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+			crashes, err := s.analyticsRepo.GetJobCrashes(ctx, job.ID)
 			if err == nil {
 				data.CrashCount += len(crashes)
 			}
@@ -982,7 +987,7 @@ func (s *analyticsService) GetBotUtilization(ctx context.Context, window time.Du
 	}
 
 	// Get all bots
-	bots, err := s.store.ListBots()
+	bots, err := s.botRepo.List(ctx)
 	if err != nil {
 		s.logger.WithError(err).Warn("Failed to list bots for utilization")
 		return util, nil
@@ -1012,7 +1017,7 @@ func (s *analyticsService) GetBotUtilization(ctx context.Context, window time.Du
 		}
 
 		// Get jobs completed by this bot in the time window
-		allJobs, err := s.store.ListJobs()
+		allJobs, err := s.jobRepo.ListAll(ctx)
 		if err == nil {
 			for _, job := range allJobs {
 				if job.AssignedBot == nil || *job.AssignedBot != bot.ID {
@@ -1030,7 +1035,7 @@ func (s *analyticsService) GetBotUtilization(ctx context.Context, window time.Du
 				}
 
 				// Count crashes
-				crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+				crashes, err := s.analyticsRepo.GetJobCrashes(ctx, job.ID)
 				if err == nil {
 					stats.CrashesFound += len(crashes)
 				}
@@ -1065,7 +1070,7 @@ func (s *analyticsService) GetCampaignProgress(ctx context.Context, campaignID s
 	}
 
 	// Get campaign jobs
-	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	jobs, err := s.analyticsRepo.GetCampaignJobs(ctx, campaignID)
 	if err != nil {
 		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
 		return progress, nil
@@ -1091,7 +1096,7 @@ func (s *analyticsService) GetCampaignProgress(ctx context.Context, campaignID s
 		}
 
 		// Get coverage for this job
-		coverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, startTime, time.Now())
+		coverage, err := s.analyticsRepo.GetCoverageHistory(ctx, job.ID, startTime, time.Now())
 		if err == nil && len(coverage) > 0 {
 			totalCoverage += int64(coverage[len(coverage)-1].Edges)
 		}
@@ -1131,7 +1136,7 @@ func (s *analyticsService) GetCampaignSummary(ctx context.Context, campaignID st
 	}
 
 	// Get campaign jobs
-	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	jobs, err := s.analyticsRepo.GetCampaignJobs(ctx, campaignID)
 	if err != nil {
 		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
 		return summary, nil
@@ -1149,14 +1154,14 @@ func (s *analyticsService) GetCampaignSummary(ctx context.Context, campaignID st
 		}
 
 		// Get coverage and crashes
-		coverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, summary.StartTime, time.Now())
+		coverage, err := s.analyticsRepo.GetCoverageHistory(ctx, job.ID, summary.StartTime, time.Now())
 		if err == nil && len(coverage) > 0 {
 			lastCov := coverage[len(coverage)-1]
 			summary.TotalCoverage += int64(lastCov.Edges)
 			summary.ExecutionCount += lastCov.ExecCount
 		}
 
-		crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+		crashes, err := s.analyticsRepo.GetJobCrashes(ctx, job.ID)
 		if err == nil {
 			for _, c := range crashes {
 				if c.IsUnique {
@@ -1199,7 +1204,7 @@ func (s *analyticsService) GetCoverageComparison(ctx context.Context, campaignID
 			LastUpdated: time.Now(),
 		}
 
-		jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+		jobs, err := s.analyticsRepo.GetCampaignJobs(ctx, campaignID)
 		if err != nil {
 			comparison.Campaigns = append(comparison.Campaigns, campCov)
 			continue
@@ -1212,7 +1217,7 @@ func (s *analyticsService) GetCoverageComparison(ctx context.Context, campaignID
 		var firstTime, lastTime time.Time
 
 		for _, job := range jobs {
-			coverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, startTime, endTime)
+			coverage, err := s.analyticsRepo.GetCoverageHistory(ctx, job.ID, startTime, endTime)
 			if err == nil && len(coverage) > 0 {
 				for _, cov := range coverage {
 					campCov.TotalCoverage += int64(cov.Edges)
@@ -1284,14 +1289,14 @@ func (s *analyticsService) GetCrashDistribution(ctx context.Context, campaignID 
 	}
 
 	// Get campaign jobs
-	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	jobs, err := s.analyticsRepo.GetCampaignJobs(ctx, campaignID)
 	if err != nil {
 		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
 		return dist, nil
 	}
 
 	for _, job := range jobs {
-		crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+		crashes, err := s.analyticsRepo.GetJobCrashes(ctx, job.ID)
 		if err != nil {
 			continue
 		}
@@ -1333,14 +1338,14 @@ func (s *analyticsService) GetTopCrashGroups(ctx context.Context, campaignID str
 	groups := make(map[string]*CrashGroupStats)
 
 	// Get campaign jobs
-	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	jobs, err := s.analyticsRepo.GetCampaignJobs(ctx, campaignID)
 	if err != nil {
 		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
 		return make([]*CrashGroupStats, 0), nil
 	}
 
 	for _, job := range jobs {
-		crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+		crashes, err := s.analyticsRepo.GetJobCrashes(ctx, job.ID)
 		if err != nil {
 			continue
 		}
@@ -1409,7 +1414,7 @@ func (s *analyticsService) GetJobThroughput(ctx context.Context, window time.Dur
 	startTime := endTime.Add(-window)
 
 	// Get all jobs
-	allJobs, err := s.store.ListJobs()
+	allJobs, err := s.jobRepo.ListAll(ctx)
 	if err != nil {
 		s.logger.WithError(err).Warn("Failed to list jobs for throughput")
 		return throughput, nil
@@ -1473,7 +1478,7 @@ func (s *analyticsService) GetRealtimeMetrics(ctx context.Context, campaignID st
 	}
 
 	// Get campaign jobs
-	jobs, err := s.store.GetCampaignJobs(ctx, campaignID)
+	jobs, err := s.analyticsRepo.GetCampaignJobs(ctx, campaignID)
 	if err != nil {
 		s.logger.WithError(err).WithField("campaign_id", campaignID).Warn("Failed to get campaign jobs")
 		return metrics, nil
@@ -1491,7 +1496,7 @@ func (s *analyticsService) GetRealtimeMetrics(ctx context.Context, campaignID st
 		}
 
 		// Get recent coverage
-		coverage, err := s.store.GetJobCoverageHistory(ctx, job.ID, startTime, endTime)
+		coverage, err := s.analyticsRepo.GetCoverageHistory(ctx, job.ID, startTime, endTime)
 		if err == nil && len(coverage) > 0 {
 			lastCov := coverage[len(coverage)-1]
 			metrics.CurrentCoverage += int64(lastCov.Edges)
@@ -1505,7 +1510,7 @@ func (s *analyticsService) GetRealtimeMetrics(ctx context.Context, campaignID st
 		}
 
 		// Get recent crashes
-		crashes, err := s.store.GetJobCrashes(ctx, job.ID)
+		crashes, err := s.analyticsRepo.GetJobCrashes(ctx, job.ID)
 		if err == nil {
 			for _, c := range crashes {
 				if c.Timestamp.After(startTime) {

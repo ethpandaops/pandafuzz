@@ -241,16 +241,50 @@ func TestMultipleBots(t *testing.T) {
 
 // TestBotReconnection tests bot reconnection after network failure
 func TestBotReconnection(t *testing.T) {
-	// TODO: This test needs to be redesigned. Issues:
-	// 1. The RetryClient uses infinite retries with exponential backoff, causing the test
-	//    to hang for a long time when the server is down
-	// 2. Creating a new server while the old one may still be releasing the port causes
-	//    binding conflicts
-	// 3. Proper reconnection testing requires:
-	//    - A way to configure shorter retry timeouts for testing
-	//    - Graceful server restart that waits for port release
-	//    - Or using different ports for the restarted server
-	t.Skip("Test needs redesign for reliable reconnection testing")
+	env := SetupTestEnvironment(t)
+
+	// Start master server
+	err := env.StartMaster()
+	require.NoError(t, err)
+
+	config := *env.botConfig
+	config.Timeouts.HeartbeatInterval = 200 * time.Millisecond
+	config.Timeouts.MasterCommunication = 200 * time.Millisecond
+	config.Retry.Communication = common.RetryPolicy{
+		MaxRetries:   2,
+		InitialDelay: 50 * time.Millisecond,
+		MaxDelay:     100 * time.Millisecond,
+		Multiplier:   1.0,
+		Jitter:       false,
+	}
+
+	agent, err := bot.NewAgent(&config, env.logger)
+	require.NoError(t, err)
+	require.NoError(t, agent.Start())
+	defer agent.Stop()
+
+	botID := agent.GetConfig().ID
+	AssertEventually(t, func() bool {
+		_, err := env.state.GetBot(context.Background(), botID)
+		return err == nil
+	}, 5*time.Second, "Bot should register before restart")
+
+	botRecord, err := env.state.GetBot(context.Background(), botID)
+	require.NoError(t, err)
+	lastSeen := botRecord.LastSeen
+
+	require.NoError(t, env.server.Stop())
+	require.NoError(t, waitForPortRelease(env.masterConfig.Server.Host, env.masterConfig.Server.Port, 5*time.Second))
+	require.NoError(t, env.server.Start())
+	require.NoError(t, env.WaitForMaster())
+
+	AssertEventually(t, func() bool {
+		botRecord, err := env.state.GetBot(context.Background(), botID)
+		if err != nil {
+			return false
+		}
+		return botRecord.LastSeen.After(lastSeen)
+	}, 5*time.Second, "Bot should resume heartbeats after restart")
 }
 
 // TestAPIEndpoints tests the master API endpoints directly

@@ -95,8 +95,13 @@ All endpoints include:
 
 ## Authentication
 
-PandaFuzz operates behind a VPN and does not require additional authentication. All requests are trusted within the VPN environment.
+Authentication is required by default. Use either:
+
+- `Authorization: Bearer <jwt>` for JWT auth
+- `X-API-Key: <key>` for API key auth
+
+For local development without auth, set `security.allow_insecure: true` explicitly in the master config.
 
 ## Rate Limiting
 
-No rate limiting is enforced as the system operates in a trusted environment.
+Rate limiting is configurable via `server.rate_limit_rps` and `server.rate_limit_burst`.

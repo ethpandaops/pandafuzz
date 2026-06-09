@@ -1,0 +1,12 @@
+./analytics.go
+./batch.go
+./bots.go
+./campaigns.go
+./corpus.go
+./crashes.go
+./events.go
+./handlers.go
+./health.go
+./job_lease.go
+./jobs.go
+./system.go

@@ -94,13 +94,15 @@ func (cs *corpusService) AddFile(ctx context.Context, file *common.CorpusFile) e
 			return common.ErrDuplicateCorpusFile
 		}
 
-		// File exists in another campaign, this is OK for cross-campaign sharing
+		// File exists in another campaign - this is a duplicate across campaigns
+		// Since the hash is globally unique in the database, we treat this as a duplicate
 		cs.logger.WithFields(logrus.Fields{
 			"file_hash":         file.Hash,
 			"source_campaign":   existing.CampaignID,
 			"target_campaign":   file.CampaignID,
 			"coverage_increase": file.NewCoverage,
-		}).Info("Sharing corpus file between campaigns")
+		}).Info("Corpus file with same hash exists in another campaign")
+		return common.ErrDuplicateCorpusFile
 	}
 
 	// Store file metadata in database
@@ -445,13 +447,7 @@ func (cs *corpusService) findCoverageIncreasingFiles(ctx context.Context, campai
 
 // getCorpusFilePath returns the storage path for a corpus file
 func (cs *corpusService) getCorpusFilePath(campaignID, hash string) string {
-	// Use content-addressed storage like ClusterFuzz
-	// Format: corpus/{campaign_id}/{hash[0:2]}/{hash}
-	if len(hash) >= 2 {
-		// Use forward slashes for S3-compatible key format
-		return fmt.Sprintf("corpus/%s/%s/%s", campaignID, hash[:2], hash)
-	}
-	return fmt.Sprintf("corpus/%s/%s", campaignID, hash)
+	return common.CorpusFilePath(campaignID, hash)
 }
 
 // CalculateFileHash calculates SHA256 hash of file content

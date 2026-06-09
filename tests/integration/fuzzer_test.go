@@ -227,7 +227,7 @@ func TestFuzzerJobExecution(t *testing.T) {
 
 	// Create job executor
 	logger := logrus.New()
-	executor := bot.NewJobExecutor(&botConfig, logger)
+	executor := bot.NewFuzzerJobExecutor(&botConfig, logger)
 
 	// Create test job with proper UUID
 	job := &common.Job{
@@ -514,10 +514,6 @@ func TestFuzzerCorpusManagement(t *testing.T) {
 	libFuzzer := adapter.NewLibFuzzer(logrus.New())
 	err = libFuzzer.Configure(config)
 	require.NoError(t, err)
-
-	// TODO: corpusDir is an unexported field - this test needs to be rewritten
-	// to use the public API for setting corpus directory
-	// libFuzzer.corpusDir = corpusDir
 
 	// Get corpus
 	corpus, err := libFuzzer.GetCorpus()

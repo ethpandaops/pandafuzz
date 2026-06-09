@@ -98,10 +98,11 @@ Run the complete test suite (unit + integration tests).
 ./scripts/run-tests.sh
 ```
 
-### 🌐 `run-e2e-tests.sh`
-Run end-to-end tests with Playwright.
+### 🌐 E2E Tests (Playwright)
+Run the end-to-end tests from the repo root.
 ```bash
-./scripts/run-e2e-tests.sh
+npm install
+npm test
 ```
 
 ### 🔌 `test-bot-connection.sh`

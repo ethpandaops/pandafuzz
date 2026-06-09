@@ -52,6 +52,11 @@ master:
 
   # Security configuration
   security:
+    enable_auth: true
+    allow_insecure: false
+    jwt_secret: ""  # Set for JWT auth or use api_keys below
+    api_keys:
+      "dev-api-key": "docker"
     enable_input_validation: true
     max_request_size: 10485760  # 10MB
     allowed_file_extensions: [".txt", ".bin", ".data", ".input"]
@@ -123,4 +128,3 @@ master:
     max_age: 7
     compress: false
     enable_trace: false
-

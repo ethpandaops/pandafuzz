@@ -63,6 +63,9 @@ type JobService interface {
 	// GetJob retrieves a job by ID
 	GetJob(ctx context.Context, jobID string) (*common.Job, error)
 
+	// UpdateJob updates an existing job
+	UpdateJob(ctx context.Context, job *common.Job) error
+
 	// ListJobs returns jobs with optional filters
 	ListJobs(ctx context.Context, filter JobFilter) ([]*common.Job, error)
 
@@ -75,11 +78,20 @@ type JobService interface {
 	// CompleteJob marks a job as completed
 	CompleteJob(ctx context.Context, jobID, botID string, success bool) error
 
-	// CancelJob cancels a job
+	// CancelJob cancels a job (updates status to cancelled)
 	CancelJob(ctx context.Context, jobID string) error
+
+	// CancelJobExecution cancels a running job and signals the executor
+	CancelJobExecution(ctx context.Context, jobID string) error
 
 	// GetJobLogs retrieves logs for a job
 	GetJobLogs(ctx context.Context, jobID string) ([]string, error)
+
+	// GetJobLogsPaginated retrieves paginated logs for a job
+	GetJobLogsPaginated(ctx context.Context, jobID string, limit, offset int) ([]string, int, error)
+
+	// StoreJobLogs stores logs for a job
+	StoreJobLogs(ctx context.Context, jobID string, logs []string) error
 
 	// GetJobCorpus retrieves corpus files for a job
 	GetJobCorpus(ctx context.Context, jobID string) ([]*common.CorpusFile, error)
@@ -96,11 +108,28 @@ type JobService interface {
 	// GetJobCrashes retrieves crashes for a job
 	GetJobCrashes(ctx context.Context, jobID string) ([]*common.CrashResult, error)
 
+	// GetJobCrashesPaginated retrieves paginated crashes for a job
+	GetJobCrashesPaginated(ctx context.Context, jobID string, limit, offset int) ([]*common.CrashResult, int, error)
+
 	// GetQueueStats retrieves queue statistics (asynq mode only)
 	GetQueueStats(ctx context.Context) (*QueueStats, error)
 
 	// SetQueue sets the queue instance (for asynq mode)
 	SetQueue(queue scheduler.Queue)
+
+	// Coverage-related methods
+
+	// GetCoverageReport retrieves the coverage report for a job
+	GetCoverageReport(ctx context.Context, jobID string) (*CoverageReport, error)
+
+	// GetCoverageFile retrieves a specific coverage file
+	GetCoverageFile(ctx context.Context, jobID string, filePath string) ([]byte, error)
+
+	// StoreCoverageFile stores a coverage file for a job
+	StoreCoverageFile(ctx context.Context, jobID string, filePath string, data []byte) error
+
+	// ListCoverageFiles lists all coverage files for a job
+	ListCoverageFiles(ctx context.Context, jobID string) ([]string, error)
 }
 
 // ResultService handles result processing
@@ -243,4 +272,19 @@ type QueueStats struct {
 	WorkersActive   int           `json:"workers_active"`
 	WorkersTotal    int           `json:"workers_total"`
 	LastProcessedAt time.Time     `json:"last_processed_at"`
+}
+
+// CoverageReport represents a coverage report for a job
+type CoverageReport struct {
+	JobID            string    `json:"job_id"`
+	Format           string    `json:"format"`            // lcov, html, json
+	TotalLines       int       `json:"total_lines"`       // Total lines in coverage
+	CoveredLines     int       `json:"covered_lines"`     // Lines covered
+	CoveragePercent  float64   `json:"coverage_percent"`  // Coverage percentage
+	TotalFunctions   int       `json:"total_functions"`   // Total functions
+	CoveredFunctions int       `json:"covered_functions"` // Functions covered
+	TotalBranches    int       `json:"total_branches"`    // Total branches
+	CoveredBranches  int       `json:"covered_branches"`  // Branches covered
+	Files            []string  `json:"files"`             // List of coverage files
+	GeneratedAt      time.Time `json:"generated_at"`      // When report was generated
 }

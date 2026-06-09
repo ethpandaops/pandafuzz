@@ -147,6 +147,7 @@ func (csc *CorpusSyncClient) downloadNewFiles(ctx context.Context) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	csc.client.applyAuthHeaders(req)
 
 	resp, err := csc.client.httpClient.Do(req)
 	if err != nil {
@@ -240,6 +241,7 @@ func (csc *CorpusSyncClient) downloadCorpusFile(ctx context.Context, file *commo
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+	csc.client.applyAuthHeaders(req)
 
 	resp, err := csc.client.httpClient.Do(req)
 	if err != nil {
@@ -360,18 +362,12 @@ func (csc *CorpusSyncClient) uploadPendingFiles(ctx context.Context) {
 
 // uploadCorpusFile uploads a single corpus file
 func (csc *CorpusSyncClient) uploadCorpusFile(ctx context.Context, file *common.CorpusFile) error {
-	// Read file content
+	// Note: Currently uploading only metadata, not file content.
+	// File content upload via multipart form will be added when needed.
 	filePath := filepath.Join(csc.syncDir, file.Filename)
-	// TODO: Use content for multipart form upload
-	// content, err := os.ReadFile(filePath)
-	// if err != nil {
-	//	return fmt.Errorf("failed to read file: %w", err)
-	// }
 	_ = filePath // Mark as used for now
 
-	// Create upload request
-	// In a real implementation, this would be a multipart form upload
-	// For now, we'll use the corpus metadata endpoint
+	// Create upload request using corpus metadata endpoint
 	reqBody, err := json.Marshal(file)
 	if err != nil {
 		return fmt.Errorf("failed to marshal corpus file: %w", err)
@@ -384,6 +380,7 @@ func (csc *CorpusSyncClient) uploadCorpusFile(ctx context.Context, file *common.
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	csc.client.applyAuthHeaders(req)
 
 	resp, err := csc.client.httpClient.Do(req)
 	if err != nil {
@@ -446,6 +443,7 @@ func (csc *CorpusSyncClient) InitializeJobCorpus(ctx context.Context, job *commo
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+	csc.client.applyAuthHeaders(req)
 
 	resp, err := csc.client.httpClient.Do(req)
 	if err != nil {
@@ -535,6 +533,7 @@ func (csc *CorpusSyncClient) downloadJobCorpusFile(ctx context.Context, campaign
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+	csc.client.applyAuthHeaders(req)
 
 	resp, err := csc.client.httpClient.Do(req)
 	if err != nil {

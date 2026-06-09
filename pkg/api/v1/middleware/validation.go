@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"encoding/json"
+	stdErrors "errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -137,7 +138,7 @@ func ValidateRequestWithConfig(config ValidationConfig) func(http.Handler) http.
 			}
 
 			// Validate request size
-			if r.ContentLength > config.MaxRequestSize {
+			if config.MaxRequestSize > 0 && r.ContentLength > config.MaxRequestSize {
 				config.Logger.WithFields(logrus.Fields{
 					"path":           r.URL.Path,
 					"content_length": r.ContentLength,
@@ -149,6 +150,10 @@ func ValidateRequestWithConfig(config ValidationConfig) func(http.Handler) http.
 					"received_bytes": r.ContentLength,
 				})
 				return
+			}
+
+			if config.MaxRequestSize > 0 {
+				r.Body = http.MaxBytesReader(w, r.Body, config.MaxRequestSize)
 			}
 
 			// Validate content type for requests with bodies
@@ -211,8 +216,14 @@ func ValidateRequestWithConfig(config ValidationConfig) func(http.Handler) http.
 // validateJSONBody validates JSON request bodies
 func (rv *RequestValidator) validateJSONBody(w http.ResponseWriter, r *http.Request) error {
 	// Read the body
-	body, err := io.ReadAll(io.LimitReader(r.Body, rv.config.MaxRequestSize))
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if stdErrors.As(err, &maxErr) {
+			rv.config.Logger.WithError(err).Warn("Request body too large")
+			errors.WriteErrorSimple(w, http.StatusRequestEntityTooLarge, "Request body too large")
+			return err
+		}
 		rv.config.Logger.WithError(err).Error("Failed to read request body")
 		errors.WriteErrorSimple(w, http.StatusBadRequest, "Failed to read request body")
 		return err

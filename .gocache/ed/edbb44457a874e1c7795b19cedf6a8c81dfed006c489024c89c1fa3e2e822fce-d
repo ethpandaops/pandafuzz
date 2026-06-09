@@ -1,0 +1,9 @@
+./analytics_adapter.go
+./bot_adapter.go
+./campaign_adapter.go
+./composite_adapter.go
+./corpus_adapter.go
+./crash_adapter.go
+./job_adapter.go
+./system_adapter.go
+./upload_utils.go

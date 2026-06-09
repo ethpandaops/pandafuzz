@@ -20,32 +20,35 @@ import (
 
 // SystemAdapter handles system management endpoints (from v3)
 type SystemAdapter struct {
-	botService service.BotService
-	jobService service.JobService
-	storage    common.Storage
-	sseManager *sse.Manager
-	version    *common.VersionInfo
-	startTime  time.Time
-	logger     logrus.FieldLogger
+	botService       service.BotService
+	jobService       service.JobService
+	resultService    service.ResultService
+	sseManager       *sse.Manager
+	version          *common.VersionInfo
+	startTime        time.Time
+	logger           logrus.FieldLogger
+	maxCrashFileSize int64
 }
 
 // NewSystemAdapter creates a new system adapter
 func NewSystemAdapter(
 	botService service.BotService,
 	jobService service.JobService,
-	storage common.Storage,
+	resultService service.ResultService,
 	sseManager *sse.Manager,
 	version *common.VersionInfo,
 	logger logrus.FieldLogger,
+	maxCrashFileSize int64,
 ) *SystemAdapter {
 	return &SystemAdapter{
-		botService: botService,
-		jobService: jobService,
-		storage:    storage,
-		sseManager: sseManager,
-		version:    version,
-		startTime:  time.Now(),
-		logger:     logger.WithField("component", "system_adapter"),
+		botService:       botService,
+		jobService:       jobService,
+		resultService:    resultService,
+		sseManager:       sseManager,
+		version:          version,
+		startTime:        time.Now(),
+		logger:           logger.WithField("component", "system_adapter"),
+		maxCrashFileSize: maxCrashFileSize,
 	}
 }
 
@@ -712,6 +715,10 @@ func (a *SystemAdapter) SubmitCrashResult(w http.ResponseWriter, r *http.Request
 	} else if req.InputData != "" {
 		inputData = []byte(req.InputData)
 	}
+	if a.maxCrashFileSize > 0 && int64(len(inputData)) > a.maxCrashFileSize {
+		a.writeError(w, http.StatusRequestEntityTooLarge, "Crash input exceeds size limit")
+		return
+	}
 
 	// Create crash result to store
 	crash := &common.CrashResult{
@@ -730,11 +737,11 @@ func (a *SystemAdapter) SubmitCrashResult(w http.ResponseWriter, r *http.Request
 		Timestamp:  time.Now(),
 	}
 
-	// Store the crash in storage
+	// Process crash through result service (handles storage, deduplication, and input)
 	ctx := r.Context()
 	isUnique := true
-	if a.storage != nil {
-		if err := a.storage.CreateCrash(ctx, crash); err != nil {
+	if a.resultService != nil {
+		if err := a.resultService.ProcessCrashResult(ctx, crash); err != nil {
 			if errors.Is(err, common.ErrDuplicateCrash) {
 				// Duplicate crash is not an error - just mark as not unique
 				isUnique = false
@@ -746,33 +753,18 @@ func (a *SystemAdapter) SubmitCrashResult(w http.ResponseWriter, r *http.Request
 				a.logger.WithError(err).WithFields(logrus.Fields{
 					"job_id":   req.JobID,
 					"crash_id": crashID,
-				}).Error("Failed to store crash")
-				a.writeError(w, http.StatusInternalServerError, "Failed to store crash")
+				}).Error("Failed to process crash")
+				a.writeError(w, http.StatusInternalServerError, "Failed to process crash")
 				return
 			}
 		} else {
+			// ResultService.ProcessCrashResult handles both crash and input storage
 			a.logger.WithFields(logrus.Fields{
 				"job_id":   req.JobID,
 				"bot_id":   req.BotID,
 				"crash_id": crashID,
 				"hash":     req.Hash,
-			}).Info("Crash stored in database")
-
-			// Store crash input data separately if available
-			if len(crash.Input) > 0 {
-				if err := a.storage.StoreCrashInput(ctx, crashID, crash.Input); err != nil {
-					a.logger.WithError(err).WithFields(logrus.Fields{
-						"crash_id":   crashID,
-						"input_size": len(crash.Input),
-					}).Warn("Failed to store crash input (crash metadata was saved)")
-					// Don't fail the request - crash metadata is already stored
-				} else {
-					a.logger.WithFields(logrus.Fields{
-						"crash_id":   crashID,
-						"input_size": len(crash.Input),
-					}).Debug("Crash input stored successfully")
-				}
-			}
+			}).Info("Crash processed and stored")
 		}
 	}
 

@@ -1,76 +1,22 @@
 # PandaFuzz Project Structure
 
-This document describes the organization of the PandaFuzz codebase after the cleanup and reorganization.
+This document describes the current PandaFuzz layout. For status and roadmap, see `docs/issue-tracker/`.
 
 ## Directory Structure
 
 ```
 pandafuzz/
-├── ai_plans/               # AI-generated implementation plans
-│   ├── archived/          # Completed implementation plans
-│   └── *.md              # Active implementation plans
-│
-├── cmd/                   # Application entry points
-│   ├── bot/              # Fuzzing bot executable
-│   └── master/           # Master server executable
-│
-├── configs/               # Example configuration files
-│   ├── bot.example.yaml  # Example bot configuration
-│   └── bot.docker.example.yaml  # Example Docker configuration
-│
-├── data/                  # Runtime data (gitignored)
-│   ├── jobs/             # Job artifacts and results
-│   ├── campaigns/        # Campaign data
-│   └── *.db             # SQLite databases
-│
-├── docs/                  # Documentation
-│   ├── api.md           # API reference
-│   ├── architecture.md   # System architecture
-│   ├── development.md    # Development guide
-│   ├── project-structure.md  # This file
-│   └── archive/         # Historical documentation
-│
-├── pkg/                   # Go packages
-│   ├── analysis/         # Crash analysis
-│   ├── api/             # REST API definitions
-│   ├── auth/            # Authentication
-│   ├── bot/             # Bot implementation
-│   ├── config/          # Configuration management
-│   ├── db/              # Database abstraction
-│   ├── errors/          # Error handling
-│   ├── fuzzer/          # Fuzzer interfaces
-│   ├── httputil/        # HTTP utilities
-│   ├── job/             # Job management
-│   ├── master/          # Master server
-│   ├── monitoring/      # Metrics collection
-│   ├── queue/           # Job queue
-│   ├── retry/           # Retry logic
-│   ├── storage/         # File storage
-│   └── types/           # Shared types
-│
-├── scripts/               # Shell scripts
-│   ├── create_job.sh    # Unified job creation script
-│   ├── run-e2e-tests.sh # End-to-end test runner
-│   ├── run_tests.sh     # Unit test runner
-│   └── test_crash_report.sh  # Crash reporting test
-│
-├── test-resources/        # Consolidated test resources
-│   ├── test-data/       # Test data
-│   │   ├── seeds/       # Fuzzing seed inputs
-│   │   └── corpus/      # Test corpus (generated)
-│   ├── test-targets/    # Test programs
-│   │   ├── crashers/    # Programs that crash
-│   │   ├── fuzzers/     # Fuzzer test harnesses
-│   │   └── vulnerable/  # Vulnerable test programs
-│   └── test-corpus/     # Sample corpus files
-│
-├── tests/                 # Integration tests
-│   └── e2e/             # End-to-end tests
-│
-└── web/                   # Web UI
-    ├── public/          # Static assets
-    ├── src/             # React source code
-    └── package.json     # Node.js dependencies
+├── cmd/                # Go entrypoints (master, bot)
+├── pkg/                # Go packages (api, bot, common, domain, service, storage, etc.)
+├── web/                # React dashboard
+├── configs/            # Example YAML configs
+├── docs/               # Documentation and issue tracker
+├── scripts/            # Utilities and tooling scripts
+├── tests/              # Unit, integration, and e2e tests
+├── test-resources/     # Test programs, seeds, and fixtures
+├── migrations/         # Database migrations
+├── docker/             # Docker assets
+└── ...
 ```
 
 ## File Organization Guidelines
@@ -80,90 +26,59 @@ pandafuzz/
 1. **Go Code**
    - Application logic: `pkg/<package>/`
    - Entry points: `cmd/<app>/`
-   - Shared types: `pkg/types/`
 
-2. **Test Files**
-   - Unit tests: Same directory as code (`*_test.go`)
-   - Integration tests: `tests/`
-   - Test programs: `test-resources/test-targets/<category>/`
-   - Test data: `test-resources/test-data/`
-   - Test corpus: `test-resources/test-corpus/`
+2. **Tests**
+   - Unit tests: alongside code (`*_test.go`) or `tests/unit/`
+   - Integration tests: `tests/integration/`
+   - E2E tests (Playwright): `tests/e2e/`
 
 3. **Scripts**
-   - All shell scripts: `scripts/`
-   - Name clearly with `.sh` extension
+   - Shell scripts and helpers: `scripts/`
 
 4. **Documentation**
-   - User documentation: `docs/`
-   - API documentation: `docs/api.md`
-   - Old/outdated docs: `docs/archive/`
+   - Docs: `docs/`
+   - Issue tracker: `docs/issue-tracker/`
 
 5. **Configuration**
-   - Example configs: `configs/*.example.yaml`
-   - Runtime configs: Root directory (gitignored)
-
-## Naming Conventions
-
-### Files
-- Go files: `lowercase_with_underscores.go`
-- Test files: `*_test.go`
-- Scripts: `descriptive-name.sh`
-- Documentation: `UPPERCASE.md` or `lowercase.md`
-
-### Packages
-- Use singular nouns: `storage` not `storages`
-- Be descriptive: `monitoring` not `mon`
-- Avoid generic names: `fuzzer` not `utils`
+   - Examples: `configs/`
+   - Local configs: repo root (gitignored)
 
 ## Development Workflow
 
-### Adding New Features
-1. Create feature branch from `master`
-2. Add code in appropriate `pkg/` subdirectory
-3. Add tests in same directory
-4. Update documentation if needed
-5. Run tests: `go test ./...`
-6. Submit PR with clear description
+1. Create a branch from `master`.
+2. Add code in the appropriate `pkg/` package or `cmd/` entrypoint.
+3. Add or update tests.
+4. Update docs/configs if behavior changes.
+5. Run tests and linting.
 
-### Running Tests
+## Running Tests
+
 ```bash
-# Unit tests
+# Go tests
 go test ./...
 
-# With coverage
-go test -cover ./...
-
 # Integration tests
-./scripts/run-e2e-tests.sh
+go test ./tests/integration/...
+
+# E2E tests (Playwright)
+npm install
+npm test
 ```
 
-### Building
+## Building
+
 ```bash
 # Build master
-go build -o master ./cmd/master
+make build-master
 
 # Build bot
-go build -o bot ./cmd/bot
+make build-bot
 
-# Build with Docker
-docker-compose build
+# Build web UI
+make build-web
 ```
 
-## Important Notes
+## Notes
 
-1. **Never commit**:
-   - Compiled binaries (covered by .gitignore)
-   - Actual config files (only examples)
-   - Database files
-   - Crash artifacts
-
-2. **Always include**:
-   - Tests for new features
-   - Documentation updates
-   - Example configs for new options
-
-3. **Before committing**:
-   - Run `go mod tidy`
-   - Run `go fmt ./...`
-   - Run tests
-   - Update relevant documentation
+- Use `docs/issue-tracker/` for the current state, issues, and changes.
+- Keep example configs in `configs/` in sync with defaults and breaking changes.

@@ -14,12 +14,11 @@ info:
     - Real-time analytics and monitoring
     
     ## Authentication
-    The API supports both JWT Bearer tokens and API keys for authentication.
+    The API supports JWT Bearer tokens and API keys. Authentication is required
+    unless `allow_insecure` is explicitly enabled in configuration.
     
     ## Rate Limiting
-    API endpoints are rate-limited based on authentication method:
-    - Authenticated requests: 1000 requests per hour
-    - Unauthenticated requests: 100 requests per hour
+    Rate limiting is configurable via server settings.
     
     ## Pagination
     List endpoints support both offset-based and cursor-based pagination.
@@ -3572,7 +3571,7 @@ components:
         hash:
           type: string
           description: SHA256 hash of the file content
-          example: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         uploaded_at:
           type: string
           format: date-time

@@ -11,9 +11,11 @@ import (
 
 // resultService implements ResultService interface
 type resultService struct {
-	state  StateStore
-	config *common.MasterConfig
-	logger *logrus.Logger
+	resultRepo ResultRepository
+	crashRepo  CrashRepository
+	jobRepo    JobRepository
+	config     *common.MasterConfig
+	logger     *logrus.Logger
 
 	// Lifecycle management
 	ctx    context.Context
@@ -23,16 +25,20 @@ type resultService struct {
 // Compile-time interface compliance check
 var _ ResultService = (*resultService)(nil)
 
-// NewResultService creates a new result service
+// NewResultService creates a new result service using repository interfaces.
 func NewResultService(
-	state StateStore,
+	resultRepo ResultRepository,
+	crashRepo CrashRepository,
+	jobRepo JobRepository,
 	config *common.MasterConfig,
 	logger *logrus.Logger,
 ) ResultService {
 	return &resultService{
-		state:  state,
-		config: config,
-		logger: logger,
+		resultRepo: resultRepo,
+		crashRepo:  crashRepo,
+		jobRepo:    jobRepo,
+		config:     config,
+		logger:     logger,
 	}
 }
 
@@ -48,8 +54,8 @@ func (s *resultService) ProcessCrashResult(ctx context.Context, crash *common.Cr
 		crash.Timestamp = time.Now()
 	}
 
-	// Process crash result
-	if err := s.state.ProcessCrashResultWithRetry(crash); err != nil {
+	// Process crash result using repository
+	if err := s.resultRepo.ProcessCrash(ctx, crash); err != nil {
 		return errors.Wrap(errors.ErrorTypeDatabase, "process_crash", "Failed to process crash result", err)
 	}
 
@@ -77,8 +83,8 @@ func (s *resultService) ProcessCoverageResult(ctx context.Context, coverage *com
 		coverage.Timestamp = time.Now()
 	}
 
-	// Process coverage result
-	if err := s.state.ProcessCoverageResultWithRetry(coverage); err != nil {
+	// Process coverage result using repository
+	if err := s.resultRepo.ProcessCoverage(ctx, coverage); err != nil {
 		return errors.Wrap(errors.ErrorTypeDatabase, "process_coverage", "Failed to process coverage result", err)
 	}
 
@@ -105,8 +111,8 @@ func (s *resultService) ProcessCorpusUpdate(ctx context.Context, corpus *common.
 		corpus.Timestamp = time.Now()
 	}
 
-	// Process corpus update
-	if err := s.state.ProcessCorpusUpdateWithRetry(corpus); err != nil {
+	// Process corpus update using repository
+	if err := s.resultRepo.ProcessCorpusUpdate(ctx, corpus); err != nil {
 		return errors.Wrap(errors.ErrorTypeDatabase, "process_corpus", "Failed to process corpus update", err)
 	}
 
@@ -127,7 +133,7 @@ func (s *resultService) GetCrashResults(ctx context.Context, jobID string) ([]*c
 		return nil, errors.NewValidationError("get_crash_results", "Job ID is required")
 	}
 
-	crashes, err := s.state.GetJobCrashes(ctx, jobID)
+	crashes, err := s.crashRepo.ListByJob(ctx, jobID)
 	if err != nil {
 		return nil, errors.Wrap(errors.ErrorTypeDatabase, "get_crash_results", "Failed to retrieve crash results", err)
 	}
@@ -145,7 +151,7 @@ func (s *resultService) GetCoverageHistory(ctx context.Context, jobID string) ([
 	startTime := time.Time{}                  // Zero time (earliest possible)
 	endTime := time.Now().Add(24 * time.Hour) // Include future entries just in case
 
-	coverage, err := s.state.GetJobCoverageHistory(ctx, jobID, startTime, endTime)
+	coverage, err := s.jobRepo.GetCoverageHistory(ctx, jobID, startTime, endTime)
 	if err != nil {
 		return nil, errors.Wrap(errors.ErrorTypeDatabase, "get_coverage_history", "Failed to retrieve coverage history", err)
 	}
@@ -169,9 +175,6 @@ func (s *resultService) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
-
-	// Clean up any resources
-	// Currently result service doesn't have resources to clean up
 
 	s.logger.Info("Result service stopped")
 	return nil

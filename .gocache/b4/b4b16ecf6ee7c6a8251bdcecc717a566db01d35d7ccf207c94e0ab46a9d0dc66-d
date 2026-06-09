@@ -1,0 +1,9 @@
+# test log
+getenv TMPDIR
+stat /tmp/TestExecutorCleanupAfterJobCompletion2360417063/001/test-job-123
+stat /tmp/TestExecutorCleanupAfterJobCompletion2360417063/001
+open /tmp/TestExecutorCleanupAfterJobCompletion2360417063/001/test-job-123/job.log
+stat /tmp/TestExecutorCleanupAfterJobCompletion2360417063/001/test-job-123/target_binary
+open /tmp
+getenv TMPDIR
+open /tmp

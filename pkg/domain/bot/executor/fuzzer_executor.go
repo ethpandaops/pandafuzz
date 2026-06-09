@@ -23,13 +23,14 @@ import (
 // FuzzerExecutor implements the Executor interface for fuzzing jobs
 type FuzzerExecutor struct {
 	*BaseExecutor
-	fuzzerFactory  fuzzertypes.FuzzerFactory
-	registry       BotRegistry
-	mu             sync.RWMutex
-	activeFuzzers  map[string]fuzzertypes.Fuzzer
-	log            logrus.FieldLogger
-	storageBackend backend.StorageBackend // Optional storage backend for coverage collection
-	apiClient      bot.APIClient          // Optional API client for reporting to master
+	fuzzerFactory   fuzzertypes.FuzzerFactory
+	registry        BotRegistry
+	mu              sync.RWMutex
+	activeFuzzers   map[string]fuzzertypes.Fuzzer
+	log             logrus.FieldLogger
+	storageBackend  backend.StorageBackend // Optional storage backend for coverage collection
+	apiClient       bot.APIClient          // Optional API client for reporting to master
+	binaryValidator *bot.BinaryValidator   // Validates target binaries before execution
 }
 
 // BotRegistry interface for bot management operations
@@ -75,14 +76,19 @@ func NewFuzzerExecutorWithStorage(
 		return nil, errors.New("bot registry cannot be nil")
 	}
 
+	// Create binary validator for security checks
+	logger := logrus.StandardLogger()
+	binaryValidator := bot.NewBinaryValidator(logger)
+
 	return &FuzzerExecutor{
-		BaseExecutor:   NewBaseExecutor(config, eventPub, hooks),
-		fuzzerFactory:  fuzzerFactory,
-		registry:       registry,
-		activeFuzzers:  make(map[string]fuzzertypes.Fuzzer),
-		log:            logrus.WithField("component", "fuzzer_executor"),
-		storageBackend: storageBackend,
-		apiClient:      apiClient,
+		BaseExecutor:    NewBaseExecutor(config, eventPub, hooks),
+		fuzzerFactory:   fuzzerFactory,
+		registry:        registry,
+		activeFuzzers:   make(map[string]fuzzertypes.Fuzzer),
+		log:             logrus.WithField("component", "fuzzer_executor"),
+		storageBackend:  storageBackend,
+		apiClient:       apiClient,
+		binaryValidator: binaryValidator,
 	}, nil
 }
 
@@ -498,6 +504,15 @@ func (fe *FuzzerExecutor) ValidateJob(job *jobtypes.Job) error {
 		return NewExecutorError("invalid_job", "output path is required", false)
 	}
 
+	// Security: Validate target binary path and executable
+	// This checks for path traversal, existence, and executable permissions
+	if fe.binaryValidator != nil {
+		if err := fe.binaryValidator.ValidateFuzzerBinary(job.TargetBinary, job.FuzzerType); err != nil {
+			return NewExecutorError("invalid_binary",
+				fmt.Sprintf("target binary validation failed: %v", err), false)
+		}
+	}
+
 	// Validate job status
 	if !job.Status.CanTransitionTo(jobtypes.StatusRunning) {
 		return NewExecutorError("invalid_status",
@@ -611,10 +626,9 @@ func (fe *FuzzerExecutor) collectCoverageBasic(ctx context.Context, execCtx *Exe
 	}
 
 	// Create coverage repository
-	// We need a logger, use a simple approach for now
 	coverageRepo, err := coverage.NewFilesystemCoverageRepository(
 		filepath.Join("/tmp", "pandafuzz", "coverage"),
-		nil, // TODO: Pass proper logger
+		fe.log,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create coverage repository: %w", err)

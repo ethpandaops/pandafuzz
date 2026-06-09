@@ -136,8 +136,39 @@ func (a *StateStoreAdapter) UpdateBotHeartbeat(ctx context.Context, botID string
 }
 
 func (a *StateStoreAdapter) GetAvailableBotWithCapabilities(ctx context.Context, requiredCapabilities []string) (*common.Bot, error) {
-	// This would require a more complex query implementation
-	return nil, errors.New(errors.ErrorTypeMethodNotFound, "get_available_bot_with_capabilities", "Method not implemented")
+	// Get all bots and filter by capabilities
+	bots, err := a.PS.ListBots(ctx)
+	if err != nil {
+		return nil, common.NewStorageError("get_available_bot", err)
+	}
+
+	for _, bot := range bots {
+		if bot.Status != common.BotStatusIdle {
+			continue
+		}
+
+		// Check if bot has all required capabilities
+		hasAllCaps := true
+		for _, reqCap := range requiredCapabilities {
+			found := false
+			for _, botCap := range bot.Capabilities {
+				if botCap == reqCap {
+					found = true
+					break
+				}
+			}
+			if !found {
+				hasAllCaps = false
+				break
+			}
+		}
+
+		if hasAllCaps {
+			return bot, nil
+		}
+	}
+
+	return nil, errors.NewNotFoundError("get_available_bot", "bot with required capabilities")
 }
 
 func (a *StateStoreAdapter) BatchUpdateBotStatus(ctx context.Context, botIDs []string, status common.BotStatus) error {
@@ -163,8 +194,45 @@ func (a *StateStoreAdapter) BatchUpdateBotStatus(ctx context.Context, botIDs []s
 
 // Optimized job operations
 func (a *StateStoreAdapter) ListJobsFiltered(ctx context.Context, status *common.JobStatus, fuzzer *string, limit, page int) ([]*common.Job, error) {
-	// This would require implementing filtered queries
-	return nil, errors.New(errors.ErrorTypeMethodNotFound, "list_jobs_filtered", "Method not implemented")
+	// Get all jobs and filter in-memory
+	allJobs, err := a.PS.ListJobs(ctx)
+	if err != nil {
+		return nil, common.NewStorageError("list_jobs_filtered", err)
+	}
+
+	// Apply filters
+	var filteredJobs []*common.Job
+	for _, job := range allJobs {
+		// Filter by status if specified
+		if status != nil && job.Status != *status {
+			continue
+		}
+		// Filter by fuzzer if specified
+		if fuzzer != nil && job.Fuzzer != *fuzzer {
+			continue
+		}
+		filteredJobs = append(filteredJobs, job)
+	}
+
+	// Apply pagination
+	if limit <= 0 {
+		limit = 50 // Default limit
+	}
+	if page < 1 {
+		page = 1
+	}
+
+	offset := (page - 1) * limit
+	if offset >= len(filteredJobs) {
+		return []*common.Job{}, nil
+	}
+
+	end := offset + limit
+	if end > len(filteredJobs) {
+		end = len(filteredJobs)
+	}
+
+	return filteredJobs[offset:end], nil
 }
 
 func (a *StateStoreAdapter) AtomicJobAssignmentOptimized(ctx context.Context, botID string) (*common.Job, error) {
@@ -373,4 +441,102 @@ func (a *StateStoreAdapter) GetCrashesInTimeRange(ctx context.Context, startTime
 
 func (a *StateStoreAdapter) GetJobCoverageHistory(ctx context.Context, jobID string, startTime, endTime time.Time) ([]*common.CoverageResult, error) {
 	return a.PS.GetJobCoverageHistory(ctx, jobID, startTime, endTime)
+}
+
+// Context-based job operations for new service methods
+
+// UpdateJob updates an existing job
+func (a *StateStoreAdapter) UpdateJob(ctx context.Context, job *common.Job) error {
+	if job == nil {
+		return errors.NewValidationError("update_job", "job cannot be nil")
+	}
+
+	// Use the underlying storage to save the job
+	return a.PS.SaveJobWithRetry(ctx, job)
+}
+
+// GetJobLogs retrieves paginated logs for a job
+func (a *StateStoreAdapter) GetJobLogs(ctx context.Context, jobID string, limit, offset int) ([]string, int, error) {
+	// Check if Storage interface is available
+	if a.PS.Storage != nil {
+		logs, total, err := a.PS.Storage.GetJobLogs(ctx, jobID, limit, offset)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		// Convert JobLog to string slice
+		logStrings := make([]string, len(logs))
+		for i, log := range logs {
+			logStrings[i] = log.Message
+		}
+		return logStrings, total, nil
+	}
+
+	return nil, 0, errors.New(errors.ErrorTypeMethodNotFound, "get_job_logs", "Storage not available")
+}
+
+// StoreJobLogs stores logs for a job
+func (a *StateStoreAdapter) StoreJobLogs(ctx context.Context, jobID string, logs []string) error {
+	// Check if Storage interface is available
+	if a.PS.Storage != nil {
+		// Convert string slice to JobLog slice
+		jobLogs := make([]*common.JobLog, len(logs))
+		now := time.Now()
+		for i, msg := range logs {
+			jobLogs[i] = &common.JobLog{
+				JobID:     jobID,
+				Level:     "info",
+				Source:    "bot",
+				Message:   msg,
+				Timestamp: now,
+			}
+		}
+		return a.PS.Storage.StoreJobLogs(ctx, jobID, jobLogs)
+	}
+
+	return errors.New(errors.ErrorTypeMethodNotFound, "store_job_logs", "Storage not available")
+}
+
+// ListCrashes retrieves paginated crashes for a job
+func (a *StateStoreAdapter) ListCrashes(ctx context.Context, jobID string, limit, offset int) ([]*common.CrashResult, error) {
+	// Check if Storage interface is available
+	if a.PS.Storage != nil {
+		return a.PS.Storage.ListCrashes(ctx, jobID, limit, offset)
+	}
+
+	return nil, errors.New(errors.ErrorTypeMethodNotFound, "list_crashes", "Storage not available")
+}
+
+// GetCoverageData retrieves aggregated coverage data for a job
+func (a *StateStoreAdapter) GetCoverageData(ctx context.Context, jobID string) (*common.CoverageData, error) {
+	// Get the latest coverage result and convert to CoverageData
+	history, err := a.PS.GetJobCoverageHistory(ctx, jobID, time.Time{}, time.Now())
+	if err != nil {
+		return nil, err
+	}
+
+	if len(history) == 0 {
+		// Return empty coverage data
+		return &common.CoverageData{
+			JobID:     jobID,
+			UpdatedAt: time.Now(),
+		}, nil
+	}
+
+	// Get the latest coverage result
+	latest := history[len(history)-1]
+
+	// Convert CoverageResult to CoverageData
+	// Note: CoverageResult has Edges, CoverageData has lines/functions/branches
+	// This is a simplified mapping
+	return &common.CoverageData{
+		JobID:            jobID,
+		TotalLines:       latest.Edges, // Approximate mapping
+		CoveredLines:     latest.NewEdges,
+		TotalFunctions:   0, // Not available in CoverageResult
+		CoveredFunctions: 0,
+		TotalBranches:    0,
+		CoveredBranches:  0,
+		UpdatedAt:        latest.Timestamp,
+	}, nil
 }

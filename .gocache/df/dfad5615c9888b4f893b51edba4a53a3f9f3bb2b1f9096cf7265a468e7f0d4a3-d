@@ -1,0 +1,9 @@
+./block_amd64.go
+./md5-digest_amd64.go
+./md5-server_amd64.go
+./md5-util_amd64.go
+./md5.go
+./md5block_amd64.go
+./block16_amd64.s
+./block8_amd64.s
+./md5block_amd64.s

@@ -32,6 +32,13 @@ type StateStore interface {
 	AtomicJobAssignmentOptimized(ctx context.Context, botID string) (*common.Job, error)
 	CompleteJobOptimized(ctx context.Context, jobID, botID string, success bool) error
 
+	// Context-based job operations (for new service methods)
+	UpdateJob(ctx context.Context, job *common.Job) error
+	GetJobLogs(ctx context.Context, jobID string, limit, offset int) ([]string, int, error)
+	StoreJobLogs(ctx context.Context, jobID string, logs []string) error
+	ListCrashes(ctx context.Context, jobID string, limit, offset int) ([]*common.CrashResult, error)
+	GetCoverageData(ctx context.Context, jobID string) (*common.CoverageData, error)
+
 	// Result processing
 	ProcessCrashResultWithRetry(crash *common.CrashResult) error
 	ProcessCoverageResultWithRetry(coverage *common.CoverageResult) error

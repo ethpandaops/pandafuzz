@@ -53,24 +53,6 @@ func (h *Handlers) HandleListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// TODO: Add these parameters to OpenAPI spec
-	// if sortBy := r.URL.Query().Get("sort_by"); sortBy != "" {
-	// 	params.SortBy = &sortBy
-	// }
-
-	// if sortOrder := r.URL.Query().Get("sort_order"); sortOrder != "" {
-	// 	sortOrderVal := generated.SortOrder(sortOrder)
-	// 	params.SortOrder = &sortOrderVal
-	// }
-
-	// if since := r.URL.Query().Get("since"); since != "" {
-	// 	params.Since = &since
-	// }
-
-	// if until := r.URL.Query().Get("until"); until != "" {
-	// 	params.Until = &until
-	// }
-
 	// Delegate to adapter
 	h.adapter.ListJobs(w, r, params)
 }
@@ -86,31 +68,6 @@ func (h *Handlers) HandleGetJob(w http.ResponseWriter, r *http.Request) {
 
 	// Parse query parameters
 	params := generated.GetJobParams{}
-
-	// TODO: Add these parameters to OpenAPI spec
-	// if includeArtifacts := r.URL.Query().Get("include_artifacts"); includeArtifacts != "" {
-	// 	if include, err := strconv.ParseBool(includeArtifacts); err == nil {
-	// 		params.IncludeArtifacts = &include
-	// 	}
-	// }
-
-	// if includeLogs := r.URL.Query().Get("include_logs"); includeLogs != "" {
-	// 	if include, err := strconv.ParseBool(includeLogs); err == nil {
-	// 		params.IncludeLogs = &include
-	// 	}
-	// }
-
-	// if includeCoverage := r.URL.Query().Get("include_coverage"); includeCoverage != "" {
-	// 	if include, err := strconv.ParseBool(includeCoverage); err == nil {
-	// 		params.IncludeCoverage = &include
-	// 	}
-	// }
-
-	// if includeMetrics := r.URL.Query().Get("include_metrics"); includeMetrics != "" {
-	// 	if include, err := strconv.ParseBool(includeMetrics); err == nil {
-	// 		params.IncludeMetrics = &include
-	// 	}
-	// }
 
 	// Delegate to adapter
 	h.adapter.GetJob(w, r, jobId, params)
@@ -135,38 +92,6 @@ func (h *Handlers) HandleGetJobLogs(w http.ResponseWriter, r *http.Request) {
 	// Parse query parameters
 	params := generated.GetJobLogsParams{}
 
-	// TODO: Add these parameters to OpenAPI spec
-	// The GetJobLogsParams likely has a different structure
-	// if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-	// 	if limit, err := strconv.Atoi(limitStr); err == nil {
-	// 		limitVal := limit
-	// 		params.Limit = &limitVal
-	// 	}
-	// }
-
-	// if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
-	// 	if offset, err := strconv.Atoi(offsetStr); err == nil {
-	// 		offsetVal := offset
-	// 		params.Offset = &offsetVal
-	// 	}
-	// }
-
-	// if level := r.URL.Query().Get("level"); level != "" {
-	// 	levelVal := generated.LogLevel(level)
-	// 	params.Level = &levelVal
-	// }
-
-	// Check if Since is actually a time.Time type
-	if since := r.URL.Query().Get("since"); since != "" {
-		// For now, just comment out as it expects time.Time, not string
-		_ = since
-		// params.Since = &since
-	}
-
-	// if until := r.URL.Query().Get("until"); until != "" {
-	// 	params.Until = &until
-	// }
-
 	if follow := r.URL.Query().Get("follow"); follow != "" {
 		if followVal, err := strconv.ParseBool(follow); err == nil {
 			params.Follow = &followVal
@@ -189,38 +114,6 @@ func (h *Handlers) HandleGetJobCoverage(w http.ResponseWriter, r *http.Request) 
 		params.Format = &formatVal
 	}
 
-	// TODO: Add these parameters to OpenAPI spec
-	// if includeFiles := r.URL.Query().Get("include_files"); includeFiles != "" {
-	// 	if include, err := strconv.ParseBool(includeFiles); err == nil {
-	// 		params.IncludeFiles = &include
-	// 	}
-	// }
-
-	// if includeFunctions := r.URL.Query().Get("include_functions"); includeFunctions != "" {
-	// 	if include, err := strconv.ParseBool(includeFunctions); err == nil {
-	// 		params.IncludeFunctions = &include
-	// 	}
-	// }
-
-	// if includeLines := r.URL.Query().Get("include_lines"); includeLines != "" {
-	// 	if include, err := strconv.ParseBool(includeLines); err == nil {
-	// 		params.IncludeLines = &include
-	// 	}
-	// }
-
-	// if includeBranches := r.URL.Query().Get("include_branches"); includeBranches != "" {
-	// 	if include, err := strconv.ParseBool(includeBranches); err == nil {
-	// 		params.IncludeBranches = &include
-	// 	}
-	// }
-
-	// if minCoverage := r.URL.Query().Get("min_coverage"); minCoverage != "" {
-	// 	if coverage, err := strconv.ParseFloat(minCoverage, 32); err == nil {
-	// 		coverageVal := float32(coverage)
-	// 		params.MinCoverage = &coverageVal
-	// 	}
-	// }
-
 	// Delegate to adapter
 	h.adapter.GetJobCoverage(w, r, jobId, params)
 }
@@ -238,13 +131,6 @@ func (h *Handlers) HandleGetJobArtifacts(w http.ResponseWriter, r *http.Request)
 		typeVal := generated.GetJobArtifactsParamsType(artifactType)
 		params.Type = &typeVal
 	}
-
-	// TODO: Add includeContent parameter to OpenAPI spec
-	// if includeContent := r.URL.Query().Get("include_content"); includeContent != "" {
-	// 	if include, err := strconv.ParseBool(includeContent); err == nil {
-	// 		params.IncludeContent = &include
-	// 	}
-	// }
 
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		if limit, err := strconv.Atoi(limitStr); err == nil {

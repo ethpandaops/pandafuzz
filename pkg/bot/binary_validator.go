@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethpandaops/pandafuzz/pkg/common"
 	"github.com/sirupsen/logrus"
 )
 
@@ -24,6 +25,11 @@ func NewBinaryValidator(logger *logrus.Logger) *BinaryValidator {
 
 // ValidateFuzzerBinary checks if a fuzzer binary is valid and properly instrumented
 func (v *BinaryValidator) ValidateFuzzerBinary(binaryPath string, fuzzerType string) error {
+	// Security: Check for path traversal attempts first
+	if common.IsPathTraversal(binaryPath) {
+		return fmt.Errorf("path traversal detected in binary path: %s", binaryPath)
+	}
+
 	// Check if file exists
 	info, err := os.Stat(binaryPath)
 	if err != nil {

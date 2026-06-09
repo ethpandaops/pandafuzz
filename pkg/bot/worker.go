@@ -26,6 +26,10 @@ type Worker struct {
 	cancel         context.CancelFunc
 	running        bool
 	resultReporter ResultReporter
+
+	// Stats tracking
+	jobsHandled int64
+	lastJobTime time.Time
 }
 
 // ResultReporter handles reporting results back to master
@@ -153,8 +157,6 @@ func (w *Worker) Start(ctx context.Context, workerCfg WorkerConfig) error {
 
 	// Register task handlers directly
 	mux.HandleFunc(queueasynq.TypeFuzzingJob, w.handleFuzzingJob)
-	mux.HandleFunc(queueasynq.TypeMinimizationJob, w.handleMinimizationJob)
-	mux.HandleFunc(queueasynq.TypeReproductionJob, w.handleReproductionJob)
 
 	// Start server in background
 	go func() {
@@ -211,12 +213,13 @@ func (w *Worker) IsRunning() bool {
 
 // GetStats returns worker statistics
 func (w *Worker) GetStats() WorkerStats {
-	// TODO: Implement stats collection
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	return WorkerStats{
 		BotID:       w.config.ID,
-		Running:     w.IsRunning(),
-		JobsHandled: 0, // TODO: Track this
-		LastJobTime: time.Time{},
+		Running:     w.running,
+		JobsHandled: int(w.jobsHandled),
+		LastJobTime: w.lastJobTime,
 	}
 }
 
@@ -345,19 +348,13 @@ func (w *Worker) handleFuzzingJob(ctx context.Context, t *asynq.Task) error {
 		}
 	}
 
+	// Update stats
+	w.mu.Lock()
+	w.jobsHandled++
+	w.lastJobTime = time.Now()
+	w.mu.Unlock()
+
 	return nil
-}
-
-func (w *Worker) handleMinimizationJob(ctx context.Context, t *asynq.Task) error {
-	w.logger.Info("Processing minimization job")
-	// TODO: Implement minimization logic
-	return fmt.Errorf("minimization not yet implemented")
-}
-
-func (w *Worker) handleReproductionJob(ctx context.Context, t *asynq.Task) error {
-	w.logger.Info("Processing reproduction job")
-	// TODO: Implement reproduction logic
-	return fmt.Errorf("reproduction not yet implemented")
 }
 
 // asynqLoggerAdapter adapts logrus logger to asynq logger interface

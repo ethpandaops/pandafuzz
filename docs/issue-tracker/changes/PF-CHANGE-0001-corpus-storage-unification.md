@@ -1,0 +1,12 @@
+# PF-CHANGE-0001: Unify corpus storage paths and hash format
+- Status: completed
+- Type: refactor
+- Motivation: Current corpus upload/download paths and hash formats are inconsistent, causing empty downloads and broken deduplication.
+- Scope: Corpus upload, corpus download, crash promotion, corpus hash format, file storage paths.
+- Design Notes: Use content-addressed storage everywhere with a single hash format; download resolves by hash and fails on missing content.
+- Backwards Compatibility: Existing stored files may be unreachable until migrated or reindexed.
+- Breaking Change: yes
+- Deprecation Notice: none
+- Rollout Plan: Implement new storage path and hash format, add a one-time migration or rehash on access, update clients and tests.
+- Test Plan: End-to-end upload/download, crash promotion to corpus, dedup across sources, hash verification.
+- Risks: Migration errors could orphan existing corpus content.

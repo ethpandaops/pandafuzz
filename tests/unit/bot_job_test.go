@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -21,27 +20,33 @@ func TestBotHandleNoJobs(t *testing.T) {
 	botID := "idle-bot"
 	callCount := 0
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == fmt.Sprintf("/api/v1/bots/%s/job", botID) {
-			callCount++
-			// Return JSON null to indicate no job is available
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("null"))
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expectedPath := fmt.Sprintf("/api/v1/bots/%s/jobs/next", botID)
+		if r.URL.Path != expectedPath {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-	}))
-	defer server.Close()
+		assert.Equal(t, http.MethodPost, r.Method)
+		callCount++
+		// Return empty job wrapper to indicate no job is available
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{
+			"job":     nil,
+			"message": "no jobs available",
+		})
+	})
 
 	cfg := &common.BotConfig{
 		ID:        botID,
-		MasterURL: server.URL,
+		MasterURL: "http://master.test",
 		Timeouts: common.BotTimeoutConfig{
 			MasterCommunication: time.Second,
 		},
 	}
 
 	logger := logrus.New()
-	client, err := bot.NewRetryClient(cfg, logger)
+	httpClient := newHandlerClient(handler, time.Second)
+	client, err := bot.NewRetryClientWithHTTPClient(cfg, logger, httpClient)
 	require.NoError(t, err)
 
 	// Try to get a job - should return a job with an empty ID without error
@@ -59,48 +64,38 @@ func TestBotCrashReporting(t *testing.T) {
 	jobID := "crash-job"
 	crashID := "crash-001"
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == fmt.Sprintf("/api/v1/jobs/%s/crashes", jobID) {
-			// Verify multipart form data
-			err := r.ParseMultipartForm(10 << 20) // 10MB
-			require.NoError(t, err)
-
-			// Check crash metadata
-			crashData := r.FormValue("metadata")
-			var metadata common.CrashResult
-			err = json.Unmarshal([]byte(crashData), &metadata)
-			require.NoError(t, err)
-
-			assert.Equal(t, crashID, metadata.ID)
-			assert.Equal(t, 11, metadata.Signal) // SIGSEGV = 11
-			assert.NotEmpty(t, metadata.StackTrace)
-
-			// Check crash file
-			file, header, err := r.FormFile("crash_file")
-			require.NoError(t, err)
-			defer file.Close()
-
-			assert.Equal(t, "crash_001.bin", header.Filename)
-
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]string{
-				"crash_id": crashID,
-				"status":   "stored",
-			})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/results/crash" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-	}))
-	defer server.Close()
+		assert.Equal(t, http.MethodPost, r.Method)
+
+		var payload common.CrashResult
+		err := json.NewDecoder(r.Body).Decode(&payload)
+		require.NoError(t, err)
+
+		assert.Equal(t, crashID, payload.ID)
+		assert.Equal(t, 11, payload.Signal)
+		assert.NotEmpty(t, payload.StackTrace)
+
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{
+			"crash_id": crashID,
+			"status":   "stored",
+		})
+	})
 
 	cfg := &common.BotConfig{
 		ID:        botID,
-		MasterURL: server.URL,
+		MasterURL: "http://master.test",
 		Timeouts: common.BotTimeoutConfig{
 			ResultReporting: time.Second,
 		},
 	}
 
 	logger := logrus.New()
-	client, err := bot.NewRetryClient(cfg, logger)
+	httpClient := newHandlerClient(handler, time.Second)
+	client, err := bot.NewRetryClientWithHTTPClient(cfg, logger, httpClient)
 	require.NoError(t, err)
 
 	// Create crash info

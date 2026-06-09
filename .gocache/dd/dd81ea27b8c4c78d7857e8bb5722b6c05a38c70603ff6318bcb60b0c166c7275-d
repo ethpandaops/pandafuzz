@@ -1,0 +1,8 @@
+# test log
+getenv TMPDIR
+open /tmp/pandafuzz-upload-1862745995
+open /tmp/pandafuzz-upload-1862745995
+getenv TMPDIR
+open /tmp/pandafuzz-upload-2319139524
+getenv TMPDIR
+open /tmp/pandafuzz-upload-2187678562

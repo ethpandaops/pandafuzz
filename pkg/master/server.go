@@ -410,6 +410,14 @@ func (s *Server) initializeAPIv1() error {
 	apiConfig := apiv1.DefaultConfig()
 
 	// Configure based on master config
+	apiConfig.EnableAuth = s.config.Security.EnableAuth
+	apiConfig.JWTSecret = s.config.Security.JWTSecret
+	apiConfig.APIKeys = s.config.Security.APIKeys
+	apiConfig.MaxRequestSize = s.config.Security.MaxRequestSize
+	apiConfig.MaxCrashFileSize = s.config.Security.MaxCrashFileSize
+	apiConfig.MaxCorpusFileSize = s.config.Security.MaxCorpusFileSize
+	apiConfig.AllowedFileExtensions = s.config.Security.AllowedFileExtensions
+
 	if s.config.Server.EnableCORS {
 		apiConfig.EnableCORS = true
 		// Use configured CORS origins, fall back to "*" if not specified
@@ -444,17 +452,15 @@ func (s *Server) initializeAPIv1() error {
 
 	// Create services struct for API v1
 	services := apiv1.Services{
-		Bot:             s.services.Bot,
-		Job:             s.services.Job,
-		Campaign:        s.services.Campaign,
-		Corpus:          s.services.Corpus,
-		Result:          s.services.Result,
-		System:          s.services.System,
-		Monitoring:      s.services.Monitoring,
-		Reproducibility: s.services.Reproducibility,
-		CrashMinimizer:  s.services.CrashMinimizer,
-		FileStorage:     fileStorage,
-		Storage:         storage,
+		Bot:         s.services.Bot,
+		Job:         s.services.Job,
+		Campaign:    s.services.Campaign,
+		Corpus:      s.services.Corpus,
+		Result:      s.services.Result,
+		System:      s.services.System,
+		Monitoring:  s.services.Monitoring,
+		FileStorage: fileStorage,
+		Storage:     storage,
 	}
 
 	// Create API v1 instance

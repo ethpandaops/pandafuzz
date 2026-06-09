@@ -31,11 +31,6 @@ func (h *Handlers) HandleListBots(w http.ResponseWriter, r *http.Request) {
 		params.Status = &statusVal
 	}
 
-	// TODO: Add tags parameter to OpenAPI spec
-	// if tags := r.URL.Query().Get("tags"); tags != "" {
-	// 	params.Tags = &tags
-	// }
-
 	// Delegate to adapter
 	h.adapter.ListBots(w, r, params)
 }
@@ -51,19 +46,6 @@ func (h *Handlers) HandleGetBot(w http.ResponseWriter, r *http.Request) {
 
 	// Parse query parameters
 	params := generated.GetBotParams{}
-
-	// TODO: Add includeJobs and includeMetrics parameters to OpenAPI spec
-	// if includeJobs := r.URL.Query().Get("include_jobs"); includeJobs != "" {
-	// 	if include, err := strconv.ParseBool(includeJobs); err == nil {
-	// 		params.IncludeJobs = &include
-	// 	}
-	// }
-
-	// if includeMetrics := r.URL.Query().Get("include_metrics"); includeMetrics != "" {
-	// 	if include, err := strconv.ParseBool(includeMetrics); err == nil {
-	// 		params.IncludeMetrics = &include
-	// 	}
-	// }
 
 	// Delegate to adapter
 	h.adapter.GetBot(w, r, botId, params)
@@ -112,11 +94,6 @@ func (h *Handlers) HandleGetBotJobs(w http.ResponseWriter, r *http.Request) {
 		statusVal := generated.JobStatus(status)
 		params.Status = &statusVal
 	}
-
-	// TODO: Add since parameter to OpenAPI spec
-	// if since := r.URL.Query().Get("since"); since != "" {
-	// 	params.Since = &since
-	// }
 
 	// Delegate to adapter
 	h.adapter.GetBotJobs(w, r, botId, params)

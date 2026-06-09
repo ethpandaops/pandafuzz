@@ -57,12 +57,6 @@ type Agent struct {
 	cleanupManager  *JobCleanupManager
 	resultCollector *ResultCollector
 
-	// Reproducibility executor for crash reproduction
-	reproExecutor *ReproducibilityExecutor
-
-	// Minimizer client for crash minimization
-	minimizerClient *MinimizerClient
-
 	// Worker mode fields
 	workerMode bool
 	worker     *Worker
@@ -136,15 +130,6 @@ func NewAgent(botConfig *common.BotConfig, logger *logrus.Logger) (*Agent, error
 		return nil, common.NewSystemError("create_result_collector", err)
 	}
 
-	// Create reproducibility executor
-	reproExecutor := NewReproducibilityExecutor(client, botConfig, logger)
-
-	// Create minimizer client
-	minimizerClient, err := NewMinimizerClient(botConfig, logger)
-	if err != nil {
-		return nil, common.NewSystemError("create_minimizer_client", err)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Create job status classifier
@@ -161,16 +146,14 @@ func NewAgent(botConfig *common.BotConfig, logger *logrus.Logger) (*Agent, error
 		resourceMonitor: resourceMonitor,
 		cleanupManager:  cleanupManager,
 		resultCollector: resultCollector,
-		reproExecutor:   reproExecutor,
-		minimizerClient: minimizerClient,
 		stats: AgentStats{
 			StartTime:     time.Now(),
 			CurrentStatus: "initialized",
 		},
 		ID:         botConfig.ID,
 		startTime:  time.Now(),
-		version:    "1.0.0", // TODO: Get from build info
-		workerMode: false,   // Default to polling mode
+		version:    common.Version,
+		workerMode: false, // Default to polling mode
 	}, nil
 }
 
@@ -327,19 +310,6 @@ func (a *Agent) Stop() error {
 		a.completeCurrentJob(false, "Agent shutdown")
 	}
 
-	// Stop any active reproductions
-	if a.reproExecutor != nil {
-		activeRepros := a.reproExecutor.GetActiveReproductions()
-		if len(activeRepros) > 0 {
-			a.logger.WithField("count", len(activeRepros)).Info("Stopping active reproductions")
-			for requestID := range activeRepros {
-				a.reproExecutor.StopReproduction(requestID)
-			}
-			// Give some time for reproductions to finish gracefully
-			time.Sleep(2 * time.Second)
-		}
-	}
-
 	// Stop result collector
 	if a.resultCollector != nil {
 		if err := a.resultCollector.Stop(); err != nil {
@@ -453,30 +423,7 @@ func (a *Agent) processWorkCycle() {
 		// Continue working on current job
 		a.continueCurrentJob()
 	} else {
-		// Check for reproduction requests first (higher priority)
-		reproRequest, err := a.client.GetReproductionRequest(a.config.ID)
-		if err != nil {
-			a.logger.WithError(err).Debug("Failed to check for reproduction requests")
-		} else if reproRequest != nil {
-			// Handle reproduction request
-			a.logger.WithFields(logrus.Fields{
-				"request_id": reproRequest.ID,
-				"crash_id":   reproRequest.CrashID,
-				"priority":   reproRequest.Priority,
-			}).Info("Processing reproduction request")
-
-			// Execute reproduction in background
-			go func() {
-				if err := a.reproExecutor.HandleReproductionRequest(reproRequest); err != nil {
-					a.logger.WithError(err).Error("Failed to handle reproduction request")
-				}
-			}()
-
-			// Don't request a regular job if we're handling a reproduction
-			return
-		}
-
-		// No reproduction requests, try to get a regular job
+		// Request a new job
 		a.requestNewJob()
 	}
 }
@@ -872,18 +819,8 @@ func (a *Agent) executeJob(job *common.Job) {
 	var message string
 	var err error
 
-	// Handle different job types
-	switch job.Type {
-	case common.JobTypeMinimization:
-		// Handle minimization job
-		_, message, err = a.executeMinimizationJob(job)
-	case common.JobTypeReproduction:
-		// Handle reproduction job
-		_, message, err = a.executeReproductionJob(job)
-	default:
-		// Default to fuzzing job
-		_, message, err = a.executor.ExecuteJob(job)
-	}
+	// Execute fuzzing job
+	_, message, err = a.executor.ExecuteJob(job)
 
 	duration := time.Since(startTime)
 	a.stats.LastJobDuration = duration
@@ -1715,68 +1652,6 @@ func (a *Agent) extractSingleFile(file *zip.File, destPath string) error {
 	}
 
 	return nil
-}
-
-// executeMinimizationJob executes a crash minimization job
-func (a *Agent) executeMinimizationJob(job *common.Job) (bool, string, error) {
-	a.logger.WithFields(logrus.Fields{
-		"job_id":   job.ID,
-		"job_type": job.Type,
-		"metadata": job.Metadata,
-	}).Info("Executing minimization job")
-
-	// Extract crash ID from job metadata
-	crashID, ok := job.Metadata["crash_id"].(string)
-	if !ok || crashID == "" {
-		return false, "crash_id not found in job metadata", fmt.Errorf("invalid minimization job: missing crash_id")
-	}
-
-	// Get crash details
-	crash, err := a.minimizerClient.GetCrashDetails(a.ctx, crashID)
-	if err != nil {
-		return false, fmt.Sprintf("Failed to get crash details: %v", err), err
-	}
-
-	// Extract strategy from metadata
-	strategy := MinimizationStrategyDeltaDebug
-	if s, ok := job.Metadata["strategy"].(string); ok {
-		strategy = MinimizationStrategy(s)
-	}
-
-	// Prepare minimization config
-	config := MinimizationConfig{
-		Strategy:      strategy,
-		MaxIterations: 100,
-		Timeout:       job.Config.Timeout,
-	}
-
-	// Perform minimization
-	result, err := a.minimizerClient.MinimizeCrash(a.ctx, crash, config)
-	if err != nil {
-		return false, fmt.Sprintf("Minimization failed: %v", err), err
-	}
-
-	// Update result with job ID
-	result.JobID = job.ID
-
-	if result.Success {
-		return true, fmt.Sprintf("Minimization completed: %.2f%% reduction", result.ReductionPercent), nil
-	} else {
-		return false, fmt.Sprintf("Minimization failed: %s", result.Error), nil
-	}
-}
-
-// executeReproductionJob executes a crash reproduction job
-func (a *Agent) executeReproductionJob(job *common.Job) (bool, string, error) {
-	a.logger.WithFields(logrus.Fields{
-		"job_id":   job.ID,
-		"job_type": job.Type,
-		"metadata": job.Metadata,
-	}).Info("Executing reproduction job")
-
-	// For now, use the regular fuzzer executor for reproduction jobs
-	// In the future, this could be handled by the reproExecutor
-	return a.executor.ExecuteJob(job)
 }
 
 // connectResultCollectorToExecutor connects the result collector to executor events

@@ -267,7 +267,6 @@ func (rm *RecoveryManager) cleanupStaleData(ctx context.Context) error {
 
 	// Define stale data thresholds
 	staleJobThreshold := 24 * time.Hour // Jobs older than 24 hours
-	_ = 7 * 24 * time.Hour              // staleCrashThreshold - Crashes older than 7 days (unused for now)
 
 	cleanedCount := int64(0)
 

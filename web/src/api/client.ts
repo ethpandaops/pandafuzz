@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
+import { getAuthHeaders } from './auth';
 import {
   Bot,
   Job,
@@ -31,11 +32,11 @@ export class PandaFuzzAPI {
 
     // Request interceptor for auth (if needed) - apply to both clients
     const authInterceptor = (config: any) => {
-      // Add auth token if available
-      const token = localStorage.getItem('auth_token');
-      if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
-      }
+      const authHeaders = getAuthHeaders();
+      config.headers = {
+        ...config.headers,
+        ...authHeaders,
+      };
       return config;
     };
 
@@ -304,9 +305,7 @@ export class PandaFuzzAPI {
           params,
           headers: {
             'Content-Type': 'application/json',
-            ...(localStorage.getItem('auth_token') && {
-              Authorization: `Bearer ${localStorage.getItem('auth_token')}`
-            })
+            ...getAuthHeaders(),
           }
         }
       );
@@ -331,9 +330,7 @@ export class PandaFuzzAPI {
       {
         headers: {
           'Content-Type': 'application/json',
-          ...(localStorage.getItem('auth_token') && {
-            Authorization: `Bearer ${localStorage.getItem('auth_token')}`
-          })
+          ...getAuthHeaders(),
         }
       }
     );
@@ -350,9 +347,7 @@ export class PandaFuzzAPI {
         responseType: 'blob',
         headers: {
           'Accept': 'application/json, text/html, text/plain, application/octet-stream',
-          ...(localStorage.getItem('auth_token') && {
-            Authorization: `Bearer ${localStorage.getItem('auth_token')}`
-          })
+          ...getAuthHeaders(),
         },
       }
     );

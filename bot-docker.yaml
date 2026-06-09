@@ -8,6 +8,7 @@ bot:
   
   # Master server configuration
   master_url: "http://master:8080"  # URL of the master server (using Docker service name)
+  api_key: "dev-api-key"            # API key for master authentication
   
   # Bot capabilities
   capabilities:

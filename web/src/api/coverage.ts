@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
+import { getAuthHeaders } from './auth';
 import {
   CoverageReport,
   CoverageMetadata,
@@ -23,10 +24,11 @@ export class CoverageAPIClient {
     // Request interceptor for auth
     this.client.interceptors.request.use(
       (config) => {
-        const token = localStorage.getItem('auth_token');
-        if (token) {
-          config.headers.Authorization = `Bearer ${token}`;
-        }
+        const authHeaders = getAuthHeaders();
+        config.headers = {
+          ...config.headers,
+          ...authHeaders,
+        };
         return config;
       },
       (error) => Promise.reject(error)

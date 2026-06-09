@@ -23,11 +23,7 @@ func NewStack(logger logrus.FieldLogger) *Stack {
 	return &Stack{
 		logger: logger.WithField("component", "middleware"),
 		// Initialize with default configs
-		authConfig: &AuthConfig{
-			JWTSecret: "default-secret-key", // Should be overridden in production
-			SkipPaths: []string{"/health", "/ready", "/metrics"},
-			Logger:    logger.WithField("middleware", "auth"),
-		},
+		authConfig: nil,
 		corsConfig: &CORSConfig{
 			AllowedOrigins:   []string{"*"},
 			AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
@@ -159,10 +155,19 @@ func (s *Stack) ValidateRequest() func(http.Handler) http.Handler {
 	return ValidateRequest()
 }
 
+// Auth returns the combined authentication middleware
+func (s *Stack) Auth() func(http.Handler) http.Handler {
+	if s.authConfig != nil {
+		return AuthWithConfig(*s.authConfig)
+	}
+	return func(next http.Handler) http.Handler {
+		return next
+	}
+}
+
 // JWTAuth returns the JWT authentication middleware with configuration
 func (s *Stack) JWTAuth() func(http.Handler) http.Handler {
-	// Only apply JWT auth if a real secret is configured (not the default placeholder)
-	if s.authConfig != nil && s.authConfig.JWTSecret != "" && s.authConfig.JWTSecret != "default-secret-key" {
+	if s.authConfig != nil && s.authConfig.JWTSecret != "" {
 		return JWTAuthWithConfig(*s.authConfig)
 	}
 	// Return a no-op middleware when auth is not configured

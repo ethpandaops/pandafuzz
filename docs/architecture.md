@@ -257,7 +257,7 @@ Key features:
 
 ## Security Model
 
-- **VPN-Only Operation**: All services behind VPN, no external auth required
+- **Authentication**: API key or JWT required by default; `allow_insecure` only for local dev
 - **Input Validation**: Sanitize all bot inputs and fuzzer arguments
 - **Process Isolation**: Isolate fuzzer execution per job
 - **Resource Limits**: Enforce memory, disk, and time limits
@@ -393,7 +393,7 @@ The master state management is split across focused files:
 
 - ❌ Multi-master support
 - ❌ Cloud integrations
-- ❌ Complex authentication (VPN provides security)
+- ❌ External identity providers (SSO/OAuth)
 - ❌ Advanced analytics and ML features
 - ❌ Real-time collaboration features
 - ❌ External integrations (issue trackers, notifications)

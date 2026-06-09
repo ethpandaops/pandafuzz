@@ -1,6 +1,7 @@
 package common
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -117,4 +118,20 @@ type CorpusCollectionFile struct {
 	Hash         string    `json:"hash" db:"hash"`
 	Size         int64     `json:"size" db:"size"`
 	UploadedAt   time.Time `json:"uploaded_at" db:"uploaded_at"`
+}
+
+// CorpusFilePath returns the storage path for a corpus file using content-addressed layout.
+func CorpusFilePath(campaignID, hash string) string {
+	if len(hash) >= 2 {
+		return fmt.Sprintf("corpus/%s/%s/%s", campaignID, hash[:2], hash)
+	}
+	return fmt.Sprintf("corpus/%s/%s", campaignID, hash)
+}
+
+// CorpusCollectionFilePath returns the storage path for a corpus collection file.
+func CorpusCollectionFilePath(collectionID, hash string) string {
+	if len(hash) >= 2 {
+		return fmt.Sprintf("corpus/collections/%s/%s/%s", collectionID, hash[:2], hash)
+	}
+	return fmt.Sprintf("corpus/collections/%s/%s", collectionID, hash)
 }

@@ -202,15 +202,17 @@ func TestJobPriority(t *testing.T) {
 	err := env.StartMaster()
 	require.NoError(t, err)
 
-	// Create jobs in order - they should be assigned in FIFO order
-	// CreateTestJob already saves the job, so no need for extra save calls
-	firstJob, err := env.CreateTestJob("first-job")
+	// Create jobs with explicit timestamps to ensure deterministic FIFO ordering
+	// Jobs with earlier CreatedAt should be assigned first
+	baseTime := time.Now().Add(-time.Hour) // Start from an hour ago
+
+	firstJob, err := env.CreateTestJobWithTime("first-job", baseTime)
 	require.NoError(t, err)
 
-	secondJob, err := env.CreateTestJob("second-job")
+	secondJob, err := env.CreateTestJobWithTime("second-job", baseTime.Add(time.Minute))
 	require.NoError(t, err)
 
-	thirdJob, err := env.CreateTestJob("third-job")
+	thirdJob, err := env.CreateTestJobWithTime("third-job", baseTime.Add(2*time.Minute))
 	require.NoError(t, err)
 	_ = thirdJob // Will be used after second job completes
 
@@ -223,7 +225,7 @@ func TestJobPriority(t *testing.T) {
 	require.NoError(t, err)
 	botID := regResponse.BotID
 
-	// First job should be the first one created
+	// First job should be the first one created (earliest timestamp)
 	job1, err := botClient.GetJob(botID)
 	require.NoError(t, err)
 	assert.Equal(t, firstJob.ID, job1.ID)

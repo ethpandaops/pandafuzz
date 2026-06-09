@@ -58,21 +58,26 @@ List endpoints support filtering by various criteria and sorting options.
 
 ```go
 // Initialize individual adapters
-botAdapter := NewBotAdapter(botRegistry, botRepo, jobRepo, sseManager, logger)
-jobAdapter := NewJobAdapter(jobRepo, executor, sseManager, logger)
+botAdapter := NewBotAdapter(botRegistry, botRepo, jobRepo, botService, jobService, sseManager, logger)
+jobAdapter := NewJobAdapter(jobRepo, executor, jobService, storage, fileStorage, sseManager, logger, maxRequestSize)
 campaignAdapter := NewCampaignAdapter(campaignService, campaignRepo, sseManager, logger)
-corpusAdapter := NewCorpusAdapter(corpusRepo, syncService, quarantine, sseManager, logger)
-crashAdapter := NewCrashAdapter(crashRepo, dedupService, minimizer, sseManager, logger)
-analyticsAdapter := NewAnalyticsAdapter(jobRepo, crashRepo, campaignRepo, sseManager, logger)
+corpusAdapter := NewCorpusAdapter(corpusService, storage, fileStorage, sseManager, logger, CorpusAdapterOptions{
+  MaxFileSize: maxCorpusFileSize,
+  AllowedExts: allowedExtensions,
+})
+crashAdapter := NewCrashAdapter(crashRepo, storage, dedupService, sseManager, logger)
+analyticsAdapter := NewAnalyticsAdapter(jobRepo, crashRepo, campaignRepo, analyticsService, sseManager, logger)
+systemAdapter := NewSystemAdapter(botService, jobService, resultService, sseManager, versionInfo, logger, maxCrashFileSize)
 
 // Create composite adapter
 composite := NewCompositeAdapter(
     botAdapter,
-    jobAdapter, 
+    jobAdapter,
     campaignAdapter,
     corpusAdapter,
     crashAdapter,
     analyticsAdapter,
+    systemAdapter,
     sseManager,
     logger,
 )

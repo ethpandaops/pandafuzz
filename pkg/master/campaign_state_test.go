@@ -285,6 +285,19 @@ func (m *MockStorage) ListJobs(ctx context.Context, limit, offset int, status st
 	return args.Get(0).([]*common.Job), args.Error(1)
 }
 
+func (m *MockStorage) StoreJobLogs(ctx context.Context, jobID string, logs []*common.JobLog) error {
+	args := m.Called(ctx, jobID, logs)
+	return args.Error(0)
+}
+
+func (m *MockStorage) GetJobLogs(ctx context.Context, jobID string, limit, offset int) ([]*common.JobLog, int, error) {
+	args := m.Called(ctx, jobID, limit, offset)
+	if args.Get(0) == nil {
+		return nil, 0, args.Error(2)
+	}
+	return args.Get(0).([]*common.JobLog), args.Int(1), args.Error(2)
+}
+
 func (m *MockStorage) DeleteJob(ctx context.Context, id string) error {
 	args := m.Called(ctx, id)
 	return args.Error(0)
@@ -304,12 +317,30 @@ func (m *MockStorage) GetCrash(ctx context.Context, id string) (*common.CrashRes
 	return args.Get(0).(*common.CrashResult), args.Error(1)
 }
 
+func (m *MockStorage) GetCrashCount(ctx context.Context, jobID string) (int, error) {
+	args := m.Called(ctx, jobID)
+	return args.Int(0), args.Error(1)
+}
+
 func (m *MockStorage) ListCrashes(ctx context.Context, jobID string, limit, offset int) ([]*common.CrashResult, error) {
 	args := m.Called(ctx, jobID, limit, offset)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
 	return args.Get(0).([]*common.CrashResult), args.Error(1)
+}
+
+func (m *MockStorage) StoreCrashInput(ctx context.Context, crashID string, input []byte) error {
+	args := m.Called(ctx, crashID, input)
+	return args.Error(0)
+}
+
+func (m *MockStorage) GetCrashInput(ctx context.Context, crashID string) ([]byte, error) {
+	args := m.Called(ctx, crashID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]byte), args.Error(1)
 }
 
 func (m *MockStorage) GetCrashesByCampaign(ctx context.Context, campaignID string) ([]*common.CrashResult, error) {
@@ -367,8 +398,8 @@ func (m *MockStorage) Cleanup(ctx context.Context) error {
 	return args.Error(0)
 }
 
-func (m *MockStorage) Backup(ctx context.Context) error {
-	args := m.Called(ctx)
+func (m *MockStorage) Backup(ctx context.Context, path string) error {
+	args := m.Called(ctx, path)
 	return args.Error(0)
 }
 
@@ -378,8 +409,8 @@ func (m *MockStorage) Ping(ctx context.Context) error {
 	return args.Error(0)
 }
 
-func (m *MockStorage) Close() error {
-	args := m.Called()
+func (m *MockStorage) Close(ctx context.Context) error {
+	args := m.Called(ctx)
 	return args.Error(0)
 }
 

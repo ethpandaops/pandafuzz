@@ -218,28 +218,16 @@ func (q *AsynqQueue) ListJobs(ctx context.Context, filter repository.JobFilter) 
 	return q.repo.List(ctx, filter)
 }
 
-// EnqueueMinimizationJob enqueues a crash minimization job
-func (q *AsynqQueue) EnqueueMinimizationJob(ctx context.Context, jobID, crashID, crashPath, targetPath, strategy string) error {
-	return q.client.EnqueueMinimizationTask(jobID, crashID, crashPath, targetPath, strategy)
-}
-
-// EnqueueReproductionJob enqueues a crash reproduction job
-func (q *AsynqQueue) EnqueueReproductionJob(ctx context.Context, jobID, crashID string, crashInput []byte, targetPath string) error {
-	return q.client.EnqueueReproductionTask(jobID, crashID, crashInput, targetPath)
-}
-
-// SetRedisConfig allows updating Redis configuration
+// SetRedisConfig allows updating Redis configuration.
+// Dynamic reconfiguration is not supported - the queue must be recreated with new config.
 func (q *AsynqQueue) SetRedisConfig(cfg *config.RedisConfig) error {
-	// Would need to recreate client with new config
-	// For now, this is a placeholder
-	return fmt.Errorf("dynamic Redis config update not implemented")
+	return fmt.Errorf("dynamic Redis config update not supported: restart required")
 }
 
-// SetQueueConfig allows updating queue configuration
+// SetQueueConfig allows updating queue configuration.
+// Dynamic reconfiguration is not supported - the queue must be recreated with new config.
 func (q *AsynqQueue) SetQueueConfig(cfg *config.QueueConfig) error {
-	// Would need to recreate client with new config
-	// For now, this is a placeholder
-	return fmt.Errorf("dynamic queue config update not implemented")
+	return fmt.Errorf("dynamic queue config update not supported: restart required")
 }
 
 // Ping checks if Redis is reachable

@@ -40,6 +40,7 @@ type BotConfig struct {
 	ID           string                `yaml:"id" json:"id" validate:"required"`
 	Name         string                `yaml:"name" json:"name"`
 	MasterURL    string                `yaml:"master_url" json:"master_url" validate:"required,url"`
+	APIKey       string                `yaml:"api_key" json:"api_key"`
 	APIPort      int                   `yaml:"api_port" json:"api_port"`
 	Capabilities []string              `yaml:"capabilities" json:"capabilities" validate:"required"`
 	Fuzzing      FuzzingConfig         `yaml:"fuzzing" json:"fuzzing" validate:"required"`
@@ -131,6 +132,10 @@ type MonitoringConfig struct {
 // SecurityConfig holds security-related configuration
 type SecurityConfig struct {
 	EnableInputValidation bool     `yaml:"enable_input_validation" json:"enable_input_validation"`
+	EnableAuth            bool     `yaml:"enable_auth" json:"enable_auth"`
+	AllowInsecure         bool     `yaml:"allow_insecure" json:"allow_insecure"`
+	JWTSecret             string   `yaml:"jwt_secret" json:"jwt_secret"`
+	APIKeys               map[string]string `yaml:"api_keys" json:"api_keys"`
 	MaxRequestSize        int64    `yaml:"max_request_size" json:"max_request_size"`
 	AllowedFileExtensions []string `yaml:"allowed_file_extensions" json:"allowed_file_extensions"`
 	ForbiddenPaths        []string `yaml:"forbidden_paths" json:"forbidden_paths"`
@@ -506,6 +511,9 @@ func (cm *ConfigManager) SetMasterDefaults(master *MasterConfig) {
 	}
 
 	// Security defaults
+	if !master.Security.EnableAuth && !master.Security.AllowInsecure {
+		master.Security.EnableAuth = true
+	}
 	if master.Security.MaxRequestSize == 0 {
 		master.Security.MaxRequestSize = 10 * 1024 * 1024 // 10MB
 	}
@@ -657,6 +665,16 @@ func (cm *ConfigManager) validateMasterConfig(master *MasterConfig) error {
 	// Validate resource limits
 	if master.Limits.MaxConcurrentJobs <= 0 {
 		return fmt.Errorf("max concurrent jobs must be positive")
+	}
+
+	// Validate security auth configuration
+	if master.Security.EnableAuth {
+		if master.Security.JWTSecret == "" && len(master.Security.APIKeys) == 0 {
+			return fmt.Errorf("security auth enabled but jwt_secret and api_keys are both empty")
+		}
+	}
+	if !master.Security.EnableAuth && !master.Security.AllowInsecure {
+		return fmt.Errorf("security auth disabled without allow_insecure")
 	}
 
 	return nil

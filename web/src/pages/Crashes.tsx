@@ -29,6 +29,7 @@ import {
   ContentCopy as CopyIcon,
 } from '@mui/icons-material';
 import api from '../api/client';
+import { getAuthHeaders } from '../api/auth';
 import { CrashResult } from '../types';
 import { SortableTableHeader, useSort } from '../components/SortableTableHeader';
 import { formatDateTime } from '../utils/dateFormat';
@@ -82,7 +83,9 @@ function Crashes() {
   const downloadCrash = async (crash: CrashResult) => {
     try {
       // Use the unified API endpoint to download crash input
-      const response = await fetch(`/api/v1/crashes/${crash.id}/input`);
+      const response = await fetch(`/api/v1/crashes/${crash.id}/input`, {
+        headers: getAuthHeaders(),
+      });
       if (!response.ok) {
         throw new Error('Failed to download crash input');
       }

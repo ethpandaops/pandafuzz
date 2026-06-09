@@ -80,15 +80,21 @@ type UploadURLResponse struct {
 
 // NewRetryClient creates a new retry client for bot communication
 func NewRetryClient(config *common.BotConfig, logger *logrus.Logger) (*RetryClient, error) {
+	return NewRetryClientWithHTTPClient(config, logger, nil)
+}
 
-	// Configure HTTP client with timeouts
-	httpClient := &http.Client{
-		Timeout: config.Timeouts.MasterCommunication,
-		Transport: &http.Transport{
-			MaxIdleConns:       10,
-			IdleConnTimeout:    30 * time.Second,
-			DisableCompression: false,
-		},
+// NewRetryClientWithHTTPClient creates a retry client with a custom HTTP client.
+func NewRetryClientWithHTTPClient(config *common.BotConfig, logger *logrus.Logger, httpClient *http.Client) (*RetryClient, error) {
+	// Configure HTTP client with timeouts when not provided
+	if httpClient == nil {
+		httpClient = &http.Client{
+			Timeout: config.Timeouts.MasterCommunication,
+			Transport: &http.Transport{
+				MaxIdleConns:       10,
+				IdleConnTimeout:    30 * time.Second,
+				DisableCompression: false,
+			},
+		}
 	}
 
 	// Setup retry policies
@@ -614,6 +620,7 @@ func (rc *RetryClient) doRequest(method, path string, requestBody any, responseB
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", fmt.Sprintf("PandaFuzz-Bot/%s", rc.config.ID))
+	rc.applyAuthHeaders(req)
 
 	// Make request
 	resp, err := rc.httpClient.Do(req)
@@ -661,6 +668,12 @@ func (rc *RetryClient) getHostname() string {
 	return "unknown"
 }
 
+func (rc *RetryClient) applyAuthHeaders(req *http.Request) {
+	if rc.config.APIKey != "" {
+		req.Header.Set("X-API-Key", rc.config.APIKey)
+	}
+}
+
 // PushJobLogs pushes job logs to the master
 func (rc *RetryClient) PushJobLogs(jobID, botID string, logFilePath string) error {
 	// Read log file
@@ -679,6 +692,7 @@ func (rc *RetryClient) PushJobLogs(jobID, botID string, logFilePath string) erro
 	// Set headers for raw content upload
 	req.Header.Set("Content-Type", "text/plain")
 	req.Header.Set("X-Bot-ID", botID)
+	rc.applyAuthHeaders(req)
 
 	// Execute with retry
 	var response LogPushResponse
@@ -739,6 +753,7 @@ func (rc *RetryClient) DownloadJobBinary(jobID, botID string, targetPath string)
 		}
 
 		req.Header.Set("X-Bot-ID", botID)
+		rc.applyAuthHeaders(req)
 
 		return rc.circuitBreaker.Execute(func() error {
 			resp, err := rc.httpClient.Do(req)
@@ -867,6 +882,7 @@ func (rc *RetryClient) DownloadJobCorpus(jobID, botID string, targetPath string)
 		}
 
 		req.Header.Set("X-Bot-ID", botID)
+		rc.applyAuthHeaders(req)
 
 		return rc.circuitBreaker.Execute(func() error {
 			resp, err := rc.httpClient.Do(req)
@@ -941,6 +957,7 @@ func (rc *RetryClient) DownloadCrashInput(crashID, botID string) ([]byte, error)
 		}
 
 		req.Header.Set("X-Bot-ID", botID)
+		rc.applyAuthHeaders(req)
 
 		return rc.circuitBreaker.Execute(func() error {
 			resp, err := rc.httpClient.Do(req)
@@ -1162,6 +1179,7 @@ func (rc *RetryClient) GetCorpusCollectionFiles(collectionID string) ([]*common.
 	if err != nil {
 		return nil, common.NewSystemError("create_request", err)
 	}
+	rc.applyAuthHeaders(req)
 
 	// API returns wrapped response with files array
 	var response struct {
@@ -1226,6 +1244,7 @@ func (rc *RetryClient) DownloadCorpusCollectionFile(collectionID, fileID, target
 		if err != nil {
 			return err
 		}
+		rc.applyAuthHeaders(req)
 
 		resp, err := rc.httpClient.Do(req)
 		if err != nil {

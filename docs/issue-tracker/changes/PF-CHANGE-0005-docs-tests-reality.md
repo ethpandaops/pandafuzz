@@ -1,0 +1,12 @@
+# PF-CHANGE-0005: Align docs/tests with current reality
+- Status: completed
+- Type: docs
+- Motivation: Docs and tests contain stale claims and skipped scenarios.
+- Scope: Project structure doc, development guide, e2e suite consolidation, integration test rework.
+- Design Notes: Use the issue tracker as the single source of truth for state and roadmap.
+- Backwards Compatibility: Documentation references and test paths will change.
+- Breaking Change: yes
+- Deprecation Notice: none
+- Rollout Plan: Update docs, remove outdated statements, consolidate e2e runner.
+- Test Plan: Run the consolidated e2e suite and integration tests.
+- Risks: Docs may fall out of sync if not owned.

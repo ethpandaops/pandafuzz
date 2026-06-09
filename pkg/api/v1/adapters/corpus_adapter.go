@@ -1,11 +1,12 @@
 package adapters
 
 import (
-	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -23,65 +24,46 @@ import (
 type CorpusAdapter struct {
 	corpusService common.CorpusService
 	storage       common.Storage
+	fileStorage   common.FileStorage
 	sse           *sse.Manager
 	logger        logrus.FieldLogger
+	maxFileSize   int64
+	allowedExts   []string
+}
+
+// CorpusAdapterOptions configures corpus upload validation.
+type CorpusAdapterOptions struct {
+	MaxFileSize int64
+	AllowedExts []string
 }
 
 // NewCorpusAdapter creates a new corpus adapter
 func NewCorpusAdapter(
 	corpusService common.CorpusService,
 	storage common.Storage,
+	fileStorage common.FileStorage,
 	sse *sse.Manager,
 	logger logrus.FieldLogger,
+	options CorpusAdapterOptions,
 ) *CorpusAdapter {
 	return &CorpusAdapter{
 		corpusService: corpusService,
 		storage:       storage,
+		fileStorage:   fileStorage,
 		sse:           sse,
 		logger:        logger.WithField("adapter", "corpus"),
+		maxFileSize:   options.MaxFileSize,
+		allowedExts:   normalizeExtensions(options.AllowedExts),
 	}
 }
 
 // ListCorpus returns a list of corpus entries
 func (a *CorpusAdapter) ListCorpus(w http.ResponseWriter, r *http.Request, params generated.ListCorpusParams) {
+	ctx := r.Context()
 	a.logger.Debug("listing corpus entries")
 
-	// Mock implementation - replace with actual service calls
-	botId1 := openapi_types.UUID(uuid.New())
-	botId2 := openapi_types.UUID(uuid.New())
-	metadata1 := generated.Metadata{
-		"coverage": 85.5,
-		"edges":    1200,
-	}
-
-	entries := []generated.CorpusEntry{
-		{
-			Id:         openapi_types.UUID(uuid.New()),
-			CampaignId: openapi_types.UUID(uuid.New()),
-			JobId:      openapi_types.UUID(uuid.New()),
-			Filename:   "input_001.bin",
-			SizeBytes:  1024,
-			Hash:       "sha256:abcd1234...",
-			CreatedAt:  time.Now(),
-			BotId:      &botId1,
-			Tags:       &[]string{"seed", "interesting"},
-			Metadata:   &metadata1,
-		},
-		{
-			Id:         openapi_types.UUID(uuid.New()),
-			CampaignId: openapi_types.UUID(uuid.New()),
-			JobId:      openapi_types.UUID(uuid.New()),
-			Filename:   "input_002.bin",
-			SizeBytes:  2048,
-			Hash:       "sha256:efgh5678...",
-			CreatedAt:  time.Now(),
-			BotId:      &botId2,
-			Tags:       &[]string{"generated"},
-		},
-	}
-
 	// Apply pagination
-	limit := 10
+	limit := 50
 	offset := 0
 	if params.Limit != nil {
 		limit = *params.Limit
@@ -90,14 +72,54 @@ func (a *CorpusAdapter) ListCorpus(w http.ResponseWriter, r *http.Request, param
 		offset = *params.Offset
 	}
 
-	// Ensure we don't go out of bounds
+	// Get campaign ID filter if provided
+	var campaignID string
+	if params.CampaignId != nil {
+		campaignID = params.CampaignId.String()
+	}
+
+	// Get corpus files from storage
+	var corpusFiles []*common.CorpusFile
+	var err error
+
+	if a.storage != nil {
+		if campaignID != "" {
+			corpusFiles, err = a.storage.GetCorpusFiles(ctx, campaignID)
+		} else {
+			// Get all corpus files - list campaigns first, then get files for each
+			// For simplicity, return empty if no campaign filter
+			a.logger.Debug("no campaign filter provided, returning empty list")
+			corpusFiles = []*common.CorpusFile{}
+		}
+
+		if err != nil {
+			a.logger.WithError(err).Error("failed to get corpus files from storage")
+			a.writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to list corpus files", err)
+			return
+		}
+	} else {
+		a.logger.Warn("storage not available, returning empty list")
+		corpusFiles = []*common.CorpusFile{}
+	}
+
+	// Convert to API response format
+	entries := make([]generated.CorpusEntry, 0, len(corpusFiles))
+	for _, cf := range corpusFiles {
+		entry := a.corpusFileToEntry(cf)
+		entries = append(entries, entry)
+	}
+
+	// Calculate total before pagination
+	total := len(entries)
+
+	// Apply pagination
 	start := offset
 	end := offset + limit
-	if start > len(entries) {
-		start = len(entries)
+	if start > total {
+		start = total
 	}
-	if end > len(entries) {
-		end = len(entries)
+	if end > total {
+		end = total
 	}
 
 	paginatedEntries := entries[start:end]
@@ -105,7 +127,7 @@ func (a *CorpusAdapter) ListCorpus(w http.ResponseWriter, r *http.Request, param
 	response := generated.CorpusListResponse{
 		Data: paginatedEntries,
 		Pagination: generated.Pagination{
-			Total:  len(entries),
+			Total:  total,
 			Limit:  limit,
 			Offset: offset,
 		},
@@ -116,7 +138,17 @@ func (a *CorpusAdapter) ListCorpus(w http.ResponseWriter, r *http.Request, param
 
 // UploadCorpus handles corpus file upload
 func (a *CorpusAdapter) UploadCorpus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	a.logger.Debug("uploading corpus files")
+
+	if a.corpusService == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Corpus service not configured", nil)
+		return
+	}
+	if a.fileStorage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "File storage not configured", nil)
+		return
+	}
 
 	// Parse multipart form
 	err := r.ParseMultipartForm(32 << 20) // 32MB max memory
@@ -131,6 +163,11 @@ func (a *CorpusAdapter) UploadCorpus(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusBadRequest, "MISSING_CAMPAIGN_ID", "Campaign ID is required", nil)
 		return
 	}
+	campaignUUID, err := uuid.Parse(campaignID)
+	if err != nil {
+		a.writeError(w, http.StatusBadRequest, "INVALID_CAMPAIGN_ID", "Campaign ID must be a valid UUID", err)
+		return
+	}
 
 	// Process uploaded files
 	files := r.MultipartForm.File["files"]
@@ -140,34 +177,107 @@ func (a *CorpusAdapter) UploadCorpus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	uploadedEntries := []generated.CorpusEntry{}
+	duplicateCount := 0
+	totalSize := 0
+
 	for _, fileHeader := range files {
+		if !isAllowedExtension(fileHeader.Filename, a.allowedExts) {
+			a.writeError(w, http.StatusBadRequest, "INVALID_FILE_TYPE", "File extension not allowed", nil)
+			return
+		}
+		if a.maxFileSize > 0 && fileHeader.Size > a.maxFileSize {
+			a.writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "Corpus file exceeds size limit", nil)
+			return
+		}
+
 		file, err := fileHeader.Open()
 		if err != nil {
-			a.logger.WithError(err).Warn("failed to open uploaded file")
+			a.logger.WithError(err).WithField("filename", fileHeader.Filename).Warn("failed to open uploaded file")
 			continue
 		}
-		defer file.Close()
 
-		// Read file content
-		content, err := io.ReadAll(file)
+		tempPath, size, hash, err := streamToTempFile(file, a.maxFileSize, true)
+		file.Close()
 		if err != nil {
-			a.logger.WithError(err).Warn("failed to read file content")
+			status := http.StatusBadRequest
+			if errors.Is(err, errUploadTooLarge) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			a.writeError(w, status, "UPLOAD_FAILED", "Failed to stream uploaded file", err)
+			return
+		}
+
+		tempFile, err := os.Open(tempPath)
+		if err != nil {
+			os.Remove(tempPath)
+			a.logger.WithError(err).WithField("filename", fileHeader.Filename).Warn("failed to open temp file")
 			continue
 		}
 
-		// Create corpus entry
-		entry := generated.CorpusEntry{
-			Id:         openapi_types.UUID(uuid.New()),
-			CampaignId: openapi_types.UUID(uuid.MustParse(campaignID)),
-			JobId:      openapi_types.UUID(uuid.New()),
+		cleanupTemp := func() {
+			tempFile.Close()
+			os.Remove(tempPath)
+		}
+		fileID := uuid.New().String()
+		now := time.Now()
+
+		// Create corpus file for storage
+		corpusFile := &common.CorpusFile{
+			ID:         fileID,
+			CampaignID: campaignID,
 			Filename:   fileHeader.Filename,
-			SizeBytes:  int(fileHeader.Size),
-			Hash:       fmt.Sprintf("sha256:%x", content[:min(32, len(content))]), // Mock hash
-			CreatedAt:  time.Now(),
-			Tags:       &[]string{"uploaded"},
+			Hash:       hash,
+			Size:       size,
+			CreatedAt:  now,
+			IsSeed:     true, // Uploaded files are seed corpus
+		}
+
+		if err := a.corpusService.AddFile(ctx, corpusFile); err != nil {
+			// Check if it's a duplicate (various error message formats)
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "duplicate") ||
+				strings.Contains(errStr, "already exists") ||
+				strings.Contains(errStr, "unique constraint") ||
+				strings.Contains(errStr, "corpus file already exists") {
+				duplicateCount++
+				a.logger.WithField("filename", fileHeader.Filename).Debug("skipping duplicate corpus file")
+				cleanupTemp()
+				continue
+			}
+			a.logger.WithError(err).WithField("filename", fileHeader.Filename).Warn("failed to add corpus file")
+			cleanupTemp()
+			continue
+		}
+
+		filePath := common.CorpusFilePath(campaignID, hash)
+		if err := a.fileStorage.SaveFileStream(ctx, filePath, tempFile, size); err != nil {
+			a.logger.WithError(err).WithFields(logrus.Fields{
+				"filename":  fileHeader.Filename,
+				"file_path": filePath,
+			}).Error("failed to store corpus file content")
+			cleanupTemp()
+			if a.storage != nil {
+				if deleteErr := a.storage.DeleteCorpusFile(ctx, corpusFile.ID); deleteErr != nil {
+					a.logger.WithError(deleteErr).WithField("file_id", corpusFile.ID).Warn("failed to delete corpus metadata after save failure")
+				}
+			}
+			continue
+		}
+		cleanupTemp()
+
+		// Create response entry
+		entry := generated.CorpusEntry{
+			Id:         openapi_types.UUID(uuid.MustParse(fileID)),
+			CampaignId: openapi_types.UUID(campaignUUID),
+			Filename:   fileHeader.Filename,
+			SizeBytes:  int(size),
+			Hash:       hash,
+			CreatedAt:  now,
+			Tags:       &[]string{"uploaded", "seed"},
 		}
 
 		uploadedEntries = append(uploadedEntries, entry)
+		totalSize += int(size)
 
 		// Publish SSE event
 		if a.sse != nil {
@@ -176,16 +286,24 @@ func (a *CorpusAdapter) UploadCorpus(w http.ResponseWriter, r *http.Request) {
 				"campaign_id": entry.CampaignId,
 				"filename":    entry.Filename,
 				"size":        entry.SizeBytes,
+				"hash":        hash,
 			})
 			a.sse.BroadcastToTopic("corpus", event)
 		}
+
+		a.logger.WithFields(logrus.Fields{
+			"filename":    fileHeader.Filename,
+			"size":        size,
+			"hash":        hash,
+			"campaign_id": campaignID,
+		}).Info("corpus file uploaded successfully")
 	}
 
 	response := generated.CorpusUploadResponse{
 		UploadId:       openapi_types.UUID(uuid.New()),
 		UploadedCount:  len(uploadedEntries),
-		DuplicateCount: 0,
-		TotalSizeBytes: calculateTotalSize(uploadedEntries),
+		DuplicateCount: duplicateCount,
+		TotalSizeBytes: totalSize,
 	}
 
 	a.writeJSONResponse(w, http.StatusCreated, response)
@@ -193,33 +311,82 @@ func (a *CorpusAdapter) UploadCorpus(w http.ResponseWriter, r *http.Request) {
 
 // ListQuarantinedCorpus returns quarantined corpus entries
 func (a *CorpusAdapter) ListQuarantinedCorpus(w http.ResponseWriter, r *http.Request, params generated.ListQuarantinedCorpusParams) {
+	ctx := r.Context()
 	a.logger.Debug("listing quarantined corpus entries")
 
-	// Mock implementation - using regular CorpusEntry since QuarantinedCorpusEntry doesn't exist
-	entries := []generated.CorpusEntry{
-		{
-			Id:         openapi_types.UUID(uuid.New()),
-			CampaignId: openapi_types.UUID(uuid.New()),
-			JobId:      openapi_types.UUID(uuid.New()),
-			Filename:   "suspicious_001.bin",
-			SizeBytes:  4096,
-			Hash:       "sha256:ijkl9012...",
-			CreatedAt:  time.Now(),
-			Metadata: &generated.Metadata{
-				"memory_peak":       "8GB",
-				"cpu_usage":         "400%",
-				"quarantine_reason": "Excessive memory consumption",
-			},
-		},
+	// Apply pagination
+	limit := 50
+	offset := 0
+	if params.Limit != nil {
+		limit = *params.Limit
+	}
+	if params.Offset != nil {
+		offset = *params.Offset
 	}
 
-	// Use regular CorpusListResponse since QuarantinedCorpusListResponse doesn't exist
+	// Get reason filter if provided
+	var reasonFilter string
+	if params.Reason != nil {
+		reasonFilter = string(*params.Reason)
+	}
+
+	// Get quarantined files from storage
+	// Note: ListQuarantinedCorpus doesn't have campaign_id filter in the API spec
+	// We'll need to get all quarantined files and filter by reason if specified
+	var allQuarantinedFiles []*common.QuarantinedFile
+
+	if a.storage != nil {
+		// Get all quarantined files (empty campaign filter gets all)
+		allQuarantinedFiles, _ = a.storage.GetQuarantinedFiles(ctx, "")
+		if allQuarantinedFiles == nil {
+			allQuarantinedFiles = []*common.QuarantinedFile{}
+		}
+	} else {
+		a.logger.Warn("storage not available, returning empty list")
+		allQuarantinedFiles = []*common.QuarantinedFile{}
+	}
+
+	// Filter by reason if specified
+	var quarantinedFiles []*common.QuarantinedFile
+	if reasonFilter != "" {
+		quarantinedFiles = make([]*common.QuarantinedFile, 0, len(allQuarantinedFiles))
+		for _, qf := range allQuarantinedFiles {
+			if qf.Reason == reasonFilter {
+				quarantinedFiles = append(quarantinedFiles, qf)
+			}
+		}
+	} else {
+		quarantinedFiles = allQuarantinedFiles
+	}
+
+	// Convert to API response format
+	entries := make([]generated.CorpusEntry, 0, len(quarantinedFiles))
+	for _, qf := range quarantinedFiles {
+		entry := a.quarantinedFileToEntry(qf)
+		entries = append(entries, entry)
+	}
+
+	// Calculate total before pagination
+	total := len(entries)
+
+	// Apply pagination
+	start := offset
+	end := offset + limit
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+
+	paginatedEntries := entries[start:end]
+
 	response := generated.CorpusListResponse{
-		Data: entries,
+		Data: paginatedEntries,
 		Pagination: generated.Pagination{
-			Total:  len(entries),
-			Limit:  10,
-			Offset: 0,
+			Total:  total,
+			Limit:  limit,
+			Offset: offset,
 		},
 	}
 
@@ -228,6 +395,8 @@ func (a *CorpusAdapter) ListQuarantinedCorpus(w http.ResponseWriter, r *http.Req
 
 // SelectCorpus selects corpus entries for a campaign
 func (a *CorpusAdapter) SelectCorpus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	startTime := time.Now()
 	a.logger.Debug("selecting corpus entries")
 
 	var req generated.CorpusSelectionRequest
@@ -236,52 +405,116 @@ func (a *CorpusAdapter) SelectCorpus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mock implementation
-	selectedEntries := []generated.CorpusEntry{
-		{
-			Id:         openapi_types.UUID(uuid.New()),
-			CampaignId: req.CampaignId,
-			JobId:      openapi_types.UUID(uuid.New()),
-			Filename:   "selected_001.bin",
-			SizeBytes:  512,
-			Hash:       "sha256:mnop3456...",
-			CreatedAt:  time.Now(),
-			Tags:       &[]string{"selected"},
-		},
+	campaignID := req.CampaignId.String()
+
+	// Get corpus files from storage
+	var corpusFiles []*common.CorpusFile
+	var err error
+
+	if a.storage != nil {
+		corpusFiles, err = a.storage.GetCorpusFiles(ctx, campaignID)
+		if err != nil {
+			a.logger.WithError(err).Error("failed to get corpus files for selection")
+			a.writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to get corpus files", err)
+			return
+		}
+	} else {
+		a.logger.Warn("storage not available, returning empty selection")
+		corpusFiles = []*common.CorpusFile{}
 	}
 
-	// Extract entry IDs for the response
-	selectedIDs := make([]openapi_types.UUID, len(selectedEntries))
-	for i, entry := range selectedEntries {
-		selectedIDs[i] = entry.Id
+	// Apply selection strategy (default: all files, can be extended for more complex selection)
+	strategy := string(req.SelectionStrategy)
+	if strategy == "" {
+		strategy = "all"
 	}
 
-	totalSize := calculateTotalSize(selectedEntries)
+	// Apply max size limit if specified from criteria
+	maxSize := 0
+	if req.Criteria != nil && req.Criteria.MaxSizeBytes != nil {
+		maxSize = *req.Criteria.MaxSizeBytes
+	}
+
+	// Select corpus files based on strategy
+	selectedFiles := make([]*common.CorpusFile, 0, len(corpusFiles))
+	var currentSize int64
+
+	for _, cf := range corpusFiles {
+		// Apply size limit if specified
+		if maxSize > 0 && int(currentSize+cf.Size) > maxSize {
+			continue
+		}
+
+		// Apply selection strategy
+		switch strategy {
+		case "seed-only":
+			if cf.IsSeed {
+				selectedFiles = append(selectedFiles, cf)
+				currentSize += cf.Size
+			}
+		case "high-coverage":
+			if cf.NewCoverage > 0 || cf.Coverage > 0 {
+				selectedFiles = append(selectedFiles, cf)
+				currentSize += cf.Size
+			}
+		case "all", "":
+			selectedFiles = append(selectedFiles, cf)
+			currentSize += cf.Size
+		}
+	}
+
+	// Convert to API format and collect IDs
+	selectedIDs := make([]openapi_types.UUID, 0, len(selectedFiles))
+	var totalCoverage int64
+	var totalSize int64
+
+	for _, cf := range selectedFiles {
+		if id, err := uuid.Parse(cf.ID); err == nil {
+			selectedIDs = append(selectedIDs, openapi_types.UUID(id))
+		}
+		totalCoverage += cf.Coverage
+		totalSize += cf.Size
+	}
+
+	durationSeconds := time.Since(startTime).Seconds()
+	totalSizeInt := int(totalSize)
+
 	response := generated.CorpusSelectionResponse{
 		SelectionId:          openapi_types.UUID(uuid.New()),
 		SelectedEntries:      selectedIDs,
-		TotalCoverage:        1000, // Mock coverage value
-		TotalSizeBytes:       &totalSize,
-		SelectionTimeSeconds: 0.5,
-		StrategyUsed:         &[]string{"diversity-based"}[0],
+		TotalCoverage:        int(totalCoverage),
+		TotalSizeBytes:       &totalSizeInt,
+		SelectionTimeSeconds: float32(durationSeconds),
+		StrategyUsed:         &strategy,
 	}
 
 	// Publish SSE event
 	if a.sse != nil {
 		event := sse.NewCorpusEvent("corpus.selected", map[string]interface{}{
-			"campaign_id":   req.CampaignId,
+			"campaign_id":   campaignID,
 			"selection_id":  response.SelectionId,
 			"selected":      len(response.SelectedEntries),
-			"strategy_used": response.StrategyUsed,
+			"strategy_used": strategy,
+			"total_size":    totalSize,
 		})
 		a.sse.BroadcastToTopic("corpus", event)
 	}
+
+	a.logger.WithFields(logrus.Fields{
+		"campaign_id":      campaignID,
+		"selected_count":   len(selectedIDs),
+		"total_size":       totalSize,
+		"strategy":         strategy,
+		"duration_seconds": durationSeconds,
+	}).Info("corpus selection completed")
 
 	a.writeJSONResponse(w, http.StatusOK, response)
 }
 
 // SyncCorpus synchronizes corpus between campaigns
 func (a *CorpusAdapter) SyncCorpus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	startTime := time.Now()
 	a.logger.Debug("synchronizing corpus")
 
 	var req generated.CorpusSyncRequest
@@ -290,102 +523,357 @@ func (a *CorpusAdapter) SyncCorpus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mock implementation
+	sourceCampaignID := req.SourceCampaignId.String()
+	targetCampaignID := req.TargetCampaignId.String()
+
+	// Get corpus counts before sync for statistics
+	var sourceFilesCount, targetFilesBeforeCount int
+	if a.storage != nil {
+		sourceFiles, err := a.storage.GetCorpusFiles(ctx, sourceCampaignID)
+		if err == nil {
+			sourceFilesCount = len(sourceFiles)
+		}
+		targetFiles, err := a.storage.GetCorpusFiles(ctx, targetCampaignID)
+		if err == nil {
+			targetFilesBeforeCount = len(targetFiles)
+		}
+	}
+
+	// Perform the actual sync using corpus service
+	var syncedFilesCount int
+	var totalSizeBytes int64
+	if a.corpusService != nil {
+		// ShareCorpus copies corpus from source to target campaign
+		if err := a.corpusService.ShareCorpus(ctx, sourceCampaignID, targetCampaignID); err != nil {
+			a.logger.WithError(err).Error("failed to sync corpus between campaigns")
+			a.writeError(w, http.StatusInternalServerError, "SYNC_ERROR", "Failed to sync corpus", err)
+			return
+		}
+
+		// Get updated counts after sync
+		if a.storage != nil {
+			targetFilesAfter, err := a.storage.GetCorpusFiles(ctx, targetCampaignID)
+			if err == nil {
+				syncedFilesCount = len(targetFilesAfter) - targetFilesBeforeCount
+				for _, f := range targetFilesAfter {
+					totalSizeBytes += f.Size
+				}
+			}
+		}
+	} else {
+		a.logger.Warn("corpus service not available, sync skipped")
+	}
+
+	durationSeconds := time.Since(startTime).Seconds()
+	syncID := uuid.New()
+
+	// Get final target count
+	targetFilesAfterCount := targetFilesBeforeCount + syncedFilesCount
+
+	// Build response
+	skippedFiles := sourceFilesCount - syncedFilesCount
+	if skippedFiles < 0 {
+		skippedFiles = 0
+	}
+
 	response := generated.CorpusSyncResponse{
-		SyncId:          openapi_types.UUID(uuid.New()),
-		SyncedFiles:     10,
-		SkippedFiles:    &[]int{2}[0],
-		TotalSizeBytes:  10240,
-		DurationSeconds: 0.5,
-		StrategyUsed:    "incremental",
+		SyncId:          openapi_types.UUID(syncID),
+		SyncedFiles:     syncedFilesCount,
+		SkippedFiles:    &skippedFiles,
+		TotalSizeBytes:  int(totalSizeBytes),
+		DurationSeconds: float32(durationSeconds),
+		StrategyUsed:    "copy-all",
 		Summary: &struct {
 			CoverageImprovement *float32 `json:"coverage_improvement,omitempty"`
 			SourceTotalFiles    *int     `json:"source_total_files,omitempty"`
 			TargetFilesAfter    *int     `json:"target_files_after,omitempty"`
 			TargetFilesBefore   *int     `json:"target_files_before,omitempty"`
 		}{
-			CoverageImprovement: &[]float32{5.2}[0],
-			SourceTotalFiles:    &[]int{100}[0],
-			TargetFilesBefore:   &[]int{50}[0],
-			TargetFilesAfter:    &[]int{60}[0],
+			SourceTotalFiles:  &sourceFilesCount,
+			TargetFilesBefore: &targetFilesBeforeCount,
+			TargetFilesAfter:  &targetFilesAfterCount,
 		},
 	}
 
 	// Publish SSE event
 	if a.sse != nil {
-		event := sse.NewCorpusEvent("corpus.sync.started", map[string]interface{}{
+		event := sse.NewCorpusEvent("corpus.sync.completed", map[string]interface{}{
 			"sync_id":         response.SyncId,
-			"source_campaign": req.SourceCampaignId,
-			"target_campaign": req.TargetCampaignId,
+			"source_campaign": sourceCampaignID,
+			"target_campaign": targetCampaignID,
 			"synced_files":    response.SyncedFiles,
+			"duration":        durationSeconds,
 		})
 		a.sse.BroadcastToTopic("corpus", event)
 	}
+
+	a.logger.WithFields(logrus.Fields{
+		"sync_id":         syncID.String(),
+		"source_campaign": sourceCampaignID,
+		"target_campaign": targetCampaignID,
+		"synced_files":    syncedFilesCount,
+		"duration":        durationSeconds,
+	}).Info("corpus sync completed successfully")
 
 	a.writeJSONResponse(w, http.StatusAccepted, response)
 }
 
 // DeleteCorpusEntry deletes a corpus entry
 func (a *CorpusAdapter) DeleteCorpusEntry(w http.ResponseWriter, r *http.Request, entryId generated.CorpusEntryIdParam) {
+	ctx := r.Context()
 	a.logger.WithField("entry_id", entryId).Debug("deleting corpus entry")
 
-	// Mock implementation - replace with actual service call
-	// In production, this would call the corpus service to delete the entry
+	if a.storage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "Storage not configured", nil)
+		return
+	}
+
+	// Get corpus file to get metadata for deletion
+	corpusFile, err := a.storage.GetCorpusFile(ctx, entryId.String())
+	if err != nil {
+		a.logger.WithError(err).WithField("entry_id", entryId).Error("failed to get corpus file for deletion")
+		a.writeError(w, http.StatusNotFound, "NOT_FOUND", "Corpus entry not found", err)
+		return
+	}
+
+	// Delete from file storage if available
+	if a.fileStorage != nil && corpusFile != nil {
+		if corpusFile.CampaignID != "" && corpusFile.Hash != "" {
+			filePath := common.CorpusFilePath(corpusFile.CampaignID, corpusFile.Hash)
+			if err := a.fileStorage.DeleteFile(ctx, filePath); err != nil {
+				a.logger.WithError(err).WithFields(logrus.Fields{
+					"entry_id":  entryId,
+					"file_path": filePath,
+				}).Warn("failed to delete corpus file from storage, continuing with metadata deletion")
+			}
+		} else {
+			a.logger.WithFields(logrus.Fields{
+				"entry_id": entryId,
+				"campaign": corpusFile.CampaignID,
+				"hash":     corpusFile.Hash,
+				"filename": corpusFile.Filename,
+			}).Warn("corpus entry missing hash or campaign ID; skipping file deletion")
+		}
+	}
+
+	// Delete from database
+	if err := a.storage.DeleteCorpusFile(ctx, entryId.String()); err != nil {
+		a.logger.WithError(err).WithField("entry_id", entryId).Error("failed to delete corpus file metadata")
+		a.writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to delete corpus entry", err)
+		return
+	}
 
 	// Publish SSE event
 	if a.sse != nil {
 		event := sse.NewCorpusEvent("corpus.deleted", map[string]interface{}{
-			"entry_id": entryId,
+			"entry_id":    entryId,
+			"campaign_id": corpusFile.CampaignID,
+			"filename":    corpusFile.Filename,
 		})
 		a.sse.BroadcastToTopic("corpus", event)
 	}
 
+	a.logger.WithField("entry_id", entryId).Info("corpus entry deleted successfully")
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // GetCorpusEntry retrieves a single corpus entry
 func (a *CorpusAdapter) GetCorpusEntry(w http.ResponseWriter, r *http.Request, entryId generated.CorpusEntryIdParam, params generated.GetCorpusEntryParams) {
+	ctx := r.Context()
 	a.logger.WithField("entry_id", entryId).Debug("getting corpus entry")
 
-	// Mock implementation
-	metadata := generated.Metadata{
-		"coverage": 85.5,
-		"edges":    1200,
+	if a.storage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "Storage not configured", nil)
+		return
 	}
-	botId := openapi_types.UUID(uuid.New())
 
-	entry := generated.CorpusEntry{
-		Id:         openapi_types.UUID(entryId),
-		CampaignId: openapi_types.UUID(uuid.New()),
-		JobId:      openapi_types.UUID(uuid.New()),
-		Filename:   "input_001.bin",
-		SizeBytes:  1024,
-		Hash:       "sha256:abcd1234...",
-		CreatedAt:  time.Now(),
-		BotId:      &botId,
-		Tags:       &[]string{"seed", "interesting"},
-		Metadata:   &metadata,
+	// Get corpus file from storage
+	corpusFile, err := a.storage.GetCorpusFile(ctx, entryId.String())
+	if err != nil {
+		a.logger.WithError(err).WithField("entry_id", entryId).Error("failed to get corpus file")
+		a.writeError(w, http.StatusNotFound, "NOT_FOUND", "Corpus entry not found", err)
+		return
 	}
+
+	// Convert to API response format
+	entry := a.corpusFileToEntry(corpusFile)
 
 	a.writeJSONResponse(w, http.StatusOK, entry)
 }
 
 // DownloadCorpusFile downloads a corpus file
 func (a *CorpusAdapter) DownloadCorpusFile(w http.ResponseWriter, r *http.Request, entryId generated.CorpusEntryIdParam) {
+	ctx := r.Context()
 	a.logger.WithField("entry_id", entryId).Debug("downloading corpus file")
 
-	// Mock implementation - in production, this would stream the actual file
-	content := []byte("Mock corpus file content")
+	if a.storage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "Storage not configured", nil)
+		return
+	}
+	if a.fileStorage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "File storage not configured", nil)
+		return
+	}
+
+	// Get corpus file metadata from storage
+	corpusFile, err := a.storage.GetCorpusFile(ctx, entryId.String())
+	if err != nil {
+		a.logger.WithError(err).WithField("entry_id", entryId).Error("failed to get corpus file metadata")
+		a.writeError(w, http.StatusNotFound, "NOT_FOUND", "Corpus entry not found", err)
+		return
+	}
+
+	if corpusFile.CampaignID == "" || corpusFile.Hash == "" {
+		a.writeError(w, http.StatusInternalServerError, "INVALID_METADATA", "Corpus entry missing campaign ID or hash", nil)
+		return
+	}
+
+	filePath := common.CorpusFilePath(corpusFile.CampaignID, corpusFile.Hash)
+	content, err := a.fileStorage.ReadFile(ctx, filePath)
+	if err != nil {
+		a.logger.WithError(err).WithFields(logrus.Fields{
+			"entry_id":  entryId,
+			"file_path": filePath,
+		}).Error("failed to read corpus file from storage")
+		a.writeError(w, http.StatusInternalServerError, "STORAGE_ERROR", "Failed to read corpus file", err)
+		return
+	}
+
+	// Set response headers
+	filename := corpusFile.Filename
+	if filename == "" {
+		filename = fmt.Sprintf("corpus_%s.bin", entryId.String()[:8])
+	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", "attachment; filename=\"corpus_file.bin\"")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
 
+	// Add hash header for verification
+	if corpusFile.Hash != "" {
+		w.Header().Set("X-Content-Hash", corpusFile.Hash)
+	}
+
 	w.WriteHeader(http.StatusOK)
-	w.Write(content)
+	if _, err := w.Write(content); err != nil {
+		a.logger.WithError(err).Warn("failed to write response body")
+	}
 }
 
 // Helper methods
+
+// corpusFileToEntry converts a common.CorpusFile to a generated.CorpusEntry
+func (a *CorpusAdapter) corpusFileToEntry(cf *common.CorpusFile) generated.CorpusEntry {
+	entry := generated.CorpusEntry{
+		Filename:  cf.Filename,
+		SizeBytes: int(cf.Size),
+		Hash:      cf.Hash,
+		CreatedAt: cf.CreatedAt,
+	}
+
+	// Parse UUIDs safely
+	if id, err := uuid.Parse(cf.ID); err == nil {
+		entry.Id = openapi_types.UUID(id)
+	}
+	if campaignID, err := uuid.Parse(cf.CampaignID); err == nil {
+		entry.CampaignId = openapi_types.UUID(campaignID)
+	}
+	if cf.JobID != "" {
+		if jobID, err := uuid.Parse(cf.JobID); err == nil {
+			entry.JobId = openapi_types.UUID(jobID)
+		}
+	}
+	if cf.BotID != "" {
+		if botID, err := uuid.Parse(cf.BotID); err == nil {
+			entry.BotId = &openapi_types.UUID{}
+			*entry.BotId = openapi_types.UUID(botID)
+		}
+	}
+
+	// Set tags based on seed status
+	if cf.IsSeed {
+		entry.Tags = &[]string{"seed"}
+	} else {
+		entry.Tags = &[]string{"generated"}
+	}
+
+	// Add coverage metadata if available
+	if cf.Coverage > 0 || cf.NewCoverage > 0 {
+		metadata := generated.Metadata{
+			"coverage":     cf.Coverage,
+			"new_coverage": cf.NewCoverage,
+			"generation":   cf.Generation,
+		}
+		entry.Metadata = &metadata
+	}
+
+	return entry
+}
+
+func normalizeExtensions(exts []string) []string {
+	if len(exts) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(exts))
+	for _, ext := range exts {
+		trimmed := strings.TrimSpace(strings.ToLower(ext))
+		if trimmed == "" {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, ".") {
+			trimmed = "." + trimmed
+		}
+		normalized = append(normalized, trimmed)
+	}
+	return normalized
+}
+
+func isAllowedExtension(filename string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == "" {
+		return false
+	}
+	for _, allowedExt := range allowed {
+		if ext == allowedExt {
+			return true
+		}
+	}
+	return false
+}
+
+// quarantinedFileToEntry converts a common.QuarantinedFile to a generated.CorpusEntry
+func (a *CorpusAdapter) quarantinedFileToEntry(qf *common.QuarantinedFile) generated.CorpusEntry {
+	entry := generated.CorpusEntry{
+		Hash:      qf.Hash,
+		CreatedAt: qf.QuarantinedAt,
+	}
+
+	// Parse UUIDs safely
+	if id, err := uuid.Parse(qf.ID); err == nil {
+		entry.Id = openapi_types.UUID(id)
+	}
+	if campaignID, err := uuid.Parse(qf.CampaignID); err == nil {
+		entry.CampaignId = openapi_types.UUID(campaignID)
+	}
+
+	// Add quarantine metadata
+	metadata := generated.Metadata{
+		"quarantine_reason":  qf.Reason,
+		"quarantine_details": qf.Details,
+		"quarantined_by":     qf.QuarantinedBy,
+	}
+	if qf.Resolution != nil {
+		metadata["resolution"] = *qf.Resolution
+	}
+	entry.Metadata = &metadata
+
+	entry.Tags = &[]string{"quarantined"}
+
+	return entry
+}
 
 func (a *CorpusAdapter) writeJSONResponse(w http.ResponseWriter, statusCode int, data any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -432,6 +920,7 @@ func min(a, b int) int {
 
 // PromoteCrashToCorpus promotes a crash input to the corpus (from v3)
 func (a *CorpusAdapter) PromoteCrashToCorpus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	a.logger.Debug("promoting crash to corpus")
 
 	var req struct {
@@ -455,23 +944,35 @@ func (a *CorpusAdapter) PromoteCrashToCorpus(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Mock implementation - would call corpus service
-	entryID := uuid.New()
-	entry := generated.CorpusEntry{
-		Id:         openapi_types.UUID(entryID),
-		CampaignId: openapi_types.UUID(uuid.MustParse(req.CampaignID)),
-		JobId:      openapi_types.UUID(uuid.New()),
-		Filename:   fmt.Sprintf("crash_%s.bin", req.CrashID[:8]),
-		SizeBytes:  512,
-		Hash:       "sha256:promoted_" + req.CrashID[:8],
-		CreatedAt:  time.Now(),
-		Tags:       &[]string{"promoted", "crash"},
+	// Use corpus service to promote crash to corpus
+	var corpusFile *common.CorpusFile
+	var err error
+
+	if a.corpusService != nil {
+		corpusFile, err = a.corpusService.PromoteCrashToCorpus(ctx, req.CrashID, req.CampaignID)
+		if err != nil {
+			a.logger.WithError(err).WithFields(logrus.Fields{
+				"crash_id":    req.CrashID,
+				"campaign_id": req.CampaignID,
+			}).Error("failed to promote crash to corpus")
+			a.writeError(w, http.StatusInternalServerError, "PROMOTION_FAILED", "Failed to promote crash to corpus", err)
+			return
+		}
+	} else {
+		a.logger.Warn("corpus service not available, cannot promote crash")
+		a.writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Corpus service not available", nil)
+		return
 	}
 
+	// Convert to API response format
+	entry := a.corpusFileToEntry(corpusFile)
+
+	// Add promoted and crash tags
+	promotedTags := []string{"promoted", "crash"}
 	if len(req.Tags) > 0 {
-		allTags := append(*entry.Tags, req.Tags...)
-		entry.Tags = &allTags
+		promotedTags = append(promotedTags, req.Tags...)
 	}
+	entry.Tags = &promotedTags
 
 	// Publish SSE event
 	if a.sse != nil {
@@ -479,13 +980,20 @@ func (a *CorpusAdapter) PromoteCrashToCorpus(w http.ResponseWriter, r *http.Requ
 			"entry_id":    entry.Id,
 			"crash_id":    req.CrashID,
 			"campaign_id": entry.CampaignId,
+			"filename":    entry.Filename,
 		})
 		a.sse.BroadcastToTopic("corpus", event)
 	}
 
+	a.logger.WithFields(logrus.Fields{
+		"crash_id":    req.CrashID,
+		"campaign_id": req.CampaignID,
+		"entry_id":    corpusFile.ID,
+	}).Info("crash promoted to corpus successfully")
+
 	response := map[string]interface{}{
 		"success":  true,
-		"entry_id": entryID.String(),
+		"entry_id": corpusFile.ID,
 		"entry":    entry,
 		"message":  "Crash promoted to corpus successfully",
 	}
@@ -689,6 +1197,10 @@ func (a *CorpusAdapter) UploadCorpusCollectionFiles(w http.ResponseWriter, r *ht
 		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "Storage not configured", nil)
 		return
 	}
+	if a.fileStorage == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "File storage not configured", nil)
+		return
+	}
 
 	// Verify collection exists
 	_, err := a.storage.GetCorpusCollection(ctx, collectionID)
@@ -711,37 +1223,73 @@ func (a *CorpusAdapter) UploadCorpusCollectionFiles(w http.ResponseWriter, r *ht
 
 	uploadedFiles := make([]*common.CorpusCollectionFile, 0, len(files))
 	for _, fileHeader := range files {
+		if !isAllowedExtension(fileHeader.Filename, a.allowedExts) {
+			a.writeError(w, http.StatusBadRequest, "INVALID_FILE_TYPE", "File extension not allowed", nil)
+			return
+		}
+		if a.maxFileSize > 0 && fileHeader.Size > a.maxFileSize {
+			a.writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "Corpus file exceeds size limit", nil)
+			return
+		}
+
 		file, err := fileHeader.Open()
 		if err != nil {
 			a.logger.WithError(err).WithField("filename", fileHeader.Filename).Warn("failed to open uploaded file")
 			continue
 		}
-		defer file.Close()
 
-		// Read file content
-		content, err := io.ReadAll(file)
+		tempPath, size, hash, err := streamToTempFile(file, a.maxFileSize, true)
+		file.Close()
 		if err != nil {
-			a.logger.WithError(err).WithField("filename", fileHeader.Filename).Warn("failed to read uploaded file")
+			status := http.StatusBadRequest
+			if errors.Is(err, errUploadTooLarge) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			a.writeError(w, status, "UPLOAD_FAILED", "Failed to stream uploaded file", err)
+			return
+		}
+
+		tempFile, err := os.Open(tempPath)
+		if err != nil {
+			os.Remove(tempPath)
+			a.logger.WithError(err).WithField("filename", fileHeader.Filename).Warn("failed to open temp file")
 			continue
 		}
 
-		// Calculate proper hash
-		hash := fmt.Sprintf("sha256:%x", sha256.Sum256(content))
+		cleanupTemp := func() {
+			tempFile.Close()
+			os.Remove(tempPath)
+		}
 
 		// Create corpus collection file record
 		collectionFile := &common.CorpusCollectionFile{
 			ID:           uuid.New().String(),
 			CollectionID: collectionID,
 			Filename:     fileHeader.Filename,
-			Size:         int64(len(content)),
+			Size:         size,
 			Hash:         hash,
 			UploadedAt:   time.Now(),
 		}
 
 		if err := a.storage.AddCorpusCollectionFile(ctx, collectionFile); err != nil {
 			a.logger.WithError(err).WithField("filename", fileHeader.Filename).Warn("failed to add corpus collection file")
+			cleanupTemp()
 			continue
 		}
+
+		filePath := common.CorpusCollectionFilePath(collectionID, hash)
+		if err := a.fileStorage.SaveFileStream(ctx, filePath, tempFile, size); err != nil {
+			a.logger.WithError(err).WithFields(logrus.Fields{
+				"filename":  fileHeader.Filename,
+				"file_path": filePath,
+			}).Error("failed to store corpus collection file content")
+			cleanupTemp()
+			if deleteErr := a.storage.DeleteCorpusCollectionFile(ctx, collectionFile.ID); deleteErr != nil {
+				a.logger.WithError(deleteErr).WithField("file_id", collectionFile.ID).Warn("failed to delete collection metadata after save failure")
+			}
+			continue
+		}
+		cleanupTemp()
 
 		uploadedFiles = append(uploadedFiles, collectionFile)
 	}

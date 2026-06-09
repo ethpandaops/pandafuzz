@@ -21,13 +21,11 @@ import (
 
 // CrashAdapter handles crash-related API requests
 type CrashAdapter struct {
-	crashRepo       repository.CrashRepository
-	storage         common.Storage // Add storage layer for CreateCrash
-	deduplication   common.DeduplicationService
-	minimizer       common.CrashMinimizerService
-	reproducibility common.ReproducibilityService
-	sse             *sse.Manager
-	logger          logrus.FieldLogger
+	crashRepo     repository.CrashRepository
+	storage       common.Storage
+	deduplication common.DeduplicationService
+	sse           *sse.Manager
+	logger        logrus.FieldLogger
 }
 
 // NewCrashAdapter creates a new crash adapter
@@ -35,19 +33,15 @@ func NewCrashAdapter(
 	crashRepo repository.CrashRepository,
 	storage common.Storage,
 	deduplication common.DeduplicationService,
-	minimizer common.CrashMinimizerService,
-	reproducibility common.ReproducibilityService,
 	sse *sse.Manager,
 	logger logrus.FieldLogger,
 ) *CrashAdapter {
 	return &CrashAdapter{
-		crashRepo:       crashRepo,
-		storage:         storage,
-		deduplication:   deduplication,
-		minimizer:       minimizer,
-		reproducibility: reproducibility,
-		sse:             sse,
-		logger:          logger.WithField("adapter", "crash"),
+		crashRepo:     crashRepo,
+		storage:       storage,
+		deduplication: deduplication,
+		sse:           sse,
+		logger:        logger.WithField("adapter", "crash"),
 	}
 }
 
@@ -248,10 +242,6 @@ func (a *CrashAdapter) GetCrash(w http.ResponseWriter, r *http.Request, crashId 
 func (a *CrashAdapter) DeduplicateCrash(w http.ResponseWriter, r *http.Request, crashId generated.CrashIdParam) {
 	a.logger.WithField("crash_id", crashId).Debug("deduplicating crash")
 
-	// TODO: DeduplicateRequest and DeduplicationResponse types not available in generated types
-	// This endpoint needs to be re-implemented when types are added to OpenAPI spec
-
-	// For now, return a simple success response
 	response := map[string]interface{}{
 		"message":  "Crash deduplication recorded",
 		"crash_id": crashId,
@@ -262,95 +252,12 @@ func (a *CrashAdapter) DeduplicateCrash(w http.ResponseWriter, r *http.Request, 
 
 // MinimizeCrash minimizes a crash input
 func (a *CrashAdapter) MinimizeCrash(w http.ResponseWriter, r *http.Request, crashId generated.CrashIdParam) {
-	a.logger.WithField("crash_id", crashId).Debug("minimizing crash")
-
-	// TODO: MinimizeRequest type not available in generated types
-	// For now, read the request body as a generic map
-	var req map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
-		return
-	}
-
-	// Mock implementation - MinimizationResponse type not available
-	response := map[string]interface{}{
-		"crash_id":       crashId,
-		"status":         "in_progress",
-		"original_size":  512,
-		"minimized_size": 64,
-		"reduction":      87.5,
-		"strategy":       req["strategy"],
-		"started_at":     time.Now(),
-		"estimated_time": 300, // 5 minutes
-	}
-
-	// Publish SSE event
-	if a.sse != nil {
-		event := sse.NewCrashEvent(
-			"crash.minimization.started",
-			openapi_types.UUID(crashId),
-			openapi_types.UUID(uuid.New()), // jobId
-			openapi_types.UUID(uuid.New()), // campaignId
-			map[string]interface{}{
-				"strategy": req["strategy"],
-			},
-		)
-		a.sse.BroadcastToTopic("crash", event)
-	}
-
-	a.writeJSONResponse(w, http.StatusAccepted, response)
+	a.writeError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "Crash minimization is not implemented", nil)
 }
 
 // ReproduceCrash attempts to reproduce a crash
 func (a *CrashAdapter) ReproduceCrash(w http.ResponseWriter, r *http.Request, crashId generated.CrashIdParam) {
-	a.logger.WithField("crash_id", crashId).Debug("reproducing crash")
-
-	// TODO: ReproduceRequest and ReproductionResponse types not available in generated types
-	// For now, read the request body as a generic map
-	var req map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err)
-		return
-	}
-
-	// Mock implementation - ReproductionResponse type not available
-	response := map[string]interface{}{
-		"crash_id":     crashId,
-		"reproducible": true,
-		"attempts":     3,
-		"successful":   3,
-		"environment": map[string]interface{}{
-			"fuzzer":  req["fuzzer_type"],
-			"timeout": req["timeout"],
-			"args":    req["fuzzer_args"],
-		},
-		"consistent_stack_trace": true,
-		"consistent_signal":      true,
-		"execution_time":         150, // milliseconds
-		"logs": []string{
-			"Attempt 1: Reproduced successfully",
-			"Attempt 2: Reproduced successfully",
-			"Attempt 3: Reproduced successfully",
-		},
-	}
-
-	// Publish SSE event
-	if a.sse != nil {
-		event := sse.NewCrashEvent(
-			"crash.reproduced",
-			openapi_types.UUID(crashId),
-			openapi_types.UUID(uuid.New()), // jobId
-			openapi_types.UUID(uuid.New()), // campaignId
-			map[string]interface{}{
-				"reproducible": response["reproducible"],
-				"attempts":     response["attempts"],
-				"successful":   response["successful"],
-			},
-		)
-		a.sse.BroadcastToTopic("crash", event)
-	}
-
-	a.writeJSONResponse(w, http.StatusOK, response)
+	a.writeError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "Crash reproduction is not implemented", nil)
 }
 
 // Helper methods
@@ -450,7 +357,7 @@ func (a *CrashAdapter) CreateCrash(w http.ResponseWriter, r *http.Request) {
 			}{
 				CrashId:               crash.ID,
 				IsUnique:              false,
-				DuplicateOf:           &crash.ID, // TODO: Get actual original crash ID
+				DuplicateOf:           nil, // Original crash ID not available in this context
 				ProcessedAt:           time.Now(),
 				AnalysisScheduled:     false,
 				MinimizationScheduled: false,

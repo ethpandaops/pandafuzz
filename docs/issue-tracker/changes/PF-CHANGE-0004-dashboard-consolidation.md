@@ -1,0 +1,12 @@
+# PF-CHANGE-0004: Consolidate dashboard to a single source of truth
+- Status: completed
+- Type: refactor
+- Motivation: Two dashboards exist (`web/` and `pkg/web/dashboard`), causing confusion and split maintenance.
+- Scope: Choose one dashboard, remove/deprecate the other, update docs and build scripts.
+- Design Notes: Align the chosen dashboard with the main API client and build pipeline.
+- Backwards Compatibility: Paths and build commands will change.
+- Breaking Change: yes
+- Deprecation Notice: none
+- Rollout Plan: Delete or archive the unused dashboard, update Makefile/docs.
+- Test Plan: Build and run the chosen dashboard locally.
+- Risks: Loss of features only present in the removed dashboard.

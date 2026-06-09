@@ -5,8 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -20,19 +23,20 @@ import (
 	"github.com/ethpandaops/pandafuzz/pkg/domain/bot/executor"
 	jobRepo "github.com/ethpandaops/pandafuzz/pkg/domain/job/repository"
 	jobTypes "github.com/ethpandaops/pandafuzz/pkg/domain/job/types"
-	"github.com/ethpandaops/pandafuzz/pkg/errors"
+	pferrors "github.com/ethpandaops/pandafuzz/pkg/errors"
 	"github.com/ethpandaops/pandafuzz/pkg/service"
 )
 
 // JobAdapter implements the job-related endpoints of the generated ServerInterface
 type JobAdapter struct {
-	repository  jobRepo.JobRepository
-	executor    executor.Executor
-	jobService  service.JobService
-	storage     common.Storage
-	fileStorage common.FileStorage
-	sse         *sse.Manager
-	logger      logrus.FieldLogger
+	repository     jobRepo.JobRepository
+	executor       executor.Executor
+	jobService     service.JobService
+	storage        common.Storage
+	fileStorage    common.FileStorage
+	sse            *sse.Manager
+	logger         logrus.FieldLogger
+	maxRequestSize int64
 }
 
 // NewJobAdapter creates a new job adapter
@@ -44,15 +48,17 @@ func NewJobAdapter(
 	fileStorage common.FileStorage,
 	sse *sse.Manager,
 	logger logrus.FieldLogger,
+	maxRequestSize int64,
 ) *JobAdapter {
 	return &JobAdapter{
-		repository:  repository,
-		executor:    executor,
-		jobService:  jobService,
-		storage:     storage,
-		fileStorage: fileStorage,
-		sse:         sse,
-		logger:      logger.WithField("component", "job_adapter"),
+		repository:     repository,
+		executor:       executor,
+		jobService:     jobService,
+		storage:        storage,
+		fileStorage:    fileStorage,
+		sse:            sse,
+		logger:         logger.WithField("component", "job_adapter"),
+		maxRequestSize: maxRequestSize,
 	}
 }
 
@@ -226,7 +232,7 @@ func (a *JobAdapter) CreateJob(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			a.logger.WithError(err).Error("failed to create job")
 			// Check if it's a validation error and return 400 instead of 500
-			if errors.IsValidationError(err) {
+			if pferrors.IsValidationError(err) {
 				a.writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
 				return
 			}
@@ -555,9 +561,17 @@ func (a *JobAdapter) PushJobLogs(w http.ResponseWriter, r *http.Request, jobId s
 	}
 
 	// Read the raw log content from the request body
-	body, err := readRequestBody(r, 10*1024*1024) // 10MB max
+	maxSize := a.maxRequestSize
+	if maxSize <= 0 {
+		maxSize = 10 * 1024 * 1024
+	}
+	body, err := readRequestBody(r, maxSize)
 	if err != nil {
-		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Failed to read log content", err)
+		status := http.StatusBadRequest
+		if isRequestBodyTooLarge(err) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		a.writeError(w, status, "INVALID_REQUEST", "Failed to read log content", err)
 		return
 	}
 
@@ -679,30 +693,35 @@ func parseLogLine(line string) *common.JobLog {
 
 // readRequestBody reads the request body with a size limit
 func readRequestBody(r *http.Request, maxSize int64) ([]byte, error) {
-	if r.ContentLength > maxSize {
-		return nil, fmt.Errorf("request body too large: %d > %d", r.ContentLength, maxSize)
+	limit := maxSize
+	if limit <= 0 {
+		limit = 10 * 1024 * 1024
+	}
+	if limit > 0 && r.ContentLength > limit {
+		return nil, errUploadTooLarge
 	}
 
 	// Create a limited reader
-	limitedReader := http.MaxBytesReader(nil, r.Body, maxSize)
+	limitedReader := io.LimitReader(r.Body, limit+1)
 	defer r.Body.Close()
 
-	body := make([]byte, 0, r.ContentLength)
-	buf := make([]byte, 4096)
-	for {
-		n, err := limitedReader.Read(buf)
-		if n > 0 {
-			body = append(body, buf[:n]...)
-		}
-		if err != nil {
-			if err.Error() == "http: request body too large" {
-				return nil, fmt.Errorf("request body too large")
-			}
-			break
-		}
+	body, err := io.ReadAll(limitedReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read request body: %w", err)
+	}
+
+	if limit > 0 && int64(len(body)) > limit {
+		return nil, errUploadTooLarge
 	}
 
 	return body, nil
+}
+
+func isRequestBodyTooLarge(err error) bool {
+	if errors.Is(err, errUploadTooLarge) {
+		return true
+	}
+	return strings.Contains(err.Error(), "request body too large")
 }
 
 // GetJobCoverage retrieves job coverage reports
@@ -1673,13 +1692,28 @@ func (a *JobAdapter) UploadBinary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the binary data from request body
-	data, err := readRequestBody(r, 100*1024*1024) // 100MB max
-	if err != nil {
-		a.writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Failed to read binary data", err)
+	maxSize := a.maxRequestSize
+	if maxSize <= 0 {
+		maxSize = 100 * 1024 * 1024
+	}
+	if maxSize > 0 && r.ContentLength > maxSize {
+		a.writeError(w, http.StatusRequestEntityTooLarge, "INVALID_REQUEST", "Binary exceeds size limit", nil)
 		return
 	}
 
-	if len(data) == 0 {
+	tempPath, size, _, err := streamToTempFile(r.Body, maxSize, false)
+	r.Body.Close()
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errUploadTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		a.writeError(w, status, "INVALID_REQUEST", "Failed to stream binary data", err)
+		return
+	}
+
+	if size == 0 {
+		os.Remove(tempPath)
 		a.writeError(w, http.StatusBadRequest, "EMPTY_BINARY", "Binary data is empty", nil)
 		return
 	}
@@ -1690,19 +1724,31 @@ func (a *JobAdapter) UploadBinary(w http.ResponseWriter, r *http.Request) {
 	a.logger.WithFields(logrus.Fields{
 		"binary_name":  binaryName,
 		"storage_path": storagePath,
-		"size":         len(data),
+		"size":         size,
 	}).Info("Uploading binary to storage")
 
-	if err := a.fileStorage.SaveFile(ctx, storagePath, data); err != nil {
-		a.logger.WithError(err).WithField("storage_path", storagePath).Error("Failed to save binary to storage")
+	tempFile, err := os.Open(tempPath)
+	if err != nil {
+		os.Remove(tempPath)
+		a.logger.WithError(err).WithField("storage_path", storagePath).Error("Failed to open temp binary file")
 		a.writeError(w, http.StatusInternalServerError, "STORAGE_ERROR", "Failed to save binary", err)
 		return
 	}
 
+	if err := a.fileStorage.SaveFileStream(ctx, storagePath, tempFile, size); err != nil {
+		tempFile.Close()
+		os.Remove(tempPath)
+		a.logger.WithError(err).WithField("storage_path", storagePath).Error("Failed to save binary to storage")
+		a.writeError(w, http.StatusInternalServerError, "STORAGE_ERROR", "Failed to save binary", err)
+		return
+	}
+	tempFile.Close()
+	os.Remove(tempPath)
+
 	a.logger.WithFields(logrus.Fields{
 		"binary_name":  binaryName,
 		"storage_path": storagePath,
-		"size":         len(data),
+		"size":         size,
 	}).Info("Binary uploaded successfully")
 
 	// Return success response
@@ -1712,7 +1758,7 @@ func (a *JobAdapter) UploadBinary(w http.ResponseWriter, r *http.Request) {
 		"status":       "success",
 		"binary_name":  binaryName,
 		"storage_path": storagePath,
-		"size":         len(data),
+		"size":         size,
 	})
 }
 

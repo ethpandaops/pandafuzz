@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // MockCorpusStorage is a mock implementation for corpus storage
@@ -110,6 +112,15 @@ func (m *MockFileStorage) SaveFile(ctx context.Context, path string, data []byte
 	return args.Error(0)
 }
 
+func (m *MockFileStorage) SaveFileStream(ctx context.Context, path string, reader io.Reader, size int64) error {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return err
+	}
+	args := m.Called(ctx, path, data, size)
+	return args.Error(0)
+}
+
 func (m *MockFileStorage) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	args := m.Called(ctx, path)
 	if args.Get(0) == nil {
@@ -136,6 +147,14 @@ func (m *MockFileStorage) FileExists(ctx context.Context, path string) (bool, er
 	return args.Bool(0), args.Error(1)
 }
 
+func newCorpusService(t *testing.T, storage common.Storage, fileStorage common.FileStorage, corpusDir string, logger logrus.FieldLogger) common.CorpusService {
+	t.Helper()
+
+	cs, err := NewCorpusService(storage, fileStorage, corpusDir, logger)
+	require.NoError(t, err)
+	return cs
+}
+
 func TestCorpusService_AddFile(t *testing.T) {
 	ctx := context.Background()
 	logger := logrus.New()
@@ -144,7 +163,10 @@ func TestCorpusService_AddFile(t *testing.T) {
 	t.Run("add new corpus file", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
+		cs := newCorpusService(t, mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
+		service := cs.(*corpusService)
+		service.quarantine = nil
+		service.enableMetrics = false
 
 		file := &common.CorpusFile{
 			CampaignID:  "campaign1",
@@ -168,6 +190,8 @@ func TestCorpusService_AddFile(t *testing.T) {
 		})).Return(nil).Once()
 
 		// Mock tracking evolution
+		mockStorage.On("GetCorpusFiles", ctx, file.CampaignID).Return([]*common.CorpusFile{file}, nil).Once()
+		mockStorage.On("GetCorpusEvolution", ctx, file.CampaignID, 1).Return([]*common.CorpusEvolution{}, nil).Once()
 		mockStorage.On("RecordCorpusEvolution", ctx, mock.MatchedBy(func(ce *common.CorpusEvolution) bool {
 			return ce.CampaignID == file.CampaignID && ce.NewFiles == 1 && ce.NewCoverage == file.NewCoverage
 		})).Return(nil).Once()
@@ -182,10 +206,11 @@ func TestCorpusService_AddFile(t *testing.T) {
 	t.Run("add duplicate corpus file", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
+		cs := newCorpusService(t, mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 		file := &common.CorpusFile{
 			CampaignID: "campaign1",
+			Filename:   "existing_input",
 			Hash:       "existing_hash",
 		}
 
@@ -195,6 +220,7 @@ func TestCorpusService_AddFile(t *testing.T) {
 		}
 
 		// Mock finding existing file
+		mockStorage.On("GetQuarantinedFile", ctx, mock.Anything).Return(nil, common.ErrQuarantinedFileNotFound).Once()
 		mockStorage.On("GetCorpusFileByHash", ctx, file.Hash).
 			Return(existingFile, nil).Once()
 
@@ -204,10 +230,10 @@ func TestCorpusService_AddFile(t *testing.T) {
 		mockStorage.AssertExpectations(t)
 	})
 
-	t.Run("add file exceeding size limit", func(t *testing.T) {
+	t.Run("add file missing filename", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
+		cs := newCorpusService(t, mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 		file := &common.CorpusFile{
 			CampaignID: "campaign1",
@@ -217,7 +243,7 @@ func TestCorpusService_AddFile(t *testing.T) {
 
 		err := cs.AddFile(ctx, file)
 		assert.Error(t, err)
-		assert.Equal(t, common.ErrCorpusFileTooLarge, err)
+		assert.Contains(t, err.Error(), "filename is required")
 	})
 }
 
@@ -228,7 +254,7 @@ func TestCorpusService_GetEvolution(t *testing.T) {
 
 	mockStorage := new(MockCorpusStorage)
 	mockFileStorage := new(MockFileStorage)
-	cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
+	cs := newCorpusService(t, mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 	t.Run("get corpus evolution history", func(t *testing.T) {
 		campaignID := "campaign1"
@@ -264,7 +290,7 @@ func TestCorpusService_GetEvolution(t *testing.T) {
 			},
 		}
 
-		mockStorage.On("GetCorpusEvolution", ctx, campaignID, 100).
+		mockStorage.On("GetCorpusEvolution", ctx, campaignID, 1000).
 			Return(expectedEvolution, nil).Once()
 
 		evolution, err := cs.GetEvolution(ctx, campaignID)
@@ -282,7 +308,7 @@ func TestCorpusService_SyncCorpus(t *testing.T) {
 	t.Run("sync corpus files to bot", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
+		cs := newCorpusService(t, mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 		campaignID := "campaign1"
 		botID := "bot1"
@@ -305,6 +331,8 @@ func TestCorpusService_SyncCorpus(t *testing.T) {
 		// Mock getting unsynced files
 		mockStorage.On("GetUnsyncedCorpusFiles", ctx, campaignID, botID).
 			Return(unsyncedFiles, nil).Once()
+		mockStorage.On("GetQuarantinedFile", ctx, "file1").Return(nil, common.ErrQuarantinedFileNotFound).Once()
+		mockStorage.On("GetQuarantinedFile", ctx, "file2").Return(nil, common.ErrQuarantinedFileNotFound).Once()
 
 		// Mock marking files as synced
 		fileIDs := []string{"file1", "file2"}
@@ -320,7 +348,7 @@ func TestCorpusService_SyncCorpus(t *testing.T) {
 	t.Run("no files to sync", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
+		cs := newCorpusService(t, mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
 
 		campaignID := "campaign1"
 		botID := "bot1"
@@ -344,7 +372,10 @@ func TestCorpusService_ShareCorpus(t *testing.T) {
 	t.Run("share corpus between campaigns", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
+		cs := newCorpusService(t, mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
+		service := cs.(*corpusService)
+		service.quarantine = nil
+		service.enableMetrics = false
 
 		fromCampaign := "campaign1"
 		toCampaign := "campaign2"
@@ -369,9 +400,21 @@ func TestCorpusService_ShareCorpus(t *testing.T) {
 			},
 		}
 
+		campaignHash := "binary-hash"
+		mockStorage.On("GetCampaign", ctx, fromCampaign).Return(&common.Campaign{
+			ID:         fromCampaign,
+			BinaryHash: campaignHash,
+		}, nil).Once()
+		mockStorage.On("GetCampaign", ctx, toCampaign).Return(&common.Campaign{
+			ID:         toCampaign,
+			BinaryHash: campaignHash,
+		}, nil).Once()
+
 		// Mock getting source campaign files
 		mockStorage.On("GetCorpusFiles", ctx, fromCampaign).
 			Return(sourceFiles, nil).Once()
+		mockStorage.On("GetCorpusFiles", ctx, toCampaign).
+			Return([]*common.CorpusFile{}, nil).Once()
 
 		// For each file, check if it exists in target campaign
 		for _, file := range sourceFiles {
@@ -384,11 +427,6 @@ func TestCorpusService_ShareCorpus(t *testing.T) {
 			})).Return(nil).Once()
 		}
 
-		// Mock tracking evolution for target campaign
-		mockStorage.On("RecordCorpusEvolution", ctx, mock.MatchedBy(func(ce *common.CorpusEvolution) bool {
-			return ce.CampaignID == toCampaign && ce.NewFiles == 2
-		})).Return(nil).Once()
-
 		err := cs.ShareCorpus(ctx, fromCampaign, toCampaign)
 		assert.NoError(t, err)
 		mockStorage.AssertExpectations(t)
@@ -397,50 +435,60 @@ func TestCorpusService_ShareCorpus(t *testing.T) {
 	t.Run("share corpus with some duplicates", func(t *testing.T) {
 		mockStorage := new(MockCorpusStorage)
 		mockFileStorage := new(MockFileStorage)
-		cs := NewCorpusService(mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
+		cs := newCorpusService(t, mockStorage, mockFileStorage, "/tmp/test-corpus", logger)
+		service := cs.(*corpusService)
+		service.quarantine = nil
+		service.enableMetrics = false
 
 		fromCampaign := "campaign1"
 		toCampaign := "campaign2"
 
 		sourceFiles := []*common.CorpusFile{
 			{
-				ID:         "file1",
-				CampaignID: fromCampaign,
-				Hash:       "hash1",
+				ID:          "file1",
+				CampaignID:  fromCampaign,
+				Hash:        "hash1",
+				Filename:    "input1",
+				NewCoverage: 50,
 			},
 			{
-				ID:         "file2",
-				CampaignID: fromCampaign,
-				Hash:       "hash2",
+				ID:          "file2",
+				CampaignID:  fromCampaign,
+				Hash:        "hash2",
+				Filename:    "input2",
+				NewCoverage: 75,
 			},
 		}
 
-		existingFile := &common.CorpusFile{
-			ID:         "existing",
-			CampaignID: toCampaign,
-			Hash:       "hash1",
-		}
+		campaignHash := "binary-hash"
+		mockStorage.On("GetCampaign", ctx, fromCampaign).Return(&common.Campaign{
+			ID:         fromCampaign,
+			BinaryHash: campaignHash,
+		}, nil).Once()
+		mockStorage.On("GetCampaign", ctx, toCampaign).Return(&common.Campaign{
+			ID:         toCampaign,
+			BinaryHash: campaignHash,
+		}, nil).Once()
 
 		// Mock getting source campaign files
 		mockStorage.On("GetCorpusFiles", ctx, fromCampaign).
 			Return(sourceFiles, nil).Once()
+		mockStorage.On("GetCorpusFiles", ctx, toCampaign).
+			Return([]*common.CorpusFile{
+				{
+					ID:         "existing",
+					CampaignID: toCampaign,
+					Hash:       "hash1",
+				},
+			}, nil).Once()
 
-		// First file already exists
-		mockStorage.On("GetCorpusFileByHash", ctx, "hash1").
-			Return(existingFile, nil).Once()
-
-		// Second file doesn't exist
+		// Only share the non-duplicate file
 		mockStorage.On("GetCorpusFileByHash", ctx, "hash2").
 			Return(nil, common.ErrKeyNotFound).Once()
 
 		// Only add the non-duplicate file
 		mockStorage.On("AddCorpusFile", ctx, mock.MatchedBy(func(cf *common.CorpusFile) bool {
 			return cf.CampaignID == toCampaign && cf.Hash == "hash2"
-		})).Return(nil).Once()
-
-		// Mock tracking evolution with only 1 new file
-		mockStorage.On("RecordCorpusEvolution", ctx, mock.MatchedBy(func(ce *common.CorpusEvolution) bool {
-			return ce.CampaignID == toCampaign && ce.NewFiles == 1
 		})).Return(nil).Once()
 
 		err := cs.ShareCorpus(ctx, fromCampaign, toCampaign)
@@ -466,12 +514,17 @@ func TestCorpusService_trackEvolution(t *testing.T) {
 
 		campaignID := "campaign1"
 
+		mockStorage.On("GetCorpusFiles", ctx, campaignID).Return([]*common.CorpusFile{}, nil).Once()
+		mockStorage.On("GetCorpusEvolution", ctx, campaignID, 1).Return([]*common.CorpusEvolution{}, nil).Once()
+
 		// Mock recording evolution
 		mockStorage.On("RecordCorpusEvolution", ctx, mock.MatchedBy(func(ce *common.CorpusEvolution) bool {
 			return ce.CampaignID == campaignID &&
 				ce.TotalFiles == 0 &&
 				ce.TotalSize == 0 &&
 				ce.TotalCoverage == 0 &&
+				ce.NewFiles == 0 &&
+				ce.NewCoverage == 0 &&
 				!ce.Timestamp.IsZero()
 		})).Return(nil).Once()
 

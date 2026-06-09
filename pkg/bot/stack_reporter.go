@@ -84,7 +84,7 @@ func (sr *StackReporter) extractASANFrames(trace string) []common.StackFrame {
 	var frames []common.StackFrame
 
 	// ASAN format: #0 0x7ffff... in function_name file.c:123:45
-	asanPattern := regexp.MustCompile(`#(\d+)\s+0x[0-9a-fA-F]+\s+in\s+([^\s]+)\s+([^:]+):(\d+)(?::(\d+))?`)
+	asanPattern := regexp.MustCompile(`(?m)^[ \t]*#(\d+)[ \t]+0x[0-9a-fA-F]+[ \t]+in[ \t]+([^\s]+)[ \t]+([^\s:]+):(\d+)(?::(\d+))?`)
 	matches := asanPattern.FindAllStringSubmatch(trace, -1)
 
 	for _, match := range matches {
@@ -124,16 +124,27 @@ func (sr *StackReporter) extractGDBFrames(trace string) []common.StackFrame {
 	var frames []common.StackFrame
 
 	// GDB format: #0  0x00000000 in function_name () at file.c:123
-	gdbPattern := regexp.MustCompile(`#(\d+)\s+0x[0-9a-fA-F]+\s+in\s+([^\s(]+)[^a]+at\s+([^:]+):(\d+)`)
+	gdbPattern := regexp.MustCompile(`(?m)^[ \t]*#(\d+)[ \t]+0x[0-9a-fA-F]+[ \t]+in[ \t]+([^\s]+)(?:[ \t]*\([^)]*\))?[ \t]+(?:at[ \t]+([^:]+):(\d+)|from[ \t]+(\S+))`)
 	matches := gdbPattern.FindAllStringSubmatch(trace, -1)
 
 	for _, match := range matches {
-		line, _ := strconv.Atoi(match[4])
+		line := 0
+		if match[4] != "" {
+			line, _ = strconv.Atoi(match[4])
+		}
+
+		file := match[3]
+		if file == "" {
+			file = match[5]
+		}
+
+		function, offset := parseFunctionOffset(match[2])
 
 		frame := common.StackFrame{
-			Function: match[2],
-			File:     match[3],
+			Function: function,
+			File:     file,
 			Line:     line,
+			Offset:   offset,
 		}
 
 		frames = append(frames, frame)
@@ -407,4 +418,30 @@ func isValidFunctionName(name string) bool {
 	}
 
 	return true
+}
+
+func parseFunctionOffset(function string) (string, uint64) {
+	if function == "" {
+		return function, 0
+	}
+
+	if idx := strings.LastIndex(function, "+0x"); idx != -1 {
+		offsetHex := function[idx+3:]
+		if offsetHex != "" {
+			if offset, err := strconv.ParseUint(offsetHex, 16, 64); err == nil {
+				return function[:idx], offset
+			}
+		}
+	}
+
+	if idx := strings.LastIndex(function, "+"); idx != -1 {
+		offsetDec := function[idx+1:]
+		if offsetDec != "" {
+			if offset, err := strconv.ParseUint(offsetDec, 10, 64); err == nil {
+				return function[:idx], offset
+			}
+		}
+	}
+
+	return function, 0
 }

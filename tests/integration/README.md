@@ -21,7 +21,7 @@ The integration tests are organized into the following categories:
 - Multi-bot job distribution
 - Job filtering by capabilities
 
-### 3. Crash Reporting Tests (`crash_reporting_test.go`)
+### 3. Crash Reporting Tests (`honggfuzz_crash_detection_test.go`)
 - Crash report submission and storage
 - Crash deduplication mechanisms
 - Integration with crash analysis engine
@@ -80,6 +80,10 @@ go test ./tests/integration -run TestCrash -v
 ```bash
 PANDAFUZZ_LOG_LEVEL=debug go test ./tests/integration/... -v
 ```
+
+### Authentication Notes
+
+Integration tests assume API key auth is enabled and use a test key in the in-memory configs.
 
 ### Run Benchmarks
 ```bash

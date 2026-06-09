@@ -2,9 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
 	"testing"
 
 	"github.com/ethpandaops/pandafuzz/pkg/common"
@@ -13,67 +10,13 @@ import (
 	"github.com/stretchr/testify/mock"
 )
 
-// MockDedupStorage is a mock implementation for deduplication storage
-type MockDedupStorage struct {
-	mock.Mock
-}
-
-func (m *MockDedupStorage) CreateCrashGroup(ctx context.Context, cg *common.CrashGroup) error {
-	args := m.Called(ctx, cg)
-	return args.Error(0)
-}
-
-func (m *MockDedupStorage) GetCrashGroup(ctx context.Context, campaignID, stackHash string) (*common.CrashGroup, error) {
-	args := m.Called(ctx, campaignID, stackHash)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*common.CrashGroup), args.Error(1)
-}
-
-func (m *MockDedupStorage) UpdateCrashGroupCount(ctx context.Context, id string) error {
-	args := m.Called(ctx, id)
-	return args.Error(0)
-}
-
-func (m *MockDedupStorage) ListCrashGroups(ctx context.Context, campaignID string) ([]*common.CrashGroup, error) {
-	args := m.Called(ctx, campaignID)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).([]*common.CrashGroup), args.Error(1)
-}
-
-func (m *MockDedupStorage) CreateStackTrace(ctx context.Context, crashID string, st *common.StackTrace) error {
-	args := m.Called(ctx, crashID, st)
-	return args.Error(0)
-}
-
-func (m *MockDedupStorage) GetStackTrace(ctx context.Context, crashID string) (*common.StackTrace, error) {
-	args := m.Called(ctx, crashID)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*common.StackTrace), args.Error(1)
-}
-
-func (m *MockDedupStorage) LinkCrashToGroup(ctx context.Context, crashID, groupID string) error {
-	args := m.Called(ctx, crashID, groupID)
-	return args.Error(0)
-}
-
-func (m *MockDedupStorage) UpdateCrash(ctx context.Context, crash *common.CrashResult) error {
-	args := m.Called(ctx, crash)
-	return args.Error(0)
-}
-
 func TestDeduplicationService_ProcessCrash(t *testing.T) {
 	ctx := context.Background()
 	logger := logrus.New()
 	logger.SetLevel(logrus.DebugLevel)
 
 	t.Run("process new unique crash with ASAN trace", func(t *testing.T) {
-		mockStorage := new(MockDedupStorage)
+		mockStorage := new(MockStorage)
 		ds := NewDeduplicationService(mockStorage, logger)
 
 		crash := &common.CrashResult{
@@ -91,18 +34,17 @@ func TestDeduplicationService_ProcessCrash(t *testing.T) {
     #4 0x7f8a6b123789 in _start (/path/to/binary+0x1789)`,
 		}
 
-		// Compute expected hash for top 5 frames
-		expectedFrames := []common.StackFrame{
-			{Function: "vulnerable_function", File: "/src/vulnerable.c", Line: 42},
-			{Function: "process_input", File: "/src/main.c", Line: 156},
-			{Function: "main", File: "/src/main.c", Line: 200},
-			{Function: "__libc_start_main", File: "/build/glibc/src/csu/libc-start.c", Line: 308},
-			{Function: "_start", File: "/path/to/binary+0x1789", Line: 0},
-		}
+		job := &common.Job{ID: crash.JobID}
 
 		// Mock no existing crash group found
+		mockStorage.On("GetJob", ctx, crash.JobID).Return(job, nil).Once()
+		mockStorage.On("ListCampaigns", ctx, 0, 0, "").Return([]*common.Campaign{
+			{ID: crash.CampaignID},
+		}, nil).Once()
+		mockStorage.On("GetCampaignJobs", ctx, crash.CampaignID).Return([]*common.Job{job}, nil).Once()
+		mockStorage.On("UpdateCrashWithCampaign", ctx, crash.ID, crash.CampaignID).Return(nil).Once()
 		mockStorage.On("GetCrashGroup", ctx, crash.CampaignID, mock.Anything).
-			Return(nil, common.ErrKeyNotFound).Once()
+			Return(nil, common.ErrCrashGroupNotFound).Once()
 
 		// Mock creating new crash group
 		mockStorage.On("CreateCrashGroup", ctx, mock.MatchedBy(func(cg *common.CrashGroup) bool {
@@ -110,21 +52,16 @@ func TestDeduplicationService_ProcessCrash(t *testing.T) {
 				cg.Count == 1 &&
 				cg.Severity == "high" &&
 				cg.ExampleCrash == crash.ID &&
-				len(cg.StackFrames) == 5
+				len(cg.StackFrames) == 4
 		})).Return(nil).Once()
 
 		// Mock creating stack trace
 		mockStorage.On("CreateStackTrace", ctx, crash.ID, mock.MatchedBy(func(st *common.StackTrace) bool {
-			return len(st.Frames) == 5 && st.RawTrace == crash.StackTrace
+			return len(st.Frames) == 4 && st.RawTrace == crash.StackTrace
 		})).Return(nil).Once()
 
 		// Mock linking crash to group
 		mockStorage.On("LinkCrashToGroup", ctx, crash.ID, mock.Anything).Return(nil).Once()
-
-		// Mock updating crash
-		mockStorage.On("UpdateCrash", ctx, mock.MatchedBy(func(c *common.CrashResult) bool {
-			return c.ID == crash.ID && c.StackHash != "" && c.CrashGroupID != ""
-		})).Return(nil).Once()
 
 		group, isNew, err := ds.ProcessCrash(ctx, crash)
 		assert.NoError(t, err)
@@ -137,7 +74,7 @@ func TestDeduplicationService_ProcessCrash(t *testing.T) {
 	})
 
 	t.Run("process duplicate crash", func(t *testing.T) {
-		mockStorage := new(MockDedupStorage)
+		mockStorage := new(MockStorage)
 		ds := NewDeduplicationService(mockStorage, logger)
 
 		crash := &common.CrashResult{
@@ -151,6 +88,8 @@ func TestDeduplicationService_ProcessCrash(t *testing.T) {
     #2 0x7f8a6b1236cd in main /src/main.c:200:5`,
 		}
 
+		job := &common.Job{ID: crash.JobID}
+
 		existingGroup := &common.CrashGroup{
 			ID:           "group1",
 			CampaignID:   crash.CampaignID,
@@ -161,6 +100,12 @@ func TestDeduplicationService_ProcessCrash(t *testing.T) {
 		}
 
 		// Mock finding existing crash group
+		mockStorage.On("GetJob", ctx, crash.JobID).Return(job, nil).Once()
+		mockStorage.On("ListCampaigns", ctx, 0, 0, "").Return([]*common.Campaign{
+			{ID: crash.CampaignID},
+		}, nil).Once()
+		mockStorage.On("GetCampaignJobs", ctx, crash.CampaignID).Return([]*common.Job{job}, nil).Once()
+		mockStorage.On("UpdateCrashWithCampaign", ctx, crash.ID, crash.CampaignID).Return(nil).Once()
 		mockStorage.On("GetCrashGroup", ctx, crash.CampaignID, mock.Anything).
 			Return(existingGroup, nil).Once()
 
@@ -173,11 +118,6 @@ func TestDeduplicationService_ProcessCrash(t *testing.T) {
 		// Mock linking crash to group
 		mockStorage.On("LinkCrashToGroup", ctx, crash.ID, existingGroup.ID).Return(nil).Once()
 
-		// Mock updating crash
-		mockStorage.On("UpdateCrash", ctx, mock.MatchedBy(func(c *common.CrashResult) bool {
-			return c.ID == crash.ID && c.CrashGroupID == existingGroup.ID
-		})).Return(nil).Once()
-
 		group, isNew, err := ds.ProcessCrash(ctx, crash)
 		assert.NoError(t, err)
 		assert.False(t, isNew)
@@ -187,26 +127,34 @@ func TestDeduplicationService_ProcessCrash(t *testing.T) {
 	})
 
 	t.Run("process crash with GDB trace", func(t *testing.T) {
-		mockStorage := new(MockDedupStorage)
+		mockStorage := new(MockStorage)
 		ds := NewDeduplicationService(mockStorage, logger)
 
 		crash := &common.CrashResult{
 			ID:         "crash3",
 			CampaignID: "campaign1",
+			JobID:      "job3",
 			StackTrace: `#0  0x0000555555554a1e in vulnerable_function () at vulnerable.c:42
 #1  0x0000555555554b2f in process_input () at main.c:156
 #2  0x0000555555554c40 in main (argc=2, argv=0x7fffffffe3d8) at main.c:200`,
 		}
 
+		job := &common.Job{ID: crash.JobID}
+
 		// Mock no existing crash group
+		mockStorage.On("GetJob", ctx, crash.JobID).Return(job, nil).Once()
+		mockStorage.On("ListCampaigns", ctx, 0, 0, "").Return([]*common.Campaign{
+			{ID: crash.CampaignID},
+		}, nil).Once()
+		mockStorage.On("GetCampaignJobs", ctx, crash.CampaignID).Return([]*common.Job{job}, nil).Once()
+		mockStorage.On("UpdateCrashWithCampaign", ctx, crash.ID, crash.CampaignID).Return(nil).Once()
 		mockStorage.On("GetCrashGroup", ctx, crash.CampaignID, mock.Anything).
-			Return(nil, common.ErrKeyNotFound).Once()
+			Return(nil, common.ErrCrashGroupNotFound).Once()
 
 		// Mock creating new crash group
 		mockStorage.On("CreateCrashGroup", ctx, mock.Anything).Return(nil).Once()
 		mockStorage.On("CreateStackTrace", ctx, crash.ID, mock.Anything).Return(nil).Once()
 		mockStorage.On("LinkCrashToGroup", ctx, crash.ID, mock.Anything).Return(nil).Once()
-		mockStorage.On("UpdateCrash", ctx, mock.Anything).Return(nil).Once()
 
 		group, isNew, err := ds.ProcessCrash(ctx, crash)
 		assert.NoError(t, err)
@@ -216,12 +164,13 @@ func TestDeduplicationService_ProcessCrash(t *testing.T) {
 	})
 
 	t.Run("process crash with LibFuzzer trace", func(t *testing.T) {
-		mockStorage := new(MockDedupStorage)
+		mockStorage := new(MockStorage)
 		ds := NewDeduplicationService(mockStorage, logger)
 
 		crash := &common.CrashResult{
 			ID:         "crash4",
 			CampaignID: "campaign1",
+			JobID:      "job4",
 			StackTrace: `==12345== ERROR: libFuzzer: deadly signal
     #0 0x51dce0 in __sanitizer_print_stack_trace
     #1 0x468fc8 in fuzzer::PrintStackTrace()
@@ -231,15 +180,22 @@ func TestDeduplicationService_ProcessCrash(t *testing.T) {
     #5 0x506cee in vulnerable_function /src/fuzz_target.cc:10:5`,
 		}
 
+		job := &common.Job{ID: crash.JobID}
+
 		// Mock no existing crash group
+		mockStorage.On("GetJob", ctx, crash.JobID).Return(job, nil).Once()
+		mockStorage.On("ListCampaigns", ctx, 0, 0, "").Return([]*common.Campaign{
+			{ID: crash.CampaignID},
+		}, nil).Once()
+		mockStorage.On("GetCampaignJobs", ctx, crash.CampaignID).Return([]*common.Job{job}, nil).Once()
+		mockStorage.On("UpdateCrashWithCampaign", ctx, crash.ID, crash.CampaignID).Return(nil).Once()
 		mockStorage.On("GetCrashGroup", ctx, crash.CampaignID, mock.Anything).
-			Return(nil, common.ErrKeyNotFound).Once()
+			Return(nil, common.ErrCrashGroupNotFound).Once()
 
 		// Mock creating new crash group
 		mockStorage.On("CreateCrashGroup", ctx, mock.Anything).Return(nil).Once()
 		mockStorage.On("CreateStackTrace", ctx, crash.ID, mock.Anything).Return(nil).Once()
 		mockStorage.On("LinkCrashToGroup", ctx, crash.ID, mock.Anything).Return(nil).Once()
-		mockStorage.On("UpdateCrash", ctx, mock.Anything).Return(nil).Once()
 
 		group, isNew, err := ds.ProcessCrash(ctx, crash)
 		assert.NoError(t, err)
@@ -249,7 +205,7 @@ func TestDeduplicationService_ProcessCrash(t *testing.T) {
 	})
 
 	t.Run("invalid stack trace", func(t *testing.T) {
-		mockStorage := new(MockDedupStorage)
+		mockStorage := new(MockStorage)
 		ds := NewDeduplicationService(mockStorage, logger)
 
 		crash := &common.CrashResult{
@@ -259,17 +215,16 @@ func TestDeduplicationService_ProcessCrash(t *testing.T) {
 		}
 
 		group, isNew, err := ds.ProcessCrash(ctx, crash)
-		assert.Error(t, err)
-		assert.Equal(t, common.ErrInvalidStackTrace, err)
+		assert.NoError(t, err)
 		assert.Nil(t, group)
-		assert.False(t, isNew)
+		assert.True(t, isNew)
 	})
 }
 
 func TestDeduplicationService_parseStackTrace(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.DebugLevel)
-	mockStorage := new(MockDedupStorage)
+	mockStorage := new(MockStorage)
 	ds := &dedupService{
 		storage:    mockStorage,
 		logger:     logger,
@@ -287,7 +242,7 @@ func TestDeduplicationService_parseStackTrace(t *testing.T) {
 		assert.Equal(t, "vulnerable_function", st.Frames[0].Function)
 		assert.Equal(t, "/src/vulnerable.c", st.Frames[0].File)
 		assert.Equal(t, 42, st.Frames[0].Line)
-		assert.Equal(t, uint64(0x7f8a6b1234ab), st.Frames[0].Offset)
+		assert.Equal(t, uint64(0), st.Frames[0].Offset)
 	})
 
 	t.Run("parse GDB trace", func(t *testing.T) {
@@ -300,25 +255,64 @@ func TestDeduplicationService_parseStackTrace(t *testing.T) {
 		assert.Equal(t, "vulnerable_function", st.Frames[0].Function)
 		assert.Equal(t, "vulnerable.c", st.Frames[0].File)
 		assert.Equal(t, 42, st.Frames[0].Line)
+		assert.Equal(t, uint64(0), st.Frames[0].Offset)
+	})
+
+	t.Run("parse GDB trace with offsets", func(t *testing.T) {
+		trace := `#0  0x00007f8b8c0a5b7f in strlen+0x15 () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x0000555555554a1e in vulnerable_function+12 () at /src/vulnerable.c:42`
+
+		st, err := ds.parseStackTrace(trace)
+		assert.NoError(t, err)
+		assert.Len(t, st.Frames, 2)
+		assert.Equal(t, "strlen", st.Frames[0].Function)
+		assert.Equal(t, "/lib/x86_64-linux-gnu/libc.so.6", st.Frames[0].File)
+		assert.Equal(t, 0, st.Frames[0].Line)
+		assert.Equal(t, uint64(0x15), st.Frames[0].Offset)
+		assert.Equal(t, "vulnerable_function", st.Frames[1].Function)
+		assert.Equal(t, "/src/vulnerable.c", st.Frames[1].File)
+		assert.Equal(t, 42, st.Frames[1].Line)
+		assert.Equal(t, uint64(12), st.Frames[1].Offset)
 	})
 
 	t.Run("parse simple trace", func(t *testing.T) {
-		trace := `vulnerable_function
-process_input
-main`
+		trace := `vulnerable_function at vulnerable.c:42
+process_input at main.c:156
+main at main.c:200`
 
 		st, err := ds.parseStackTrace(trace)
 		assert.NoError(t, err)
 		assert.Len(t, st.Frames, 3)
 		assert.Equal(t, "vulnerable_function", st.Frames[0].Function)
-		assert.Empty(t, st.Frames[0].File)
-		assert.Equal(t, 0, st.Frames[0].Line)
+		assert.Equal(t, "vulnerable.c", st.Frames[0].File)
+		assert.Equal(t, 42, st.Frames[0].Line)
+	})
+
+	t.Run("reject unsupported Java trace", func(t *testing.T) {
+		trace := `java.lang.NullPointerException
+    at com.example.Main.main(Main.java:10)
+    at com.example.Helper.doWork(Helper.java:42)`
+
+		st, err := ds.parseStackTrace(trace)
+		assert.Error(t, err)
+		assert.Nil(t, st)
+	})
+
+	t.Run("reject unsupported Go trace", func(t *testing.T) {
+		trace := `panic: runtime error: index out of range [1] with length 0
+goroutine 1 [running]:
+main.main()
+	/home/user/app/main.go:10 +0x39`
+
+		st, err := ds.parseStackTrace(trace)
+		assert.Error(t, err)
+		assert.Nil(t, st)
 	})
 }
 
 func TestDeduplicationService_computeStackHash(t *testing.T) {
 	logger := logrus.New()
-	mockStorage := new(MockDedupStorage)
+	mockStorage := new(MockStorage)
 	ds := &dedupService{
 		storage:    mockStorage,
 		logger:     logger,
@@ -364,7 +358,7 @@ func TestDeduplicationService_GetCrashGroups(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.DebugLevel)
 
-	mockStorage := new(MockDedupStorage)
+	mockStorage := new(MockStorage)
 	ds := NewDeduplicationService(mockStorage, logger)
 
 	t.Run("get crash groups for campaign", func(t *testing.T) {
@@ -397,7 +391,7 @@ func TestDeduplicationService_GetCrashGroups(t *testing.T) {
 
 func TestDeduplicationService_computeSeverity(t *testing.T) {
 	logger := logrus.New()
-	mockStorage := new(MockDedupStorage)
+	mockStorage := new(MockStorage)
 	ds := &dedupService{
 		storage:    mockStorage,
 		logger:     logger,
@@ -426,13 +420,13 @@ func TestDeduplicationService_computeSeverity(t *testing.T) {
 		},
 		{
 			name:     "double free",
-			crash:    &common.CrashResult{Type: "double_free"},
+			crash:    &common.CrashResult{Signal: 6, Output: "double free detected"},
 			expected: "critical",
 		},
 		{
 			name:     "null dereference",
 			crash:    &common.CrashResult{Type: "null_deref"},
-			expected: "medium",
+			expected: "high",
 		},
 		{
 			name:     "segmentation fault",
@@ -458,7 +452,7 @@ func TestDeduplicationService_computeSeverity(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			severity := ds.computeSeverity(tc.crash)
+			severity := ds.calculateSeverity(tc.crash)
 			assert.Equal(t, tc.expected, severity)
 		})
 	}

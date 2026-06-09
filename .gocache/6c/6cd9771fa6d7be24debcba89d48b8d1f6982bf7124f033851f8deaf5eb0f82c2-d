@@ -1,0 +1,4 @@
+./doc.go
+./factory.go
+./register.go
+./factory_test.go

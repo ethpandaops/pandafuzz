@@ -36,6 +36,7 @@ import {
   InsertDriveFile as FileIcon,
   Refresh as RefreshIcon,
 } from '@mui/icons-material';
+import { getAuthHeaders } from '../api/auth';
 import { formatDateTime } from '../utils/dateFormat';
 
 interface CorpusCollection {
@@ -88,7 +89,9 @@ function CorpusCollection() {
   const fetchCollections = async () => {
     try {
       setLoading(true);
-      const response = await fetch('/api/v1/corpus/collections');
+      const response = await fetch('/api/v1/corpus/collections', {
+        headers: getAuthHeaders(),
+      });
       if (!response.ok) throw new Error('Failed to fetch collections');
       const data = await response.json();
       setCollections(data.collections || []);
@@ -103,7 +106,9 @@ function CorpusCollection() {
   const fetchCollectionFiles = async (collectionId: string) => {
     try {
       setFilesLoading(true);
-      const response = await fetch(`/api/v1/corpus/collections/${collectionId}/files`);
+      const response = await fetch(`/api/v1/corpus/collections/${collectionId}/files`, {
+        headers: getAuthHeaders(),
+      });
       if (!response.ok) throw new Error('Failed to fetch files');
       const data = await response.json();
       setCollectionFiles(data.files || []);
@@ -122,7 +127,10 @@ function CorpusCollection() {
     try {
       const response = await fetch('/api/v1/corpus/collections', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
         body: JSON.stringify({
           name: newCollection.name,
           description: newCollection.description,
@@ -165,6 +173,7 @@ function CorpusCollection() {
 
       const response = await fetch(`/api/v1/corpus/collections/${selectedCollection.id}/upload`, {
         method: 'POST',
+        headers: getAuthHeaders(),
         body: formData,
       });
 
@@ -202,6 +211,7 @@ function CorpusCollection() {
     try {
       const response = await fetch(`/api/v1/corpus/collections/${collection.id}`, {
         method: 'DELETE',
+        headers: getAuthHeaders(),
       });
 
       if (!response.ok) {

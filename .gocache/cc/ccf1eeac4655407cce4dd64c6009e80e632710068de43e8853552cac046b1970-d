@@ -1,0 +1,5 @@
+./client.go
+./events.go
+./filters.go
+./manager.go
+./types.go

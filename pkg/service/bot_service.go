@@ -13,7 +13,8 @@ import (
 
 // botService implements BotService interface
 type botService struct {
-	state          StateStore
+	botRepo        BotRepository
+	jobRepo        JobRepository // For GetCurrentJob
 	timeoutManager TimeoutManager
 	config         *common.MasterConfig
 	logger         *logrus.Logger
@@ -26,15 +27,17 @@ type botService struct {
 // Compile-time interface compliance check
 var _ BotService = (*botService)(nil)
 
-// NewBotService creates a new bot service
+// NewBotService creates a new bot service using repository interfaces.
 func NewBotService(
-	state StateStore,
+	botRepo BotRepository,
+	jobRepo JobRepository,
 	timeoutManager TimeoutManager,
 	config *common.MasterConfig,
 	logger *logrus.Logger,
 ) BotService {
 	return &botService{
-		state:          state,
+		botRepo:        botRepo,
+		jobRepo:        jobRepo,
 		timeoutManager: timeoutManager,
 		config:         config,
 		logger:         logger,
@@ -79,8 +82,8 @@ func (s *botService) RegisterBot(ctx context.Context, hostname string, name stri
 		APIEndpoint:  apiEndpoint,
 	}
 
-	// Save bot with retry using context
-	if err := s.state.SaveBotWithRetry(bot); err != nil {
+	// Save bot using repository
+	if err := s.botRepo.Create(ctx, bot); err != nil {
 		return nil, errors.Wrap(errors.ErrorTypeDatabase, "register_bot", "Failed to save bot", err)
 	}
 
@@ -103,8 +106,7 @@ func (s *botService) GetBot(ctx context.Context, botID string) (*common.Bot, err
 		return nil, errors.NewValidationError("get_bot", "Bot ID is required")
 	}
 
-	// Use the provided context directly
-	bot, err := s.state.GetBot(botID)
+	bot, err := s.botRepo.Get(ctx, botID)
 	if err != nil {
 		if common.IsNotFoundError(err) {
 			return nil, errors.NewNotFoundError("get_bot", "bot")
@@ -124,8 +126,8 @@ func (s *botService) DeleteBot(ctx context.Context, botID string) error {
 	// Remove timeout
 	s.timeoutManager.RemoveBotTimeout(botID)
 
-	// Delete bot
-	if err := s.state.DeleteBot(botID); err != nil {
+	// Delete bot using repository
+	if err := s.botRepo.Delete(ctx, botID); err != nil {
 		return errors.Wrap(errors.ErrorTypeDatabase, "delete_bot", "Failed to delete bot", err)
 	}
 
@@ -139,12 +141,8 @@ func (s *botService) UpdateHeartbeat(ctx context.Context, botID string, status c
 		return errors.NewValidationError("update_heartbeat", "Bot ID is required")
 	}
 
-	// Use optimized heartbeat update method if available
-	if err := s.state.UpdateBotHeartbeat(ctx, botID, status, currentJob); err != nil {
-		// Fallback to traditional method if optimized method is not available
-		if errors.IsMethodNotFound(err) {
-			return s.updateHeartbeatFallback(ctx, botID, status, currentJob)
-		}
+	// Use repository heartbeat update
+	if err := s.botRepo.UpdateHeartbeat(ctx, botID, status, currentJob); err != nil {
 		return errors.Wrap(errors.ErrorTypeDatabase, "update_heartbeat", "Failed to update bot heartbeat", err)
 	}
 
@@ -159,47 +157,16 @@ func (s *botService) UpdateHeartbeat(ctx context.Context, botID string, status c
 	return nil
 }
 
-// updateHeartbeatFallback uses the traditional read-modify-write pattern
-func (s *botService) updateHeartbeatFallback(ctx context.Context, botID string, status common.BotStatus, currentJob *string) error {
-	// Get existing bot
-	bot, err := s.state.GetBot(botID)
-	if err != nil {
-		return errors.Wrap(errors.ErrorTypeDatabase, "update_heartbeat", "Failed to get bot", err)
-	}
-
-	// Update bot status
-	now := time.Now()
-	bot.LastSeen = now
-	bot.Status = status
-	bot.CurrentJob = currentJob
-	bot.IsOnline = true
-	bot.TimeoutAt = now.Add(s.config.Timeouts.BotHeartbeat)
-
-	// Save bot
-	if err := s.state.SaveBotWithRetry(bot); err != nil {
-		return errors.Wrap(errors.ErrorTypeDatabase, "update_heartbeat", "Failed to update bot", err)
-	}
-
-	return nil
-}
-
 // ListBots returns all bots, optionally filtered by status
 func (s *botService) ListBots(ctx context.Context, statusFilter *common.BotStatus) ([]*common.Bot, error) {
-	// Use the provided context directly
-	bots, err := s.state.ListBots()
-	if err != nil {
-		return nil, errors.Wrap(errors.ErrorTypeDatabase, "list_bots", "Failed to list bots", err)
+	// Use status filter if provided
+	if statusFilter != nil {
+		return s.botRepo.ListByStatus(ctx, *statusFilter)
 	}
 
-	// Apply filter if provided
-	if statusFilter != nil {
-		var filtered []*common.Bot
-		for _, bot := range bots {
-			if bot.Status == *statusFilter {
-				filtered = append(filtered, bot)
-			}
-		}
-		return filtered, nil
+	bots, err := s.botRepo.List(ctx)
+	if err != nil {
+		return nil, errors.Wrap(errors.ErrorTypeDatabase, "list_bots", "Failed to list bots", err)
 	}
 
 	return bots, nil
@@ -207,30 +174,34 @@ func (s *botService) ListBots(ctx context.Context, statusFilter *common.BotStatu
 
 // GetAvailableBot finds an available bot for job assignment
 func (s *botService) GetAvailableBot(ctx context.Context, requiredCapabilities []string) (*common.Bot, error) {
-	// Try to use optimized query if available
-	if bot, err := s.state.GetAvailableBotWithCapabilities(ctx, requiredCapabilities); err == nil {
+	// Try to use optimized query
+	bot, err := s.botRepo.FindAvailableWithCapabilities(ctx, requiredCapabilities)
+	if err == nil {
 		return bot, nil
-	} else if !errors.IsMethodNotFound(err) {
-		// If it's not a method not found error, return the actual error
-		return nil, errors.Wrap(errors.ErrorTypeDatabase, "get_available_bot", "Failed to get available bot", err)
+	}
+
+	// If not found error, return appropriate message
+	if common.IsNotFoundError(err) {
+		return nil, errors.New(errors.ErrorTypeCapability, "get_available_bot",
+			fmt.Sprintf("No available bot with required capabilities: %v", requiredCapabilities))
 	}
 
 	// Fallback to listing all bots
-	bots, err := s.state.ListBots()
-	if err != nil {
-		return nil, errors.Wrap(errors.ErrorTypeDatabase, "get_available_bot", "Failed to list bots", err)
+	bots, listErr := s.botRepo.List(ctx)
+	if listErr != nil {
+		return nil, errors.Wrap(errors.ErrorTypeDatabase, "get_available_bot", "Failed to list bots", listErr)
 	}
 
 	// Find available bot with required capabilities
-	for _, bot := range bots {
+	for _, b := range bots {
 		// Check if bot is available
-		if bot.Status != common.BotStatusIdle || !bot.IsOnline {
+		if b.Status != common.BotStatusIdle || !b.IsOnline {
 			continue
 		}
 
 		// Check capabilities
-		if hasRequiredCapabilities(bot.Capabilities, requiredCapabilities) {
-			return bot, nil
+		if hasRequiredCapabilities(b.Capabilities, requiredCapabilities) {
+			return b, nil
 		}
 	}
 
@@ -309,14 +280,12 @@ func (s *botService) GetCurrentJob(ctx context.Context, botID string) (*common.J
 		return nil, nil
 	}
 
-	// Get job details from state
-	if jobGetter, ok := s.state.(interface {
-		GetJob(jobID string) (*common.Job, error)
-	}); ok {
-		return jobGetter.GetJob(*bot.CurrentJob)
+	// Get job details using job repository
+	if s.jobRepo == nil {
+		return nil, errors.New(errors.ErrorTypeMethodNotFound, "get_current_job", "Job repository not available")
 	}
 
-	return nil, errors.New(errors.ErrorTypeMethodNotFound, "get_current_job", "GetJob method not available on state store")
+	return s.jobRepo.Get(ctx, *bot.CurrentJob)
 }
 
 // GetMetrics retrieves metrics for a bot
@@ -325,14 +294,7 @@ func (s *botService) GetMetrics(ctx context.Context, botID string) (*BotMetrics,
 		return nil, errors.NewValidationError("get_metrics", "Bot ID is required")
 	}
 
-	// Try to get metrics from state if available
-	if metricsGetter, ok := s.state.(interface {
-		GetBotMetrics(ctx context.Context, botID string) (*BotMetrics, error)
-	}); ok {
-		return metricsGetter.GetBotMetrics(ctx, botID)
-	}
-
-	// Otherwise, create basic metrics from available data
+	// Create basic metrics from available data
 	bot, err := s.GetBot(ctx, botID)
 	if err != nil {
 		return nil, err
@@ -359,7 +321,7 @@ func (s *botService) monitorBotHeartbeats() {
 			return
 		case <-ticker.C:
 			// Check for offline bots
-			bots, err := s.state.ListBots()
+			bots, err := s.botRepo.List(s.ctx)
 			if err != nil {
 				s.logger.WithError(err).Error("Failed to list bots for heartbeat monitoring")
 				continue
@@ -379,13 +341,11 @@ func (s *botService) monitorBotHeartbeats() {
 				}
 			}
 
-			// Batch update timed out bots if method is available
+			// Batch update timed out bots
 			if len(timedOutBots) > 0 {
 				ctxWithTimeout, cancel := context.WithTimeout(s.ctx, 10*time.Second)
-				if err := s.state.BatchUpdateBotStatus(ctxWithTimeout, timedOutBots, common.BotStatusTimedOut); err != nil {
-					if !errors.IsMethodNotFound(err) {
-						s.logger.WithError(err).Error("Failed to batch update bot statuses")
-					}
+				if err := s.botRepo.BatchUpdateStatus(ctxWithTimeout, timedOutBots, common.BotStatusTimedOut); err != nil {
+					s.logger.WithError(err).Error("Failed to batch update bot statuses")
 				}
 				cancel()
 			}

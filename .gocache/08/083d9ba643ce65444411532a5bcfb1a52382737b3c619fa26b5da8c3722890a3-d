@@ -1,0 +1,3 @@
+./finder.go
+./statistics.go
+./finder_test.go

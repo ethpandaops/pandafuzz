@@ -3,18 +3,17 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/ethpandaops/pandafuzz/pkg/common"
+	"github.com/ethpandaops/pandafuzz/pkg/api/v1/generated"
 	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/engines/aflplusplus"
 	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/engines/honggfuzz"
 	"github.com/ethpandaops/pandafuzz/pkg/domain/fuzzer/engines/libfuzzer"
 	"github.com/google/uuid"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
@@ -38,7 +37,7 @@ func TestCoverageCollectionAFLPlusPlus(t *testing.T) {
 		for i := 0; i < 1000; i++ {
 			bitmapData[i*10] = byte(i % 256)
 		}
-		err = ioutil.WriteFile(bitmapPath, bitmapData, 0644)
+		err = os.WriteFile(bitmapPath, bitmapData, 0644)
 		require.NoError(t, err)
 
 		// Create mock plot_data file
@@ -47,24 +46,21 @@ func TestCoverageCollectionAFLPlusPlus(t *testing.T) {
 1234567890, 65536, 1000, 10, 0, 10000, 100
 1234567900, 65536, 1100, 15, 1, 20000, 150
 `
-		err = ioutil.WriteFile(plotDataPath, []byte(plotData), 0644)
+		err = os.WriteFile(plotDataPath, []byte(plotData), 0644)
 		require.NoError(t, err)
 
 		// Create coverage extractor
 		extractor := aflplusplus.NewCoverageExtractor(logger.WithField("fuzzer", "afl++"))
 
 		// Extract coverage
-		jobID := uuid.New().String()
-		report, err := extractor.ExtractCoverage(context.Background(), jobID, workDir)
+		data, err := extractor.ExtractBitmapCoverage(context.Background(), workDir)
 		require.NoError(t, err)
-		require.NotNil(t, report)
+		require.NotNil(t, data)
 
 		// Verify coverage metrics
-		require.Equal(t, jobID, report.JobID)
-		require.Equal(t, "afl++", report.FuzzerType)
-		require.Greater(t, report.EdgesCovered, 0)
-		require.Greater(t, report.TotalEdges, 0)
-		require.Greater(t, report.Coverage, 0.0)
+		require.Greater(t, data.Edges, uint64(0))
+		require.Greater(t, data.TotalEdges, uint64(0))
+		require.Greater(t, data.CoveragePercent, 0.0)
 	})
 
 	t.Run("GenerateLCOVReport", func(t *testing.T) {
@@ -74,48 +70,24 @@ func TestCoverageCollectionAFLPlusPlus(t *testing.T) {
 		err := os.MkdirAll(workDir, 0755)
 		require.NoError(t, err)
 
-		// Create mock coverage data
-		covDir := filepath.Join(workDir, "coverage")
-		err = os.MkdirAll(covDir, 0755)
-		require.NoError(t, err)
-
-		// Create a simple LCOV file
-		lcovPath := filepath.Join(covDir, "coverage.lcov")
-		lcovContent := `TN:
-SF:/test/source.c
-FN:10,test_function
-FNDA:1,test_function
-FNF:1
-FNH:1
-DA:10,1
-DA:11,1
-DA:12,0
-LF:3
-LH:2
-end_of_record
-`
-		err = ioutil.WriteFile(lcovPath, []byte(lcovContent), 0644)
+		// Create mock coverage bitmap file
+		bitmapPath := filepath.Join(workDir, "fuzz_bitmap")
+		bitmapData := make([]byte, 65536)
+		for i := 0; i < 500; i++ {
+			bitmapData[i*20] = byte(i % 256)
+		}
+		err = os.WriteFile(bitmapPath, bitmapData, 0644)
 		require.NoError(t, err)
 
 		// Extract coverage
 		extractor := aflplusplus.NewCoverageExtractor(logger.WithField("fuzzer", "afl++"))
-		jobID := uuid.New().String()
-		report, err := extractor.ExtractCoverage(context.Background(), jobID, workDir)
+		data, err := extractor.ExtractBitmapCoverage(context.Background(), workDir)
 		require.NoError(t, err)
+		require.NotNil(t, data)
 
-		// Verify LCOV report generation
-		require.NotNil(t, report)
-		require.NotEmpty(t, report.Reports)
-
-		// Check for LCOV format in reports
-		foundLCOV := false
-		for _, r := range report.Reports {
-			if r.Format == "lcov" {
-				foundLCOV = true
-				break
-			}
-		}
-		require.True(t, foundLCOV, "LCOV report should be generated")
+		lcovContent, err := extractor.ConvertToLCOV(context.Background(), data, "/bin/echo")
+		require.NoError(t, err)
+		require.Contains(t, lcovContent, "SF:/bin/echo")
 	})
 }
 
@@ -131,34 +103,22 @@ func TestCoverageCollectionLibFuzzer(t *testing.T) {
 		err := os.MkdirAll(workDir, 0755)
 		require.NoError(t, err)
 
-		// Create mock .profraw file
-		profrawPath := filepath.Join(workDir, "default.profraw")
-		// LibFuzzer profraw files have a specific header
-		profrawData := []byte{0x81, 0x52, 0x46, 0x4c, 0x50, 0x72, 0x6f, 0x66} // LLVM profraw magic
-		profrawData = append(profrawData, make([]byte, 1000)...)              // Add some data
-		err = ioutil.WriteFile(profrawPath, profrawData, 0644)
-		require.NoError(t, err)
-
-		// Create mock merge-cov output
-		mergeCovPath := filepath.Join(workDir, "merge-cov.txt")
-		mergeCovContent := `COVERED: 1234 PCs
-COVERED: 5678 features
+		// Create mock fuzzer log with coverage stats
+		logPath := filepath.Join(workDir, "fuzzer.log")
+		logContent := `#1 cov: 120 ft: 15
+#2 cov: 200 ft: 25
 `
-		err = ioutil.WriteFile(mergeCovPath, []byte(mergeCovContent), 0644)
+		err = os.WriteFile(logPath, []byte(logContent), 0644)
 		require.NoError(t, err)
 
 		// Create coverage extractor
 		extractor := libfuzzer.NewCoverageExtractor(logger.WithField("fuzzer", "libfuzzer"))
 
-		// Extract coverage
-		jobID := uuid.New().String()
-		report, err := extractor.ExtractCoverage(context.Background(), jobID, workDir)
+		// Extract basic coverage stats
+		data, err := extractor.GetBasicStats(workDir)
 		require.NoError(t, err)
-		require.NotNil(t, report)
-
-		// Verify coverage metrics
-		require.Equal(t, jobID, report.JobID)
-		require.Equal(t, "libfuzzer", report.FuzzerType)
+		require.NotNil(t, data.BasicStats)
+		require.Greater(t, data.BasicStats.ExecutedBlocks, uint64(0))
 	})
 
 	t.Run("ParseSanitizerCoverage", func(t *testing.T) {
@@ -168,43 +128,19 @@ COVERED: 5678 features
 		err := os.MkdirAll(workDir, 0755)
 		require.NoError(t, err)
 
-		// Create mock sanitizer coverage file
-		sanCovPath := filepath.Join(workDir, "coverage.sancov")
-		sanCovContent := `SF:/test/source.cpp
-FN:10,TestFunction
-FNDA:5,TestFunction
-FNF:1
-FNH:1
-DA:10,5
-DA:11,5
-DA:12,3
-DA:13,0
-LF:4
-LH:3
-end_of_record
+		// Create mock fuzzer log with coverage stats
+		logPath := filepath.Join(workDir, "fuzzer.log")
+		logContent := `#1 cov: 50 ft: 5
+#2 cov: 80 ft: 10
 `
-		err = ioutil.WriteFile(sanCovPath, []byte(sanCovContent), 0644)
+		err = os.WriteFile(logPath, []byte(logContent), 0644)
 		require.NoError(t, err)
 
-		// Extract coverage
+		// Extract coverage with fallback to basic stats
 		extractor := libfuzzer.NewCoverageExtractor(logger.WithField("fuzzer", "libfuzzer"))
-		jobID := uuid.New().String()
-		report, err := extractor.ExtractCoverage(context.Background(), jobID, workDir)
+		data, err := extractor.GenerateCoverageReport(workDir, "/bin/echo", "json")
 		require.NoError(t, err)
-
-		// Verify sanitizer coverage is parsed
-		require.NotNil(t, report)
-		if len(report.Reports) > 0 {
-			// Check if sanitizer format is included
-			foundSanitizer := false
-			for _, r := range report.Reports {
-				if strings.Contains(r.Format, "sanitizer") || strings.Contains(r.Format, "sancov") {
-					foundSanitizer = true
-					break
-				}
-			}
-			require.True(t, foundSanitizer || len(report.Reports) > 0, "Coverage report should be generated")
-		}
+		require.NotNil(t, data.BasicStats)
 	})
 }
 
@@ -236,26 +172,23 @@ Coverage:
   Edges: 567/1500 (37.8%)
 ====================================================
 `
-		err = ioutil.WriteFile(reportPath, []byte(reportContent), 0644)
+		err = os.WriteFile(reportPath, []byte(reportContent), 0644)
 		require.NoError(t, err)
 
 		// Create coverage extractor
 		extractor := honggfuzz.NewCoverageExtractor(logger.WithField("fuzzer", "honggfuzz"))
 
 		// Extract coverage
-		jobID := uuid.New().String()
-		report, err := extractor.ExtractCoverage(context.Background(), jobID, workDir)
+		data, err := extractor.ExtractCoverageFromReport(context.Background(), workDir)
 		require.NoError(t, err)
-		require.NotNil(t, report)
+		require.NotNil(t, data)
 
 		// Verify coverage metrics
-		require.Equal(t, jobID, report.JobID)
-		require.Equal(t, "honggfuzz", report.FuzzerType)
-		require.Greater(t, report.Coverage, 0.0)
+		require.Greater(t, data.EdgeCoverage, 0.0)
 
 		// Verify branch coverage parsing
-		require.Equal(t, 1234, report.BranchesCovered)
-		require.Equal(t, 5678, report.TotalBranches)
+		require.Equal(t, uint64(1234), data.BranchHits)
+		require.Equal(t, uint64(5678), data.BranchCount)
 	})
 
 	t.Run("GenerateJSONCoverage", func(t *testing.T) {
@@ -265,43 +198,33 @@ Coverage:
 		err := os.MkdirAll(workDir, 0755)
 		require.NoError(t, err)
 
-		// Create mock coverage files
-		covDir := filepath.Join(workDir, "cov")
-		err = os.MkdirAll(covDir, 0755)
-		require.NoError(t, err)
-
-		// Create a coverage JSON file
-		jsonCovPath := filepath.Join(covDir, "coverage.json")
-		jsonContent := `{
-			"coverage": {
-				"branches": { "covered": 500, "total": 1000 },
-				"lines": { "covered": 800, "total": 1500 },
-				"functions": { "covered": 50, "total": 100 }
-			}
-		}`
-		err = ioutil.WriteFile(jsonCovPath, []byte(jsonContent), 0644)
+		// Create mock Honggfuzz report file
+		reportPath := filepath.Join(workDir, "HONGGFUZZ.REPORT.TXT")
+		reportContent := `====================================================
+Iterations: 20000
+Start time: 2024-01-01 00:00:00
+====================================================
+Crashes: 1
+Unique crashes: 1
+Timeout crashes: 0
+====================================================
+Coverage:
+  Branches: 500/1000 (50.0%)
+  Basic blocks: 800/1500 (53.3%)
+  Edges: 600/1200 (50.0%)
+====================================================
+`
+		err = os.WriteFile(reportPath, []byte(reportContent), 0644)
 		require.NoError(t, err)
 
 		// Extract coverage
 		extractor := honggfuzz.NewCoverageExtractor(logger.WithField("fuzzer", "honggfuzz"))
-		jobID := uuid.New().String()
-		report, err := extractor.ExtractCoverage(context.Background(), jobID, workDir)
+		data, err := extractor.ExtractCoverageFromReport(context.Background(), workDir)
 		require.NoError(t, err)
 
-		// Verify JSON report generation
-		require.NotNil(t, report)
-		require.NotEmpty(t, report.Reports)
-
-		// Check for JSON format in reports
-		foundJSON := false
-		for _, r := range report.Reports {
-			if r.Format == "json" {
-				foundJSON = true
-				require.NotEmpty(t, r.FilePath)
-				break
-			}
-		}
-		require.True(t, foundJSON, "JSON coverage report should be generated")
+		jsonContent, err := extractor.ConvertToJSON(context.Background(), data)
+		require.NoError(t, err)
+		require.Contains(t, jsonContent, "\"edge_coverage\"")
 	})
 }
 
@@ -311,23 +234,38 @@ func TestCoverageAPIIntegration(t *testing.T) {
 	// For now, we test that the coverage structures are properly defined
 
 	t.Run("CoverageReportStructure", func(t *testing.T) {
-		report := &common.CoverageReport{
-			JobID:           uuid.New().String(),
-			FuzzerType:      "afl++",
-			CreatedAt:       time.Now(),
-			Coverage:        75.5,
-			LinesCovered:    1500,
-			TotalLines:      2000,
-			BranchesCovered: 800,
-			TotalBranches:   1000,
-			EdgesCovered:    600,
-			TotalEdges:      800,
+		jobID := openapi_types.UUID(uuid.New())
+		reportID := openapi_types.UUID(uuid.New())
+		coveragePercent := float32(75.5)
+		coveredLines := 1500
+		totalLines := 2000
+		report := &generated.CoverageReport{
+			Id:        reportID,
+			JobId:     jobID,
+			Format:    generated.CoverageFormat("json"),
+			CreatedAt: time.Now(),
+			SizeBytes: 1024,
+			CoverageMetrics: &struct {
+				BranchCoveragePercent   *float32 `json:"branch_coverage_percent,omitempty"`
+				CoveredBranches         *int     `json:"covered_branches,omitempty"`
+				CoveredFunctions        *int     `json:"covered_functions,omitempty"`
+				CoveredLines            *int     `json:"covered_lines,omitempty"`
+				FunctionCoveragePercent *float32 `json:"function_coverage_percent,omitempty"`
+				LineCoveragePercent     *float32 `json:"line_coverage_percent,omitempty"`
+				TotalBranches           *int     `json:"total_branches,omitempty"`
+				TotalFunctions          *int     `json:"total_functions,omitempty"`
+				TotalLines              *int     `json:"total_lines,omitempty"`
+			}{
+				LineCoveragePercent: &coveragePercent,
+				CoveredLines:        &coveredLines,
+				TotalLines:          &totalLines,
+			},
 		}
 
-		require.NotEmpty(t, report.JobID)
-		require.NotEmpty(t, report.FuzzerType)
-		require.Greater(t, report.Coverage, 0.0)
-		require.LessOrEqual(t, report.Coverage, 100.0)
+		require.NotEqual(t, openapi_types.UUID{}, report.JobId)
+		require.Equal(t, generated.CoverageFormat("json"), report.Format)
+		require.NotNil(t, report.CoverageMetrics)
+		require.Greater(t, *report.CoverageMetrics.LineCoveragePercent, float32(0))
 	})
 
 	t.Run("CoverageEndpointPath", func(t *testing.T) {
@@ -392,24 +330,22 @@ func TestCoverageDataPersistence(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create a coverage report
-		report := &common.CoverageReport{
-			JobID:           uuid.New().String(),
-			FuzzerType:      "libfuzzer",
-			CreatedAt:       time.Now(),
-			Coverage:        82.5,
-			LinesCovered:    1650,
-			TotalLines:      2000,
-			BranchesCovered: 900,
-			TotalBranches:   1100,
+		jobID := openapi_types.UUID(uuid.New())
+		report := &generated.CoverageReport{
+			Id:        openapi_types.UUID(uuid.New()),
+			JobId:     jobID,
+			Format:    generated.CoverageFormat("json"),
+			CreatedAt: time.Now(),
+			SizeBytes: 2048,
 		}
 
 		// Simulate storing the report (in real implementation, this would use the storage backend)
-		reportPath := filepath.Join(storageDir, fmt.Sprintf("%s_coverage.json", report.JobID))
+		reportPath := filepath.Join(storageDir, fmt.Sprintf("%s_coverage.json", report.JobId.String()))
 		// In production, this would be handled by the storage layer
 		require.NotEmpty(t, reportPath)
 
 		// Verify report can be retrieved
 		require.NotNil(t, report)
-		require.Equal(t, 82.5, report.Coverage)
+		require.Equal(t, jobID, report.JobId)
 	})
 }

@@ -1,0 +1,7 @@
+# test log
+getenv TMPDIR
+stat /tmp/TestPhantomJobDetection4253826812/001
+open /tmp
+getenv TMPDIR
+stat /tmp/TestJobTimeoutAndReassignment30932670/001
+open /tmp

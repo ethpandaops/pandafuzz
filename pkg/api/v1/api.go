@@ -56,6 +56,10 @@ type Config struct {
 
 	// Request size limits
 	MaxRequestSize int64 `yaml:"max_request_size" json:"max_request_size"`
+	// Upload limits
+	MaxCrashFileSize      int64    `yaml:"max_crash_file_size" json:"max_crash_file_size"`
+	MaxCorpusFileSize     int64    `yaml:"max_corpus_file_size" json:"max_corpus_file_size"`
+	AllowedFileExtensions []string `yaml:"allowed_file_extensions" json:"allowed_file_extensions"`
 
 	// SSE configuration
 	SSEEnabled bool       `yaml:"sse_enabled" json:"sse_enabled"`
@@ -76,17 +80,15 @@ type Config struct {
 // Services represents the domain services needed by the API
 type Services struct {
 	// Core services
-	Bot             service.BotService
-	Job             service.JobService
-	Campaign        common.CampaignService
-	Corpus          common.CorpusService
-	Result          service.ResultService
-	System          service.SystemService
-	Monitoring      service.MonitoringService
-	Reproducibility common.ReproducibilityService
-	CrashMinimizer  common.CrashMinimizerService
-	Deduplication   common.DeduplicationService
-	Analytics       service.AnalyticsService
+	Bot           service.BotService
+	Job           service.JobService
+	Campaign      common.CampaignService
+	Corpus        common.CorpusService
+	Result        service.ResultService
+	System        service.SystemService
+	Monitoring    service.MonitoringService
+	Deduplication common.DeduplicationService
+	Analytics     service.AnalyticsService
 
 	// Storage
 	Storage     common.Storage
@@ -106,15 +108,18 @@ type Services struct {
 // DefaultConfig returns sensible defaults for API configuration
 func DefaultConfig() *Config {
 	return &Config{
-		EnableAuth:             false,
+		EnableAuth:             true,
 		EnableCORS:             true,
 		CORSOrigins:            []string{"*"},
 		CORSAllowHeaders:       []string{"*"},
 		CORSAllowMethods:       []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
-		RateLimit:              1000,
-		RateLimitBurst:         2000,
+		RateLimit:              100, // Reduced from 1000 for security
+		RateLimitBurst:         200, // Reduced from 2000 for security
 		RateLimitWindow:        time.Minute,
 		MaxRequestSize:         10 * 1024 * 1024, // 10MB
+		MaxCrashFileSize:       10 * 1024 * 1024, // 10MB
+		MaxCorpusFileSize:      1024 * 1024,      // 1MB
+		AllowedFileExtensions:  []string{".txt", ".bin", ".data", ".input"},
 		SSEEnabled:             true,
 		SSEConfig:              sse.DefaultConfig(),
 		EnableTracing:          true,
@@ -134,6 +139,9 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 	}
 	if logger == nil {
 		return nil, fmt.Errorf("logger is required")
+	}
+	if config.EnableAuth && config.JWTSecret == "" && len(config.APIKeys) == 0 {
+		return nil, fmt.Errorf("authentication enabled but jwt_secret and api_keys are empty")
 	}
 
 	apiLogger := logger.WithField("component", "api_v1")
@@ -163,6 +171,7 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 		services.FileStorage,
 		sseManager,
 		apiLogger,
+		config.MaxRequestSize,
 	)
 
 	campaignAdapter := adapters.NewCampaignAdapter(
@@ -176,8 +185,13 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 	corpusAdapter := adapters.NewCorpusAdapter(
 		services.Corpus,
 		services.Storage,
+		services.FileStorage,
 		sseManager,
 		apiLogger,
+		adapters.CorpusAdapterOptions{
+			MaxFileSize: config.MaxCorpusFileSize,
+			AllowedExts: config.AllowedFileExtensions,
+		},
 	)
 
 	// Create crash adapter
@@ -185,8 +199,6 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 		services.CrashRepo,
 		services.Storage,
 		services.Deduplication,
-		services.CrashMinimizer,
-		services.Reproducibility,
 		sseManager,
 		apiLogger,
 	)
@@ -205,10 +217,11 @@ func NewAPI(config *Config, services Services, logger logrus.FieldLogger) (*API,
 	systemAdapter := adapters.NewSystemAdapter(
 		services.Bot,
 		services.Job,
-		services.Storage,
+		services.Result,
 		sseManager,
 		nil, // VersionInfo - can be passed if available
 		apiLogger,
+		config.MaxCrashFileSize,
 	)
 
 	// Create composite adapter
@@ -277,6 +290,13 @@ func buildMiddlewareStack(config *Config, logger logrus.FieldLogger) *middleware
 			TTL:       config.RateLimitWindow,
 			SkipPaths: []string{"/health", "/ready"},
 			Logger:    logger.WithField("middleware", "ratelimit"),
+			// Endpoint-specific rate limits for expensive operations
+			EndpointLimits: map[string]middleware.EndpointLimit{
+				"POST /api/v1/jobs":          {Rate: 10, Window: time.Minute}, // Job creation: 10/min
+				"POST /api/v1/corpus":        {Rate: 20, Window: time.Minute}, // Corpus upload: 20/min
+				"POST /api/v1/bots/register": {Rate: 5, Window: time.Minute},  // Bot registration: 5/min
+				"POST /api/v1/campaigns":     {Rate: 10, Window: time.Minute}, // Campaign creation: 10/min
+			},
 		}
 		stack = stack.WithRateLimitConfig(rateLimitConfig)
 	}
@@ -298,11 +318,29 @@ func buildMiddlewareStack(config *Config, logger logrus.FieldLogger) *middleware
 	}
 
 	// Configure authentication if enabled
-	if config.EnableAuth && config.JWTSecret != "" {
+	if config.EnableAuth {
+		var apiKeyValidator middleware.APIKeyValidator
+		if len(config.APIKeys) > 0 {
+			apiKeyValidator = func(apiKey string) (*middleware.APIKeyInfo, error) {
+				name, exists := config.APIKeys[apiKey]
+				if !exists {
+					return nil, fmt.Errorf("invalid api key")
+				}
+				return &middleware.APIKeyInfo{
+					KeyID:       apiKey,
+					Name:        name,
+					Permissions: []string{"*"},
+					RateLimit:   0,
+					CreatedAt:   time.Now(),
+				}, nil
+			}
+		}
+
 		authConfig := &middleware.AuthConfig{
-			JWTSecret: config.JWTSecret,
-			SkipPaths: []string{"/health", "/ready", "/metrics"},
-			Logger:    logger.WithField("middleware", "auth"),
+			JWTSecret:       config.JWTSecret,
+			APIKeyValidator: apiKeyValidator,
+			SkipPaths:       []string{"/health", "/ready", "/metrics"},
+			Logger:          logger.WithField("middleware", "auth"),
 		}
 		stack = stack.WithAuthConfig(authConfig)
 	}

@@ -177,13 +177,6 @@ func (cc *CoverageCollector) generateCoverageFile(ctx context.Context, job *comm
 	return data, format, nil
 }
 
-// generateAFLCoverage is deprecated - AFL++ now only uses raw coverage
-// Raw coverage files are collected directly via CollectAndStoreRawAFLFiles
-// This function is kept for reference but should not be called
-func (cc *CoverageCollector) generateAFLCoverage(ctx context.Context, job *common.Job, format string) ([]byte, error) {
-	return nil, fmt.Errorf("AFL++ coverage should use raw format via CollectAndStoreRawAFLFiles")
-}
-
 // generateLibFuzzerCoverage generates coverage data for LibFuzzer
 func (cc *CoverageCollector) generateLibFuzzerCoverage(ctx context.Context, job *common.Job, format string) ([]byte, error) {
 	profdataPath := filepath.Join(job.WorkDir, "default.profdata")
