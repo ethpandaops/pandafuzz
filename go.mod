@@ -1,8 +1,6 @@
 module github.com/ethpandaops/pandafuzz
 
-go 1.23.0
-
-toolchain go1.24.4
+go 1.26.10
 
 require (
 	github.com/getkin/kin-openapi v0.132.0
